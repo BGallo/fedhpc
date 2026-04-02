@@ -1,0 +1,37 @@
+{
+  "horizon": 50,
+  "budget": 5000,
+  "instance_types": [
+    {
+      "id": 0, "kind": "on-prem",
+      "perf": 1.0, "io_time": 0.0, "deploy": 0,
+      "cost_io": 0.0, "cost_vm": 0.0, "cost_stor": 0.0,
+      "cpu": 32, "mem": 128, "stor": 2000
+    },
+    {
+      "id": 1, "kind": "on-prem",
+      "perf": 1.5, "io_time": 0.0, "deploy": 0,
+      "cost_io": 0.0, "cost_vm": 0.0, "cost_stor": 0.0,
+      "cpu": 64, "mem": 256, "stor": 4000
+    },
+    {
+      "id": 2, "kind": "cloud",
+      "perf": 2.0, "io_time": 0.0, "deploy": 2,
+      "cost_io": 0.5, "cost_vm": 1.0, "cost_stor": 0.01,
+      "cpu": 16, "mem": 64, "stor": 1000
+    },
+    {
+      "id": 3, "kind": "cloud",
+      "perf": 3.0, "io_time": 0.0, "deploy": 3,
+      "cost_io": 1.0, "cost_vm": 2.0, "cost_stor": 0.02,
+      "cpu": 64, "mem": 256, "stor": 5000
+    }
+  ],
+  "jobs": [
+    {"id": 0, "arrival": 0, "exec_time": 10, "io_volume": 0, "cpu": 8,  "mem": 32,  "stor": 500},
+    {"id": 1, "arrival": 2, "exec_time": 8,  "io_volume": 0, "cpu": 4,  "mem": 16,  "stor": 200},
+    {"id": 2, "arrival": 5, "exec_time": 15, "io_volume": 0, "cpu": 16, "mem": 64,  "stor": 800},
+    {"id": 3, "arrival": 0, "exec_time": 6,  "io_volume": 0, "cpu": 2,  "mem": 8,   "stor": 100},
+    {"id": 4, "arrival": 8, "exec_time": 12, "io_volume": 0, "cpu": 32, "mem": 128, "stor": 1500}
+  ]
+}

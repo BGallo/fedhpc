@@ -1,0 +1,25 @@
+[project]
+name = "fedhpc"
+version = "0.1.0"
+description = "Multi-objective MIP scheduler for HPC jobs in federated multi-platform environments"
+readme = "README.md"
+authors = [
+    { name = "Bernardo Gallo Victorino dos Santos", email = "bgallo@id.uff.br" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "gurobipy>=13.0.1",
+    "numpy>=2.4.4",
+]
+
+[project.scripts]
+fedhpc = "fedhpc:main"
+
+[build-system]
+requires = ["uv_build>=0.11.2,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
