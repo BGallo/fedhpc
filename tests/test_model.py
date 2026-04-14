@@ -3,6 +3,7 @@ import math
 import pytest
 
 from fedhpc.data import Instance, InstanceType, Job
+from fedhpc.formulations import OccupancyFormulation, SpaceTimeFormulation
 from fedhpc.model import solve_epsilon_cost, solve_f1, solve_f2, solve_weighted_sum
 
 
@@ -319,3 +320,78 @@ class TestSmallInstance:
         sol = solve_f1(small_instance)
         for c in sol.completion.values():
             assert c <= small_instance.horizon
+
+
+# ---------------------------------------------------------------------------
+# Capacity constraints
+# ---------------------------------------------------------------------------
+
+class TestCapacity:
+    @pytest.fixture
+    def capped_instance(self) -> Instance:
+        """2 jobs that both want the same on-prem type, capped at 1 instance."""
+        instance_types = [
+            InstanceType(id=0, kind="on-prem",
+                         perf=1.0, io_time=0.0, deploy=0,
+                         cost_io=0.0, cost_vm=0.0, cost_stor=0.0,
+                         cpu=8, mem=16, stor=200, capacity=1),
+        ]
+        jobs = [
+            Job(id=0, arrival=0, exec_time=5, io_volume=0, cpu=4, mem=8, stor=50),
+            Job(id=1, arrival=0, exec_time=5, io_volume=0, cpu=4, mem=8, stor=50),
+        ]
+        inst = Instance(jobs=jobs, instance_types=instance_types, horizon=20, budget=1e6)
+        inst.build()
+        return inst
+
+    @pytest.fixture
+    def uncapped_instance(self) -> Instance:
+        """Same setup but capacity=None — both jobs may run concurrently."""
+        instance_types = [
+            InstanceType(id=0, kind="on-prem",
+                         perf=1.0, io_time=0.0, deploy=0,
+                         cost_io=0.0, cost_vm=0.0, cost_stor=0.0,
+                         cpu=8, mem=16, stor=200, capacity=None),
+        ]
+        jobs = [
+            Job(id=0, arrival=0, exec_time=5, io_volume=0, cpu=4, mem=8, stor=50),
+            Job(id=1, arrival=0, exec_time=5, io_volume=0, cpu=4, mem=8, stor=50),
+        ]
+        inst = Instance(jobs=jobs, instance_types=instance_types, horizon=20, budget=1e6)
+        inst.build()
+        return inst
+
+    def test_capacity_1_forces_sequential(self, capped_instance):
+        """With capacity=1 only one job can run at a time: makespan ≥ 2*p_occ."""
+        sol = solve_f1(capped_instance)
+        assert sol.status == "optimal"
+        starts = {jid: t for jid, (_, t) in sol.assignment.items()}
+        # Jobs must not overlap: one must start after the other finishes (p_occ=5)
+        t0, t1 = starts[0], starts[1]
+        assert abs(t0 - t1) >= 5
+
+    def test_capacity_none_allows_concurrent(self, uncapped_instance):
+        """With no capacity limit both jobs can start at t=0."""
+        sol = solve_f1(uncapped_instance)
+        assert sol.status == "optimal"
+        starts = {jid: t for jid, (_, t) in sol.assignment.items()}
+        assert starts[0] == 0 and starts[1] == 0
+
+    def test_capacity_respected_in_spacetime(self, capped_instance):
+        """K_m must not exceed the declared capacity."""
+        from fedhpc.formulations import SpaceTimeFormulation
+        import gurobipy as gp
+        fmt = SpaceTimeFormulation()
+        mdl, vars = fmt.build(capped_instance)
+        mdl.setObjective(fmt.f1_expr(capped_instance, vars["x"]), gp.GRB.MINIMIZE)
+        mdl.optimize()
+        K_val = vars["K"][0].X
+        assert K_val <= 1 + 1e-6
+
+    def test_capacity_occupancy_formulation(self, capped_instance):
+        """OccupancyFormulation also enforces the capacity via w bound."""
+        sol = solve_f1(capped_instance, formulation=OccupancyFormulation())
+        assert sol.status == "optimal"
+        starts = {jid: t for jid, (_, t) in sol.assignment.items()}
+        t0, t1 = starts[0], starts[1]
+        assert abs(t0 - t1) >= 5

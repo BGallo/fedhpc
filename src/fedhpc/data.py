@@ -40,6 +40,7 @@ class InstanceType:
     cpu: float           # C^cpu_m
     mem: float           # C^mem_m
     stor: float          # C^stor_m
+    capacity: int | None = None  # max simultaneous instances (None = unlimited)
 
 
 @dataclass

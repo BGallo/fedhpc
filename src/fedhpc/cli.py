@@ -7,8 +7,14 @@ import json
 import sys
 
 from .data import Instance
+from .formulations import OccupancyFormulation, SpaceTimeFormulation
 from .model import solve_epsilon_cost, solve_epsilon_turnaround, solve_f1, solve_f2, solve_weighted_sum
 from .pareto import epsilon_constraint_frontier, weighted_sum_frontier
+
+_FORMULATIONS = {
+    "spacetime": SpaceTimeFormulation,
+    "occupancy": OccupancyFormulation,
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,6 +36,13 @@ def build_parser() -> argparse.ArgumentParser:
                        "  epsilon-t   — ε-constraint min f2 s.t. f1≤ε (needs --epsilon)\n"
                        "  pareto-ws   — Pareto frontier via weighted-sum sweep\n"
                        "  pareto-eps  — Pareto frontier via ε-constraint sweep\n"
+                   ))
+    p.add_argument("--formulation", default="spacetime",
+                   choices=list(_FORMULATIONS),
+                   help=(
+                       "MIP formulation to use (default: spacetime):\n"
+                       "  spacetime  — space-time network with flow conservation (fedhpc-1.pdf)\n"
+                       "  occupancy  — occupancy-equality formulation\n"
                    ))
     p.add_argument("--alpha", type=float, default=0.5,
                    help="Weight for f1 in [0,1] (used by 'weighted' and 'pareto-ws'). Default: 0.5.")
@@ -57,6 +70,8 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Error loading instance: {e}", file=sys.stderr)
         sys.exit(1)
 
+    formulation = _FORMULATIONS[args.formulation]()
+
     gurobi_params: dict = {
         "TimeLimit": args.time_limit,
         "MIPGap": args.mip_gap,
@@ -69,44 +84,50 @@ def main(argv: list[str] | None = None) -> None:
     # ---- Single-solution methods ------------------------------------------
 
     if method == "f1":
-        sol = solve_f1(inst, **gurobi_params)
+        sol = solve_f1(inst, formulation=formulation, **gurobi_params)
         _print_single(sol, args.json)
 
     elif method == "f2":
-        sol = solve_f2(inst, **gurobi_params)
+        sol = solve_f2(inst, formulation=formulation, **gurobi_params)
         _print_single(sol, args.json)
 
     elif method == "weighted":
-        # Need anchor points for normalisation — solve mono-objectives first
         from .pareto import _anchor_points
-        f1_min, f1_max, _, f2_max = _anchor_points(inst, **gurobi_params)
-        sol = solve_weighted_sum(inst, args.alpha,
-                                 f1_min=f1_min, f1_max=f1_max, f2_max=f2_max,
-                                 **gurobi_params)
+        f1_min, f1_max, _, f2_max = _anchor_points(inst, formulation=formulation, **gurobi_params)
+        sol = solve_weighted_sum(
+            inst, args.alpha,
+            f1_min=f1_min, f1_max=f1_max, f2_max=f2_max,
+            formulation=formulation,
+            **gurobi_params,
+        )
         _print_single(sol, args.json)
 
     elif method == "epsilon":
         if args.epsilon is None:
             print("--epsilon is required for method 'epsilon'.", file=sys.stderr)
             sys.exit(1)
-        sol = solve_epsilon_cost(inst, args.epsilon, **gurobi_params)
+        sol = solve_epsilon_cost(inst, args.epsilon, formulation=formulation, **gurobi_params)
         _print_single(sol, args.json)
 
     elif method == "epsilon-t":
         if args.epsilon is None:
             print("--epsilon is required for method 'epsilon-t'.", file=sys.stderr)
             sys.exit(1)
-        sol = solve_epsilon_turnaround(inst, args.epsilon, **gurobi_params)
+        sol = solve_epsilon_turnaround(inst, args.epsilon, formulation=formulation, **gurobi_params)
         _print_single(sol, args.json)
 
     # ---- Pareto frontier methods ------------------------------------------
 
     elif method == "pareto-ws":
-        solutions = weighted_sum_frontier(inst, n_points=args.steps, **gurobi_params)
+        solutions = weighted_sum_frontier(
+            inst, n_points=args.steps, formulation=formulation, **gurobi_params
+        )
         _print_pareto(solutions, args.json)
 
     elif method == "pareto-eps":
-        solutions = epsilon_constraint_frontier(inst, n_points=args.steps, **gurobi_params)
+        solutions = epsilon_constraint_frontier(
+            inst, n_points=args.steps, formulation=formulation, **gurobi_params
+        )
         _print_pareto(solutions, args.json)
 
 

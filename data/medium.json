@@ -1,0 +1,154 @@
+{
+  "horizon": 30,
+  "budget": 349.87,
+  "instance_types": [
+    {
+      "id": 0,
+      "kind": "on-prem",
+      "perf": 1.0,
+      "io_time": 0.0,
+      "deploy": 0,
+      "cost_io": 0.0,
+      "cost_vm": 0.0,
+      "cost_stor": 0.0,
+      "cpu": 32,
+      "mem": 128,
+      "stor": 2000,
+      "capacity": 3
+    },
+    {
+      "id": 1,
+      "kind": "on-prem",
+      "perf": 1.5,
+      "io_time": 0.0,
+      "deploy": 0,
+      "cost_io": 0.0,
+      "cost_vm": 0.0,
+      "cost_stor": 0.0,
+      "cpu": 64,
+      "mem": 256,
+      "stor": 4000,
+      "capacity": 3
+    },
+    {
+      "id": 2,
+      "kind": "cloud",
+      "perf": 2.0,
+      "io_time": 0.5,
+      "deploy": 2,
+      "cost_io": 0.5,
+      "cost_vm": 1.0,
+      "cost_stor": 0.01,
+      "cpu": 16,
+      "mem": 64,
+      "stor": 1000,
+      "capacity": null
+    },
+    {
+      "id": 3,
+      "kind": "cloud",
+      "perf": 3.0,
+      "io_time": 0.5,
+      "deploy": 3,
+      "cost_io": 1.0,
+      "cost_vm": 2.0,
+      "cost_stor": 0.02,
+      "cpu": 64,
+      "mem": 256,
+      "stor": 5000,
+      "capacity": null
+    }
+  ],
+  "jobs": [
+    {
+      "id": 0,
+      "arrival": 0,
+      "exec_time": 13,
+      "io_volume": 2,
+      "cpu": 4,
+      "mem": 62,
+      "stor": 724
+    },
+    {
+      "id": 1,
+      "arrival": 3,
+      "exec_time": 12,
+      "io_volume": 1,
+      "cpu": 4,
+      "mem": 24,
+      "stor": 362
+    },
+    {
+      "id": 2,
+      "arrival": 10,
+      "exec_time": 6,
+      "io_volume": 4,
+      "cpu": 11,
+      "mem": 56,
+      "stor": 201
+    },
+    {
+      "id": 3,
+      "arrival": 8,
+      "exec_time": 7,
+      "io_volume": 1,
+      "cpu": 11,
+      "mem": 16,
+      "stor": 442
+    },
+    {
+      "id": 4,
+      "arrival": 7,
+      "exec_time": 5,
+      "io_volume": 1,
+      "cpu": 4,
+      "mem": 7,
+      "stor": 210
+    },
+    {
+      "id": 5,
+      "arrival": 7,
+      "exec_time": 15,
+      "io_volume": 3,
+      "cpu": 10,
+      "mem": 23,
+      "stor": 234
+    },
+    {
+      "id": 6,
+      "arrival": 2,
+      "exec_time": 5,
+      "io_volume": 2,
+      "cpu": 4,
+      "mem": 14,
+      "stor": 278
+    },
+    {
+      "id": 7,
+      "arrival": 2,
+      "exec_time": 8,
+      "io_volume": 2,
+      "cpu": 2,
+      "mem": 10,
+      "stor": 183
+    },
+    {
+      "id": 8,
+      "arrival": 1,
+      "exec_time": 15,
+      "io_volume": 3,
+      "cpu": 21,
+      "mem": 99,
+      "stor": 689
+    },
+    {
+      "id": 9,
+      "arrival": 2,
+      "exec_time": 10,
+      "io_volume": 3,
+      "cpu": 29,
+      "mem": 118,
+      "stor": 1726
+    }
+  ]
+}
