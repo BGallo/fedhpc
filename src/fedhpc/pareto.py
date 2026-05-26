@@ -5,20 +5,36 @@ import numpy as np
 
 from .data import Instance
 from .formulations import Formulation
-from .model import Solution, solve_epsilon_cost, solve_f1, solve_f2, solve_weighted_sum
+from .model import Solution, solve_epsilon_cost, solve_epsilon_turnaround, solve_f1, solve_weighted_sum
 
 
-def _anchor_points(inst: Instance, formulation: Formulation | None = None, **params):
-    sol_f1 = solve_f1(inst, formulation=formulation, **params)
-    sol_f2 = solve_f2(inst, formulation=formulation, **params)
-    if sol_f1.f1 is None:
-        raise RuntimeError("Could not solve mono-objective f1.")
-    if sol_f2.f2 is None:
-        raise RuntimeError("Could not solve mono-objective f2.")
-    f1_min = sol_f1.f1
-    f1_max = max(sol_f2.f1, f1_min + 1e-6)
-    f2_max = max(sol_f1.f2, 1e-6)
-    return f1_min, f1_max, 0.0, f2_max
+def _reference_points(
+    inst: Instance, formulation: Formulation | None = None, **params
+) -> tuple[float, float, float]:
+    """Compute the three reference points from fedhpc.pdf Section 1.10.
+
+    Returns
+    -------
+    f1_T  — f1^T: lexicographic minimum turnaround (min f1 over all feasible x).
+    f2_T  — f2^T: minimum cost at f1^T (min f2 s.t. f1 = f1^T).
+    f1_0  — f1^0: minimum turnaround at zero cost (min f1 s.t. f2 = 0).
+    """
+    sol_f1T = solve_f1(inst, formulation=formulation, **params)
+    if sol_f1T.f1 is None:
+        raise RuntimeError("Could not solve min-turnaround problem.")
+    f1_T = sol_f1T.f1
+
+    sol_f2T = solve_epsilon_turnaround(inst, epsilon=f1_T, formulation=formulation, **params)
+    if sol_f2T.f2 is None:
+        raise RuntimeError("Could not solve min-cost at f1^T problem.")
+    f2_T = sol_f2T.f2
+
+    sol_f10 = solve_epsilon_cost(inst, epsilon=0.0, formulation=formulation, **params)
+    if sol_f10.f1 is None:
+        raise RuntimeError("Could not solve min-turnaround at zero-cost problem.")
+    f1_0 = sol_f10.f1
+
+    return f1_T, f2_T, f1_0
 
 
 def weighted_sum_frontier(
@@ -27,12 +43,12 @@ def weighted_sum_frontier(
     formulation: Formulation | None = None,
     **params,
 ) -> list[Solution]:
-    f1_min, f1_max, _, f2_max = _anchor_points(inst, formulation=formulation, **params)
+    f1_T, f2_T, f1_0 = _reference_points(inst, formulation=formulation, **params)
     solutions = []
-    for alpha in np.linspace(0.0, 1.0, n_points):
+    for lam in np.linspace(0.0, 1.0, n_points):
         sol = solve_weighted_sum(
-            inst, float(alpha),
-            f1_min=f1_min, f1_max=f1_max, f2_max=f2_max,
+            inst, float(lam),
+            f1_T=f1_T, f2_T=f2_T, f1_0=f1_0,
             formulation=formulation,
             **params,
         )
@@ -47,8 +63,8 @@ def epsilon_constraint_frontier(
     formulation: Formulation | None = None,
     **params,
 ) -> list[Solution]:
-    _, _, _, f2_max = _anchor_points(inst, formulation=formulation, **params)
-    epsilons = list(np.linspace(f2_max, 0.0, n_points, endpoint=False)) + [f2_max]
+    _, f2_T, _ = _reference_points(inst, formulation=formulation, **params)
+    epsilons = list(np.linspace(f2_T, 0.0, n_points, endpoint=False)) + [f2_T]
     solutions = []
     for eps in sorted(epsilons, reverse=True):
         sol = solve_epsilon_cost(

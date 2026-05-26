@@ -7,6 +7,8 @@ Key design:
     p_bill  — billable time (no deploy penalty): used for monetary cost.
     p_occ   — occupation time (includes deploy): used for scheduling / time indexing.
 - `kind` is a display-only label; the MIP does not use it.
+- RunningJob represents a pre-scheduled job already running at t=0 that occupies
+  on-prem capacity without being re-optimized.
 """
 from __future__ import annotations
 
@@ -44,13 +46,42 @@ class InstanceType:
 
 
 @dataclass
+class RunningJob:
+    """A job already running at t=0 that pre-occupies on-prem capacity.
+
+    RunningJobs are *not* re-optimized — they are fixed in the initial state.
+    The formulations use them to reduce available capacity at t=0 and to model
+    when those slots become free again as the jobs finish.
+
+    Fields
+    ------
+    id       : identifier for display / debugging (e.g. original Slurm job ID).
+    type_id  : which InstanceType it occupies (must be on-prem, i.e. finite capacity).
+    end      : slot at which it finishes (exclusive); must satisfy end >= 1.
+               Values beyond the planning horizon are clipped to ``horizon`` during
+               ``Instance.build()``, so the slot is returned at the very last step.
+    """
+    id: int
+    type_id: int
+    end: int             # slot when the job finishes (exclusive); >= 1
+
+
+@dataclass
 class Instance:
     jobs: list[Job]
     instance_types: list[InstanceType]
     horizon: int         # H  (integer — discrete time steps 0..H)
     budget: float        # B
 
-    # Populated by build()
+    # Pre-assigned jobs already running at t=0 (optional; default: empty cluster).
+    running_jobs: list[RunningJob] = field(default_factory=list)
+
+    # Wall-clock duration of one slot, used for human-readable output only.
+    # Read from _info.fedhpc_settings.time_scale_seconds when present; else 1.0.
+    slot_size_seconds: float = 1.0
+
+    # ---- Populated by build() for new (optimizable) jobs --------------------
+
     p_bill: dict[tuple[int, int], float] = field(default_factory=dict)
     # p^bill_jm = e_j/P_m + τ^IO_m · ι_j   (float, no deploy, used for cost)
 
@@ -65,6 +96,19 @@ class Instance:
 
     T: dict[tuple[int, int], list[int]] = field(default_factory=dict)
     # T_jm = {t ∈ T : t ≥ a_j, t + p^occ_jm ≤ H}
+
+    # ---- Populated by build() for running jobs --------------------------------
+
+    n_running: dict[int, int] = field(default_factory=dict)
+    # {type_id: count of running jobs on that type at t=0}
+
+    rj_arrivals: dict[tuple[int, int], int] = field(default_factory=dict)
+    # {(type_id, slot): count of running jobs completing at that slot}
+    # Used by SpaceTimeFormulation to inject ghost completions into flow equations.
+
+    occupied: dict[tuple[int, int], int] = field(default_factory=dict)
+    # {(type_id, t): count of running jobs occupying type during [t, t+1)}
+    # Used by OccupancyFormulation to tighten the capacity upper bound on w[m,t].
 
     def build(self) -> None:
         type_map = {m.id: m for m in self.instance_types}
@@ -113,15 +157,72 @@ class Instance:
         if no_times:
             raise ValueError(f"Job-type pairs with no feasible start time: {no_times}")
 
+        # ---- Running-job derived indices ------------------------------------
+        # Each running job occupies exactly one capacity unit from slot 0 until
+        # it finishes.  Jobs finishing beyond the horizon are treated as if they
+        # finish at H (they permanently occupy a slot in the planning window).
+        #
+        # IMPORTANT: the total count per type must not exceed its capacity.
+        # Instance JSON generation should already cap the list; ``build()``
+        # enforces this by ignoring excess entries and emitting a warning.
+        capacity_map = {
+            itype.id: itype.capacity
+            for itype in self.instance_types
+            if itype.capacity is not None
+        }
+
+        for rj in self.running_jobs:
+            mid = rj.type_id
+            cap = capacity_map.get(mid)
+
+            # Silently skip if type is unknown or cloud (unlimited capacity)
+            if cap is None:
+                continue
+
+            # Enforce capacity ceiling
+            current = self.n_running.get(mid, 0)
+            if current >= cap:
+                import warnings
+                warnings.warn(
+                    f"Running jobs for type {mid} exceed capacity {cap}; "
+                    f"excess entries are ignored.",
+                    stacklevel=2,
+                )
+                continue
+
+            self.n_running[mid] = current + 1
+
+            # Clip end to horizon so the slot is returned within the window
+            end_slot = min(rj.end, self.horizon)
+
+            # Ghost completion: instance returns to idle pool at end_slot
+            key = (mid, end_slot)
+            self.rj_arrivals[key] = self.rj_arrivals.get(key, 0) + 1
+
+            # Occupancy during [0, end_slot): counts towards per-slot capacity usage
+            for t in range(end_slot):
+                self.occupied[mid, t] = self.occupied.get((mid, t), 0) + 1
+
     @classmethod
     def from_dict(cls, data: dict) -> "Instance":
         instance_types = [InstanceType(**td) for td in data["instance_types"]]
         jobs = [Job(**jd) for jd in data["jobs"]]
+        running_jobs = [RunningJob(**rd) for rd in data.get("running_jobs", [])]
+
+        # Infer slot_size_seconds from metadata when present.
+        slot_size_seconds: float = 1.0
+        info = data.get("_info", {})
+        settings = info.get("fedhpc_settings", {})
+        if "time_scale_seconds" in settings:
+            slot_size_seconds = float(settings["time_scale_seconds"])
+
         inst = cls(
             jobs=jobs,
             instance_types=instance_types,
             horizon=int(data["horizon"]),
             budget=data["budget"],
+            running_jobs=running_jobs,
+            slot_size_seconds=slot_size_seconds,
         )
         inst.build()
         return inst
