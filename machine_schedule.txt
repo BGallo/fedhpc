@@ -1,0 +1,15 @@
+FED-HPC Schedule (machine view)
+===============================
+Status    : optimal
+f1 (turnaround) : 13
+f2 (cost)       : 22.5
+
+Instance type 0  [on-prem]
+----------------------------------------
+  (no jobs assigned)
+
+Instance type 1  [cloud]
+----------------------------------------
+  job   0  |  start=   0  end=   7  duration=  7
+  job   1  |  start=   2  end=   8  duration=  6
+  peak concurrency : 2  (capacity: unlimited)

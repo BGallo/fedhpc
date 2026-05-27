@@ -2,7 +2,7 @@
 import math
 import pytest
 
-from fedhpc.data import Instance, InstanceType, Job
+from fedhpc.data import Instance, InstanceType, Job, RunningJob
 from fedhpc.formulations import OccupancyFormulation, SpaceTimeFormulation
 from fedhpc.model import solve_epsilon_cost, solve_f1, solve_f2, solve_weighted_sum
 
@@ -254,21 +254,18 @@ class TestSolveF2:
 # ---------------------------------------------------------------------------
 
 class TestWeightedSum:
-    def _bounds(self, inst):
-        s1, s2 = solve_f1(inst), solve_f2(inst)
-        f1_min = s1.f1
-        f1_max = max(s2.f1, f1_min + 1e-6)
-        f2_max = max(s1.f2, 1e-6)
-        return f1_min, f1_max, f2_max
+    def _ref(self, inst):
+        from fedhpc.pareto import _reference_points
+        return _reference_points(inst)
 
     def test_alpha_1_matches_f1(self, tiny_instance):
-        f1_min, f1_max, f2_max = self._bounds(tiny_instance)
-        sol = solve_weighted_sum(tiny_instance, 1.0, f1_min, f1_max, f2_max)
+        f1_T, f2_T, f1_0 = self._ref(tiny_instance)
+        sol = solve_weighted_sum(tiny_instance, 1.0, f1_T, f2_T, f1_0)
         assert abs(sol.f1 - solve_f1(tiny_instance).f1) < 1e-4
 
     def test_alpha_0_matches_f2(self, tiny_instance):
-        f1_min, f1_max, f2_max = self._bounds(tiny_instance)
-        sol = solve_weighted_sum(tiny_instance, 0.0, f1_min, f1_max, f2_max)
+        f1_T, f2_T, f1_0 = self._ref(tiny_instance)
+        sol = solve_weighted_sum(tiny_instance, 0.0, f1_T, f2_T, f1_0)
         assert abs(sol.f2 - solve_f2(tiny_instance).f2) < 1e-4
 
     def test_invalid_alpha(self, tiny_instance):
@@ -378,15 +375,12 @@ class TestCapacity:
         assert starts[0] == 0 and starts[1] == 0
 
     def test_capacity_respected_in_spacetime(self, capped_instance):
-        """K_m must not exceed the declared capacity."""
-        from fedhpc.formulations import SpaceTimeFormulation
-        import gurobipy as gp
-        fmt = SpaceTimeFormulation()
-        mdl, vars = fmt.build(capped_instance)
-        mdl.setObjective(fmt.f1_expr(capped_instance, vars["x"]), gp.GRB.MINIMIZE)
-        mdl.optimize()
-        K_val = vars["K"][0].X
-        assert K_val <= 1 + 1e-6
+        """Flow conservation with N_m=1 prevents concurrent jobs on the capped type."""
+        sol = solve_f1(capped_instance, formulation=SpaceTimeFormulation())
+        assert sol.status == "optimal"
+        starts = {jid: t for jid, (_, t) in sol.assignment.items()}
+        t0, t1 = starts[0], starts[1]
+        assert abs(t0 - t1) >= 5
 
     def test_capacity_occupancy_formulation(self, capped_instance):
         """OccupancyFormulation also enforces the capacity via w bound."""
@@ -395,3 +389,165 @@ class TestCapacity:
         starts = {jid: t for jid, (_, t) in sol.assignment.items()}
         t0, t1 = starts[0], starts[1]
         assert abs(t0 - t1) >= 5
+
+
+# ---------------------------------------------------------------------------
+# Running jobs (initial state / cloud bursting)
+# ---------------------------------------------------------------------------
+
+class TestRunningJobs:
+    """Verify that pre-occupied capacity correctly delays or reroutes new jobs."""
+
+    @pytest.fixture
+    def onprem_cloud_instance(self) -> Instance:
+        """
+        One on-prem type (cap=1, free) and one cloud type (unlimited, $1/slot).
+        A new job arriving at t=0 that requires the on-prem type.
+        """
+        instance_types = [
+            InstanceType(id=0, kind="on-prem",
+                         perf=1.0, io_time=0.0, deploy=0,
+                         cost_io=0.0, cost_vm=0.0, cost_stor=0.0,
+                         cpu=4, mem=8, stor=100, capacity=1),
+            InstanceType(id=1, kind="cloud",
+                         perf=1.0, io_time=0.0, deploy=0,
+                         cost_io=0.0, cost_vm=1.0, cost_stor=0.0,
+                         cpu=4, mem=8, stor=100, capacity=None),
+        ]
+        jobs = [
+            Job(id=0, arrival=0, exec_time=5, io_volume=0, cpu=4, mem=8, stor=50),
+        ]
+        return Instance(
+            jobs=jobs,
+            instance_types=instance_types,
+            horizon=30,
+            budget=1000,
+        )
+
+    def _inst_with_running(self, base: Instance, running_jobs: list[RunningJob]) -> Instance:
+        """Rebuild *base* with a new running_jobs list."""
+        inst = Instance(
+            jobs=base.jobs,
+            instance_types=base.instance_types,
+            horizon=base.horizon,
+            budget=base.budget,
+            running_jobs=running_jobs,
+        )
+        inst.build()
+        return inst
+
+    # ── data-layer tests ─────────────────────────────────────────────────────
+
+    def test_n_running_computed(self, onprem_cloud_instance):
+        rj = RunningJob(id=99, type_id=0, end=5)
+        inst = self._inst_with_running(onprem_cloud_instance, [rj])
+        assert inst.n_running[0] == 1
+
+    def test_rj_arrivals_at_end_slot(self, onprem_cloud_instance):
+        rj = RunningJob(id=99, type_id=0, end=5)
+        inst = self._inst_with_running(onprem_cloud_instance, [rj])
+        assert inst.rj_arrivals[(0, 5)] == 1
+
+    def test_occupied_during_run(self, onprem_cloud_instance):
+        rj = RunningJob(id=99, type_id=0, end=3)
+        inst = self._inst_with_running(onprem_cloud_instance, [rj])
+        for t in range(3):
+            assert inst.occupied[(0, t)] == 1
+        assert inst.occupied.get((0, 3), 0) == 0  # freed at slot 3
+
+    def test_end_clipped_to_horizon(self, onprem_cloud_instance):
+        """Running job with end > horizon: arrivals registered at H, occupies all slots."""
+        H = onprem_cloud_instance.horizon
+        rj = RunningJob(id=99, type_id=0, end=H + 100)
+        inst = self._inst_with_running(onprem_cloud_instance, [rj])
+        assert inst.rj_arrivals[(0, H)] == 1
+        assert inst.occupied.get((0, H - 1), 0) == 1
+
+    def test_excess_running_jobs_capped(self, onprem_cloud_instance):
+        """More running_jobs than capacity: only capacity many are counted."""
+        rj0 = RunningJob(id=10, type_id=0, end=5)
+        rj1 = RunningJob(id=11, type_id=0, end=6)  # cap=1, this should be skipped
+        import warnings
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            inst = self._inst_with_running(onprem_cloud_instance, [rj0, rj1])
+        assert inst.n_running[0] == 1  # capped at capacity=1
+        assert len(w) == 1  # one warning emitted
+
+    def test_cloud_running_jobs_ignored(self, onprem_cloud_instance):
+        """Running jobs on cloud types (capacity=None) are silently skipped."""
+        rj = RunningJob(id=99, type_id=1, end=5)  # type 1 is cloud / unlimited
+        inst = self._inst_with_running(onprem_cloud_instance, [rj])
+        assert inst.n_running.get(1, 0) == 0
+
+    # ── solver tests ─────────────────────────────────────────────────────────
+
+    @pytest.mark.parametrize("formulation", [
+        SpaceTimeFormulation(), OccupancyFormulation()
+    ], ids=["spacetime", "occupancy"])
+    def test_running_job_blocks_onprem_until_free(self, onprem_cloud_instance, formulation):
+        """With the only on-prem slot pre-occupied until t=5, the new job must
+        either start on-prem at t≥5 or be sent to cloud immediately."""
+        rj   = RunningJob(id=99, type_id=0, end=5)
+        inst = self._inst_with_running(onprem_cloud_instance, [rj])
+        sol  = solve_f1(inst, formulation=formulation)
+        assert sol.status == "optimal"
+        _, t_start = sol.assignment[0]
+        mid_assigned, _ = sol.assignment[0]
+        if mid_assigned == 0:
+            # On-prem: must not start before slot 5 (running job finishes there)
+            assert t_start >= 5, f"On-prem start {t_start} < 5 violates running-job block"
+        else:
+            # Cloud: allowed to start immediately (no capacity constraint)
+            assert t_start >= 0
+
+    @pytest.mark.parametrize("formulation", [
+        SpaceTimeFormulation(), OccupancyFormulation()
+    ], ids=["spacetime", "occupancy"])
+    def test_full_onprem_forces_cloud_at_t0(self, onprem_cloud_instance, formulation):
+        """With the single on-prem slot fully occupied for the entire horizon, the
+        new job MUST be assigned to cloud (minimising turnaround means cloud at t=0)."""
+        H  = onprem_cloud_instance.horizon
+        rj = RunningJob(id=99, type_id=0, end=H)  # occupies until horizon
+        inst = self._inst_with_running(onprem_cloud_instance, [rj])
+        sol  = solve_f1(inst, formulation=formulation)
+        assert sol.status == "optimal"
+        mid_assigned, t_start = sol.assignment[0]
+        assert mid_assigned == 1, "Should be routed to cloud"
+        assert t_start == 0
+
+    @pytest.mark.parametrize("formulation", [
+        SpaceTimeFormulation(), OccupancyFormulation()
+    ], ids=["spacetime", "occupancy"])
+    def test_no_running_jobs_uses_onprem_first(self, onprem_cloud_instance, formulation):
+        """Without any running jobs the empty-cluster case routes to on-prem."""
+        onprem_cloud_instance.build()  # ensure clean state
+        sol = solve_f1(onprem_cloud_instance, formulation=formulation)
+        assert sol.status == "optimal"
+        mid_assigned, _ = sol.assignment[0]
+        assert mid_assigned == 0, "No running jobs: should use free on-prem"
+
+    @pytest.mark.parametrize("formulation", [
+        SpaceTimeFormulation(), OccupancyFormulation()
+    ], ids=["spacetime", "occupancy"])
+    def test_partial_occupancy_allows_concurrent(self, formulation):
+        """Cap=2, 1 running job → room for 1 new job concurrently at t=0."""
+        instance_types = [
+            InstanceType(id=0, kind="on-prem",
+                         perf=1.0, io_time=0.0, deploy=0,
+                         cost_io=0.0, cost_vm=0.0, cost_stor=0.0,
+                         cpu=4, mem=8, stor=100, capacity=2),
+        ]
+        jobs = [
+            Job(id=0, arrival=0, exec_time=5, io_volume=0, cpu=4, mem=8, stor=50),
+        ]
+        rj = RunningJob(id=99, type_id=0, end=10)
+        inst = Instance(
+            jobs=jobs, instance_types=instance_types,
+            horizon=20, budget=1000, running_jobs=[rj],
+        )
+        inst.build()
+        sol = solve_f1(inst, formulation=formulation)
+        assert sol.status == "optimal"
+        mid, t_start = sol.assignment[0]
+        assert mid == 0 and t_start == 0  # slot is available immediately
