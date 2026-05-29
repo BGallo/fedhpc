@@ -18,6 +18,9 @@ _MAX_FIG_WIDTH_IN  = 80.0
 _LABEL_JOB_LIMIT   = 200    # above this, skip per-bar text (unreadable anyway)
 _LEGEND_JOB_LIMIT  = 80     # above this, omit the legend entirely
 
+# ── Graph rendering limits ────────────────────────────────────────────────────
+_MAX_GRAPH_HORIZON = 80     # skip space-time graph if horizon exceeds this
+
 # ── Text report width ─────────────────────────────────────────────────────────
 _W = 72
 
@@ -535,4 +538,274 @@ def save_machine_schedule(
         lines.append("")
 
     path.write_text("\n".join(lines))
+    return path
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Space-time network graph
+# ──────────────────────────────────────────────────────────────────────────────
+
+def save_spacetime_graph(
+    inst: Instance,
+    sol: Solution | None = None,
+    path: str | Path = "spacetime_graph.png",
+    *,
+    title: str = "Space-Time Network",
+) -> Path | None:
+    """Save the space-time network diagram for *inst* as a PNG.
+
+    Each machine type is rendered as a horizontal panel:
+      - Black dots at every integer time step t = 0 … H (network nodes).
+      - Silver horizontal arrows for idle-capacity arcs (y[m,t] flow).
+      - Coloured arched arrows for job assignment arcs x[j,m,t]:
+          bold + labelled if *sol* is provided and x=1 for that arc,
+          faint if *sol* is None (all feasible arcs shown as background).
+
+    Returns None without writing a file when H > _MAX_GRAPH_HORIZON (too dense
+    to render legibly).
+    """
+    H = inst.horizon
+    if H > _MAX_GRAPH_HORIZON:
+        return None
+
+    from matplotlib.patches import FancyArrowPatch
+
+    job_list  = sorted(inst.jobs, key=lambda j: j.id)
+    n_jobs    = len(job_list)
+    n_types   = len(inst.instance_types)
+
+    colours   = plt.colormaps["tab10"].resampled(max(n_jobs, 1))
+    colour_of = {j.id: colours(i) for i, j in enumerate(job_list)}
+
+    selected: set[tuple[int, int, int]] = set()
+    if sol and sol.assignment:
+        for jid, (mid, t_start) in sol.assignment.items():
+            selected.add((jid, mid, t_start))
+
+    fig_w = max(14.0, H * 0.35)
+    fig_h = n_types * 3.2 + 1.2
+    fig, axes = plt.subplots(n_types, 1, figsize=(fig_w, fig_h))
+    if n_types == 1:
+        axes = [axes]
+
+    for ax_idx, itype in enumerate(inst.instance_types):
+        ax  = axes[ax_idx]
+        mid = itype.id
+
+        # ── nodes ─────────────────────────────────────────────────────────────
+        ax.scatter(range(H + 1), [0.0] * (H + 1), s=40, color="black", zorder=5)
+
+        # ── idle-capacity arcs (horizontal) ───────────────────────────────────
+        for t in range(H):
+            ax.annotate(
+                "", xy=(t + 1, 0.0), xytext=(t, 0.0),
+                arrowprops=dict(arrowstyle="-|>", color="silver", lw=1.2),
+            )
+
+        # ── job arcs ──────────────────────────────────────────────────────────
+        # Collect arcs; if solution is loaded, restrict to selected arcs only.
+        arc_entries: list[tuple[int, int, int, bool]] = []  # (jid, t_start, p_occ, is_selected)
+        for j in job_list:
+            if mid not in inst.F[j.id]:
+                continue
+            p = inst.p_occ[j.id, mid]
+            for t in inst.T[j.id, mid]:
+                is_sel = (j.id, mid, t) in selected
+                if sol is not None and not is_sel:
+                    continue
+                arc_entries.append((j.id, t, p, is_sel))
+
+        # Assign lanes (greedy interval colouring) to avoid arc overlap.
+        sorted_arcs = sorted(arc_entries, key=lambda a: (a[1], a[1] + a[2]))
+        lane_ends: list[int] = []
+        arcs_with_lanes: list[tuple[int, int, int, bool, int]] = []
+        for jid, t_start, p, is_sel in sorted_arcs:
+            t_end = t_start + p
+            placed = False
+            for li, le in enumerate(lane_ends):
+                if t_start >= le:
+                    lane_ends[li] = t_end
+                    arcs_with_lanes.append((jid, t_start, p, is_sel, li))
+                    placed = True
+                    break
+            if not placed:
+                arcs_with_lanes.append((jid, t_start, p, is_sel, len(lane_ends)))
+                lane_ends.append(t_end)
+
+        max_lane = max((lane for *_, lane in arcs_with_lanes), default=0)
+
+        for jid, t_start, p, is_sel, lane in arcs_with_lanes:
+            c   = colour_of[jid]
+            lw  = 2.2 if is_sel else 0.8
+            alp = 1.0 if is_sel else 0.22
+
+            # Arc bows upward: rad < 0 for horizontal left-to-right FancyArrowPatch.
+            # Target peak height = 0.4 + lane * 0.3; control-point height ≈ 2×peak.
+            target_peak = 0.4 + lane * 0.3
+            # control_y = -rad * p  →  rad = -control_y / p = -2*target_peak / p
+            rad = -2.0 * target_peak / max(p, 1)
+
+            patch = FancyArrowPatch(
+                (t_start, 0.0), (t_start + p, 0.0),
+                connectionstyle=f"arc3,rad={rad}",
+                arrowstyle="-|>",
+                color=c, lw=lw, alpha=alp, zorder=4,
+                transform=ax.transData,
+            )
+            ax.add_patch(patch)
+
+            if is_sel and n_jobs <= _LABEL_JOB_LIMIT:
+                label_x = t_start + p / 2
+                label_y = target_peak + 0.05
+                ax.text(
+                    label_x, label_y, f"j{jid}",
+                    ha="center", va="bottom", fontsize=7,
+                    color=c, fontweight="bold",
+                )
+
+        # ── boundary labels ────────────────────────────────────────────────────
+        n_running  = inst.n_running.get(mid, 0)
+        cap        = itype.capacity if itype.capacity is not None else "∞"
+        n_avail    = (itype.capacity or n_jobs) - n_running
+        ax.text(-0.8, 0.0, f"N={n_avail}", ha="right", va="center",
+                fontsize=8, color="dimgray")
+        ax.text(H + 0.8, 0.0, f"N={cap}", ha="left", va="center",
+                fontsize=8, color="dimgray")
+
+        cap_str = f"cap={cap}"
+        ax.set_title(
+            f"Type {mid}  [{itype.kind}]  perf={itype.perf}  {cap_str}",
+            fontsize=9, pad=4,
+        )
+        y_top = max(0.6, 0.4 + max_lane * 0.3 + 0.45)
+        ax.set_xlim(-1.5, H + 1.5)
+        ax.set_ylim(-0.35, y_top)
+        ax.axhline(0, color="black", lw=0.5, zorder=1)
+        ax.set_xlabel("Time (slots)", fontsize=8)
+        ax.yaxis.set_visible(False)
+        for spine in ("top", "left", "right"):
+            ax.spines[spine].set_visible(False)
+
+        step = max(1, H // 20)
+        ax.set_xticks(range(0, H + 1, step))
+        ax.tick_params(axis="x", labelsize=7)
+        ax.grid(axis="x", linestyle=":", alpha=0.3)
+
+    # ── shared legend ──────────────────────────────────────────────────────────
+    if n_jobs <= _LEGEND_JOB_LIMIT:
+        ncols = max(1, math.ceil(n_jobs / 8))
+        handles = [
+            mpatches.Patch(color=colour_of[j.id], label=f"Job {j.id}")
+            for j in job_list
+        ]
+        fig.legend(handles=handles, ncols=ncols, loc="lower center",
+                   fontsize=8, bbox_to_anchor=(0.5, 0.0))
+        fig.subplots_adjust(bottom=0.06 + 0.025 * math.ceil(n_jobs / ncols))
+
+    fig.suptitle(title, fontsize=12, fontweight="bold")
+    fig.tight_layout(rect=(0, 0.04, 1, 1))
+    path = Path(path)
+    fig.savefig(path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Feasibility / assignment bipartite graph
+# ──────────────────────────────────────────────────────────────────────────────
+
+def save_feasibility_graph(
+    inst: Instance,
+    sol: Solution | None = None,
+    path: str | Path = "feasibility_graph.png",
+    *,
+    title: str = "Job–Machine Feasibility Graph",
+) -> Path:
+    """Save a bipartite graph of jobs vs. machine types as PNG.
+
+    Left nodes  — jobs (coloured circles).
+    Right nodes — machine types (squares; blue=on-prem, orange=cloud).
+    Light gray edges — feasible (j, m) pairs where m ∈ F_j.
+    Bold coloured edges — assigned pair from *sol* (same colour as the job node).
+    """
+    jobs  = sorted(inst.jobs,           key=lambda j: j.id)
+    types = sorted(inst.instance_types, key=lambda m: m.id)
+    n_j   = len(jobs)
+    n_m   = len(types)
+
+    colours   = plt.colormaps["tab10"].resampled(max(n_j, 1))
+    colour_of = {j.id: colours(i) for i, j in enumerate(jobs)}
+
+    assigned: dict[int, int] = {}
+    if sol and sol.assignment:
+        assigned = {jid: mid for jid, (mid, _) in sol.assignment.items()}
+
+    # Evenly spread both columns over the same vertical range [0, n_j-1].
+    job_y: dict[int, float] = {j.id: float(n_j - 1 - i) for i, j in enumerate(jobs)}
+    if n_m == 1:
+        type_y: dict[int, float] = {types[0].id: (n_j - 1) / 2.0}
+    else:
+        step = (n_j - 1) / (n_m - 1)
+        type_y = {m.id: float(n_j - 1 - i * step) for i, m in enumerate(types)}
+
+    fig_h = max(5.0, max(n_j, n_m) * 0.65 + 1.5)
+    fig, ax = plt.subplots(figsize=(9, fig_h))
+
+    kind_colour = {"on-prem": "#1976D2", "cloud": "#F57C00"}
+
+    # ── edges ─────────────────────────────────────────────────────────────────
+    for j in jobs:
+        for mid in inst.F[j.id]:
+            is_asgn = assigned.get(j.id) == mid
+            ax.plot(
+                [0.0, 1.0], [job_y[j.id], type_y[mid]],
+                color=colour_of[j.id] if is_asgn else "lightgray",
+                lw=2.2 if is_asgn else 0.8,
+                alpha=1.0 if is_asgn else 0.6,
+                zorder=2,
+            )
+
+    # ── job nodes (left) ──────────────────────────────────────────────────────
+    for j in jobs:
+        ax.scatter(0.0, job_y[j.id], s=260, color=colour_of[j.id],
+                   zorder=5, edgecolors="black", lw=0.8)
+        ax.text(-0.04, job_y[j.id], f"j{j.id}",
+                ha="right", va="center", fontsize=9)
+
+    # ── machine type nodes (right) ─────────────────────────────────────────────
+    for m in types:
+        c   = kind_colour.get(m.kind, "gray")
+        cap = m.capacity if m.capacity is not None else "∞"
+        ax.scatter(1.0, type_y[m.id], s=260, color=c, marker="s",
+                   zorder=5, edgecolors="black", lw=0.8)
+        ax.text(
+            1.04, type_y[m.id],
+            f"Type {m.id}  ({m.kind}, cap={cap})\nperf={m.perf}",
+            ha="left", va="center", fontsize=8,
+        )
+
+    # ── column labels ─────────────────────────────────────────────────────────
+    y_top = float(n_j - 1)
+    ax.text(0.0, y_top + 0.5, "Jobs",          ha="center", fontsize=10, fontweight="bold")
+    ax.text(1.0, y_top + 0.5, "Instance Types", ha="center", fontsize=10, fontweight="bold")
+
+    # ── legend ────────────────────────────────────────────────────────────────
+    handles = [
+        mpatches.Patch(color="#1976D2", label="On-prem"),
+        mpatches.Patch(color="#F57C00", label="Cloud"),
+        plt.Line2D([0], [0], color="lightgray", lw=0.8, label="Feasible"),
+    ]
+    if assigned:
+        handles.append(plt.Line2D([0], [0], color="black", lw=2.2, label="Assigned"))
+    ax.legend(handles=handles, loc="lower right", fontsize=9)
+
+    ax.set_title(title, fontsize=12, fontweight="bold")
+    ax.set_xlim(-0.5, 1.9)
+    ax.set_ylim(-0.8, y_top + 1.0)
+    ax.axis("off")
+
+    fig.tight_layout()
+    path = Path(path)
+    fig.savefig(path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
     return path
