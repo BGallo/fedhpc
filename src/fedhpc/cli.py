@@ -18,48 +18,88 @@ _FORMULATIONS = {
     "occupancy": OccupancyFormulation,
 }
 
+_EA_METHODS = {"nsga2", "moead"}
+_MIP_METHODS = {"f1", "f2", "weighted", "epsilon", "epsilon-t", "pareto-ws", "pareto-eps"}
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="fedhpc",
-        description="FED-HPC: multi-objective MIP scheduler for HPC jobs in federated environments.",
+        description=(
+            "FED-HPC: multi-objective MIP scheduler for HPC jobs in federated environments.\n\n"
+            "Exact MIP methods (require Gurobi):\n"
+            "  f1, f2, weighted, epsilon, epsilon-t, pareto-ws, pareto-eps\n\n"
+            "Heuristic evolutionary methods (no licence required):\n"
+            "  nsga2 — NSGA-II with constrained-dominance ranking\n"
+            "  moead — MOEA/D with Tchebycheff decomposition\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--instance", required=True, metavar="FILE",
                    help="Path to instance JSON file.")
     p.add_argument("--method", default="weighted",
-                   choices=["f1", "f2", "weighted", "epsilon", "epsilon-t",
-                             "pareto-ws", "pareto-eps"],
+                   choices=sorted(_MIP_METHODS | _EA_METHODS),
                    help=(
-                       "Solving method:\n"
-                       "  f1          — minimise turnaround only\n"
-                       "  f2          — minimise cost only\n"
-                       "  weighted    — weighted-sum scalarisation (needs --alpha)\n"
-                       "  epsilon     — ε-constraint min f1 s.t. f2≤ε (needs --epsilon)\n"
-                       "  epsilon-t   — ε-constraint min f2 s.t. f1≤ε (needs --epsilon)\n"
-                       "  pareto-ws   — Pareto frontier via weighted-sum sweep\n"
-                       "  pareto-eps  — Pareto frontier via ε-constraint sweep\n"
+                       "Solving method (default: weighted).\n"
+                       "\n"
+                       "  Exact MIP (require Gurobi):\n"
+                       "    f1          — minimise total turnaround only\n"
+                       "    f2          — minimise total cost only\n"
+                       "    weighted    — weighted-sum scalarisation (needs --alpha)\n"
+                       "    epsilon     — ε-constraint min f1 s.t. f2 ≤ ε (needs --epsilon)\n"
+                       "    epsilon-t   — ε-constraint min f2 s.t. f1 ≤ ε (needs --epsilon)\n"
+                       "    pareto-ws   — Pareto frontier via weighted-sum sweep\n"
+                       "    pareto-eps  — Pareto frontier via ε-constraint sweep\n"
+                       "\n"
+                       "  Heuristic (no licence, parallelised with OpenMP):\n"
+                       "    nsga2       — NSGA-II (pop_size × n_gen generations)\n"
+                       "    moead       — MOEA/D with Tchebycheff decomposition\n"
                    ))
-    p.add_argument("--formulation", default="spacetime",
-                   choices=list(_FORMULATIONS),
-                   help=(
-                       "MIP formulation to use (default: spacetime):\n"
-                       "  spacetime  — space-time network with flow conservation (fedhpc-1.pdf)\n"
-                       "  occupancy  — occupancy-equality formulation\n"
-                   ))
-    p.add_argument("--alpha", type=float, default=0.5,
-                   help="Weight for f1 in [0,1] (used by 'weighted' and 'pareto-ws'). Default: 0.5.")
-    p.add_argument("--epsilon", type=float, default=None,
-                   help="ε bound for epsilon-constraint methods.")
-    p.add_argument("--steps", type=int, default=20,
-                   help="Number of points for Pareto frontier sweep. Default: 20.")
-    p.add_argument("--time-limit", type=float, default=300.0,
-                   help="Gurobi time limit in seconds. Default: 300.")
-    p.add_argument("--mip-gap", type=float, default=1e-4,
-                   help="Gurobi MIPGap. Default: 1e-4.")
+
+    # ── MIP options ───────────────────────────────────────────────────────────
+    mip = p.add_argument_group("MIP options (exact methods only)")
+    mip.add_argument("--formulation", default="spacetime",
+                     choices=list(_FORMULATIONS),
+                     help=(
+                         "MIP formulation (default: spacetime):\n"
+                         "  spacetime  — space-time network with flow conservation\n"
+                         "  occupancy  — occupancy-equality formulation\n"
+                     ))
+    mip.add_argument("--alpha", type=float, default=0.5,
+                     help="Weight for f1 in [0, 1] (used by 'weighted' and 'pareto-ws'). Default: 0.5.")
+    mip.add_argument("--epsilon", type=float, default=None,
+                     help="ε bound for epsilon-constraint methods.")
+    mip.add_argument("--steps", type=int, default=20,
+                     help="Number of frontier points for Pareto sweep. Default: 20.")
+    mip.add_argument("--time-limit", type=float, default=300.0,
+                     help="Gurobi time limit per solve in seconds. Default: 300.")
+    mip.add_argument("--mip-gap", type=float, default=1e-4,
+                     help="Gurobi MIPGap. Default: 1e-4.")
+
+    # ── EA options ────────────────────────────────────────────────────────────
+    ea = p.add_argument_group("Evolutionary algorithm options (nsga2 / moead)")
+    ea.add_argument("--pop-size", type=int, default=200, metavar="N",
+                    help=(
+                        "Population size for NSGA-II, or number of weight vectors for MOEA/D. "
+                        "Default: 200."
+                    ))
+    ea.add_argument("--n-gen", type=int, default=300, metavar="N",
+                    help="Number of generations. Default: 300.")
+    ea.add_argument("--neighborhood-size", type=int, default=20, metavar="T",
+                    help="MOEA/D neighbourhood size |T|. Default: 20.")
+    ea.add_argument("--seed", type=int, default=42,
+                    help="RNG seed for reproducibility. Default: 42.")
+    ea.add_argument("--n-threads", type=int, default=0, metavar="N",
+                    help=(
+                        "OpenMP thread count for evolutionary algorithms. "
+                        "0 = use all available cores (default)."
+                    ))
+
+    # ── general options ───────────────────────────────────────────────────────
     p.add_argument("--output-dir", default=".", metavar="DIR",
-                   help="Directory where gantt PNG and machine schedule are saved. Default: current dir.")
+                   help="Directory for Gantt PNG and machine-schedule files. Default: current dir.")
     p.add_argument("--verbose", action="store_true",
-                   help="Show Gurobi log output.")
+                   help="Show Gurobi log output (MIP methods) or algorithm progress (EA methods).")
     p.add_argument("--json", action="store_true",
                    help="Output results as JSON.")
     return p
@@ -74,11 +114,19 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Error loading instance: {e}", file=sys.stderr)
         sys.exit(1)
 
-    formulation = _FORMULATIONS[args.formulation]()
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    method  = args.method
 
-    # Initialise the shared Gurobi environment *before* any model is built.
-    # configure_env() uses gp.Env(empty=True) so OutputFlag is set before the
-    # C-level init reads the licence file — the only way to silence the WLS banner.
+    # ── evolutionary (heuristic) methods — no Gurobi needed ──────────────────
+
+    if method in _EA_METHODS:
+        _run_ea(args, inst, method, out_dir)
+        return
+
+    # ── MIP methods — need Gurobi ─────────────────────────────────────────────
+
+    formulation = _FORMULATIONS[args.formulation]()
     configure_env(verbose=args.verbose)
 
     gurobi_params: dict = {
@@ -87,12 +135,6 @@ def main(argv: list[str] | None = None) -> None:
     }
     if not args.verbose:
         gurobi_params["OutputFlag"] = 0
-
-    method  = args.method
-    out_dir = Path(args.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    # ── single-solution methods ───────────────────────────────────────────────
 
     if method == "f1":
         sol = solve_f1(inst, formulation=formulation, **gurobi_params)
@@ -135,8 +177,6 @@ def main(argv: list[str] | None = None) -> None:
                       title=f"FED-HPC — {method} (ε={args.epsilon})")
         _save_outputs(sol, inst, out_dir, stem=method)
 
-    # ── Pareto frontier methods ───────────────────────────────────────────────
-
     elif method == "pareto-ws":
         solutions = weighted_sum_frontier(
             inst, n_points=args.steps, formulation=formulation, **gurobi_params
@@ -152,6 +192,45 @@ def main(argv: list[str] | None = None) -> None:
         _save_pareto_outputs(solutions, inst, out_dir, stem=method)
 
 
+def _run_ea(args: argparse.Namespace, inst: Instance, method: str, out_dir: Path) -> None:
+    """Dispatch to nsga2_frontier or moead_frontier and print results."""
+    try:
+        from .moea import moead_frontier, nsga2_frontier
+    except ImportError as e:
+        print(f"Evolutionary methods require the fedhpc C++ extension: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.verbose:
+        print(
+            f"Running {method.upper()}  pop={args.pop_size}  gen={args.n_gen}"
+            + (f"  T={args.neighborhood_size}" if method == "moead" else "")
+            + f"  seed={args.seed}"
+            + (f"  threads={args.n_threads}" if args.n_threads else "  threads=all"),
+            file=sys.stderr,
+        )
+
+    if method == "nsga2":
+        solutions = nsga2_frontier(
+            inst,
+            pop_size  = args.pop_size,
+            n_gen     = args.n_gen,
+            seed      = args.seed,
+            n_threads = args.n_threads,
+        )
+    else:  # moead
+        solutions = moead_frontier(
+            inst,
+            n_weights         = args.pop_size,
+            n_gen             = args.n_gen,
+            neighborhood_size = args.neighborhood_size,
+            seed              = args.seed,
+            n_threads         = args.n_threads,
+        )
+
+    _print_pareto(solutions, inst, args.json, method=method)
+    _save_pareto_outputs(solutions, inst, out_dir, stem=method)
+
+
 # ── Console output helpers ────────────────────────────────────────────────────
 
 def _print_single(
@@ -160,12 +239,6 @@ def _print_single(
     as_json: bool,
     title: str = "FED-HPC Schedule",
 ) -> None:
-    """Print a summary to stdout.
-
-    Text mode  — aggregate stats only (format_summary).
-    JSON mode  — stats dict + full assignment for programmatic consumption.
-    Per-job details are always written to the machine-schedule file.
-    """
     if as_json:
         print(json.dumps(_sol_to_dict(sol, inst), indent=2))
     else:
@@ -178,11 +251,7 @@ def _print_pareto(
     as_json: bool,
     method: str = "pareto",
 ) -> None:
-    """Print Pareto frontier results to stdout.
-
-    Text mode  — compact table: one row per non-dominated point.
-    JSON mode  — list of stat dicts + assignments.
-    """
+    _PRINTABLE = ("optimal", "feasible", "heuristic")
     ranked = sorted(solutions, key=lambda s: s.f1 or 0)
     n      = len(ranked)
 
@@ -190,7 +259,6 @@ def _print_pareto(
         print(json.dumps([_sol_to_dict(s, inst) for s in ranked], indent=2))
         return
 
-    # ── compact text table ────────────────────────────────────────────────────
     from .viz import _rule
     print(f"FED-HPC Pareto Frontier — {method}  [{n} non-dominated point(s)]")
     print(_rule())
@@ -207,7 +275,7 @@ def _print_pareto(
     print(f"  {_rule('-')[:len(hdr) - 2]}")
 
     for i, sol in enumerate(ranked, start=1):
-        if sol.status not in ("optimal", "feasible"):
+        if sol.status not in _PRINTABLE:
             print(
                 f"  {i:>3}  {sol.status:<10}"
                 f"  {'—':>18}  {'—':>12}"
@@ -235,7 +303,7 @@ def _print_pareto(
 
 def _save_outputs(sol: Solution, inst: Instance, out_dir: Path, stem: str) -> None:
     """Save Gantt PNG and detailed machine-schedule text file."""
-    if sol.status not in ("optimal", "feasible"):
+    if sol.status not in ("optimal", "feasible", "heuristic"):
         return
     gantt_path = save_gantt(
         sol, inst,
@@ -255,7 +323,7 @@ def _save_pareto_outputs(
     solutions: list[Solution], inst: Instance, out_dir: Path, stem: str
 ) -> None:
     ranked = sorted(
-        (s for s in solutions if s.status in ("optimal", "feasible")),
+        (s for s in solutions if s.status in ("optimal", "feasible", "heuristic")),
         key=lambda s: s.f1 or 0,
     )
     for i, sol in enumerate(ranked, start=1):
@@ -265,16 +333,7 @@ def _save_pareto_outputs(
 # ── JSON serialisation ────────────────────────────────────────────────────────
 
 def _sol_to_dict(sol: Solution, inst: Instance) -> dict:
-    """Serialise a Solution to a JSON-compatible dict.
-
-    Includes:
-      - solver metadata (status, objective, f1, f2)
-      - aggregate + per-job statistics (from compute_stats)
-      - full assignment map (for programmatic consumption)
-    """
     st = compute_stats(sol, inst)
-
-    # Remove the per_job list from top-level stats to keep it nested cleanly
     per_job = st.pop("per_job")
 
     assignment_detail = {
@@ -283,8 +342,8 @@ def _sol_to_dict(sol: Solution, inst: Instance) -> dict:
     }
 
     return {
-        "status":    sol.status,
-        "objective": sol.objective,
+        "status":        sol.status,
+        "objective":     sol.objective,
         "f1_turnaround": sol.f1,
         "f2_cost":       sol.f2,
         "statistics":    st,
