@@ -11,7 +11,10 @@ from .data import Instance
 from .formulations import OccupancyFormulation, SpaceTimeFormulation, configure_env
 from .model import Solution, solve_epsilon_cost, solve_epsilon_turnaround, solve_f1, solve_f2, solve_weighted_sum
 from .pareto import epsilon_constraint_frontier, weighted_sum_frontier
-from .viz import compute_stats, format_summary, save_gantt, save_machine_schedule
+from .viz import (
+    compute_stats, format_summary,
+    save_feasibility_graph, save_gantt, save_machine_schedule, save_spacetime_graph,
+)
 
 _FORMULATIONS = {
     "spacetime": SpaceTimeFormulation,
@@ -102,6 +105,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Show Gurobi log output (MIP methods) or algorithm progress (EA methods).")
     p.add_argument("--json", action="store_true",
                    help="Output results as JSON.")
+    p.add_argument("--graph", action="store_true",
+                   help=(
+                       "Save graph visualizations alongside the Gantt chart:\n"
+                       "  spacetime_graph.png — space-time network diagram\n"
+                       "  feasibility_graph.png — job–machine bipartite graph\n"
+                       "(skipped automatically when the horizon exceeds 80 slots)"
+                   ))
     return p
 
 
@@ -139,12 +149,12 @@ def main(argv: list[str] | None = None) -> None:
     if method == "f1":
         sol = solve_f1(inst, formulation=formulation, **gurobi_params)
         _print_single(sol, inst, args.json, title=f"FED-HPC — {method}")
-        _save_outputs(sol, inst, out_dir, stem=method)
+        _save_outputs(sol, inst, out_dir, stem=method, graph=args.graph)
 
     elif method == "f2":
         sol = solve_f2(inst, formulation=formulation, **gurobi_params)
         _print_single(sol, inst, args.json, title=f"FED-HPC — {method}")
-        _save_outputs(sol, inst, out_dir, stem=method)
+        _save_outputs(sol, inst, out_dir, stem=method, graph=args.graph)
 
     elif method == "weighted":
         from .pareto import _reference_points
@@ -157,7 +167,7 @@ def main(argv: list[str] | None = None) -> None:
         )
         _print_single(sol, inst, args.json,
                       title=f"FED-HPC — {method} (α={args.alpha})")
-        _save_outputs(sol, inst, out_dir, stem=method)
+        _save_outputs(sol, inst, out_dir, stem=method, graph=args.graph)
 
     elif method == "epsilon":
         if args.epsilon is None:
@@ -166,7 +176,7 @@ def main(argv: list[str] | None = None) -> None:
         sol = solve_epsilon_cost(inst, args.epsilon, formulation=formulation, **gurobi_params)
         _print_single(sol, inst, args.json,
                       title=f"FED-HPC — {method} (ε={args.epsilon})")
-        _save_outputs(sol, inst, out_dir, stem=method)
+        _save_outputs(sol, inst, out_dir, stem=method, graph=args.graph)
 
     elif method == "epsilon-t":
         if args.epsilon is None:
@@ -175,21 +185,21 @@ def main(argv: list[str] | None = None) -> None:
         sol = solve_epsilon_turnaround(inst, args.epsilon, formulation=formulation, **gurobi_params)
         _print_single(sol, inst, args.json,
                       title=f"FED-HPC — {method} (ε={args.epsilon})")
-        _save_outputs(sol, inst, out_dir, stem=method)
+        _save_outputs(sol, inst, out_dir, stem=method, graph=args.graph)
 
     elif method == "pareto-ws":
         solutions = weighted_sum_frontier(
             inst, n_points=args.steps, formulation=formulation, **gurobi_params
         )
         _print_pareto(solutions, inst, args.json, method=method)
-        _save_pareto_outputs(solutions, inst, out_dir, stem=method)
+        _save_pareto_outputs(solutions, inst, out_dir, stem=method, graph=args.graph)
 
     elif method == "pareto-eps":
         solutions = epsilon_constraint_frontier(
             inst, n_points=args.steps, formulation=formulation, **gurobi_params
         )
         _print_pareto(solutions, inst, args.json, method=method)
-        _save_pareto_outputs(solutions, inst, out_dir, stem=method)
+        _save_pareto_outputs(solutions, inst, out_dir, stem=method, graph=args.graph)
 
 
 def _run_ea(args: argparse.Namespace, inst: Instance, method: str, out_dir: Path) -> None:
@@ -301,8 +311,15 @@ def _print_pareto(
 
 # ── File-output helpers ───────────────────────────────────────────────────────
 
-def _save_outputs(sol: Solution, inst: Instance, out_dir: Path, stem: str) -> None:
-    """Save Gantt PNG and detailed machine-schedule text file."""
+def _save_outputs(
+    sol: Solution,
+    inst: Instance,
+    out_dir: Path,
+    stem: str,
+    *,
+    graph: bool = False,
+) -> None:
+    """Save Gantt PNG, machine-schedule text, and optionally graph visualizations."""
     if sol.status not in ("optimal", "feasible", "heuristic"):
         return
     gantt_path = save_gantt(
@@ -318,16 +335,41 @@ def _save_outputs(sol: Solution, inst: Instance, out_dir: Path, stem: str) -> No
     print(f"Gantt chart      → {gantt_path}", file=sys.stderr)
     print(f"Machine schedule → {sched_path}", file=sys.stderr)
 
+    if graph:
+        st_path = save_spacetime_graph(
+            inst, sol,
+            out_dir / f"{stem}_spacetime_graph.png",
+            title=f"Space-Time Network [{stem}]",
+        )
+        if st_path:
+            print(f"Space-time graph → {st_path}", file=sys.stderr)
+        else:
+            print(
+                "Space-time graph skipped (horizon > 80 slots).",
+                file=sys.stderr,
+            )
+        feas_path = save_feasibility_graph(
+            inst, sol,
+            out_dir / f"{stem}_feasibility_graph.png",
+            title=f"Job–Machine Feasibility [{stem}]",
+        )
+        print(f"Feasibility graph → {feas_path}", file=sys.stderr)
+
 
 def _save_pareto_outputs(
-    solutions: list[Solution], inst: Instance, out_dir: Path, stem: str
+    solutions: list[Solution],
+    inst: Instance,
+    out_dir: Path,
+    stem: str,
+    *,
+    graph: bool = False,
 ) -> None:
     ranked = sorted(
         (s for s in solutions if s.status in ("optimal", "feasible", "heuristic")),
         key=lambda s: s.f1 or 0,
     )
     for i, sol in enumerate(ranked, start=1):
-        _save_outputs(sol, inst, out_dir, stem=f"{stem}_{i:02d}")
+        _save_outputs(sol, inst, out_dir, stem=f"{stem}_{i:02d}", graph=graph)
 
 
 # ── JSON serialisation ────────────────────────────────────────────────────────
