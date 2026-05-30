@@ -336,13 +336,14 @@ def _save_outputs(
     print(f"Machine schedule → {sched_path}", file=sys.stderr)
 
     if graph:
-        st_path = save_spacetime_graph(
+        st_paths = save_spacetime_graph(
             inst, sol,
             out_dir / f"{stem}_spacetime_graph.png",
             title=f"Space-Time Network [{stem}]",
         )
-        if st_path:
-            print(f"Space-time graph → {st_path}", file=sys.stderr)
+        if st_paths:
+            for p in st_paths:
+                print(f"Space-time graph → {p}", file=sys.stderr)
         else:
             print(
                 "Space-time graph skipped (horizon > 80 slots).",

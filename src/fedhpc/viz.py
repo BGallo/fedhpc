@@ -551,28 +551,32 @@ def save_spacetime_graph(
     path: str | Path = "spacetime_graph.png",
     *,
     title: str = "Space-Time Network",
-) -> Path | None:
-    """Save the space-time network diagram for *inst* as a PNG.
+) -> list[Path]:
+    """Save one space-time network PNG per instance type, all in the same folder.
 
-    Each machine type is rendered as a horizontal panel:
+    Files are named ``<stem>_type{mid}<suffix>`` next to *path*.
+    Each file shows one machine type with:
       - Black dots at every integer time step t = 0 … H (network nodes).
       - Silver horizontal arrows for idle-capacity arcs (y[m,t] flow).
       - Coloured arched arrows for job assignment arcs x[j,m,t]:
           bold + labelled if *sol* is provided and x=1 for that arc,
           faint if *sol* is None (all feasible arcs shown as background).
 
-    Returns None without writing a file when H > _MAX_GRAPH_HORIZON (too dense
-    to render legibly).
+    Returns an empty list when H > _MAX_GRAPH_HORIZON (too dense to render legibly).
     """
     H = inst.horizon
     if H > _MAX_GRAPH_HORIZON:
-        return None
+        return []
 
     from matplotlib.patches import FancyArrowPatch
 
+    base      = Path(path)
+    stem      = base.stem
+    suffix    = base.suffix
+    out_dir   = base.parent
+
     job_list  = sorted(inst.jobs, key=lambda j: j.id)
     n_jobs    = len(job_list)
-    n_types   = len(inst.instance_types)
 
     colours   = plt.colormaps["tab10"].resampled(max(n_jobs, 1))
     colour_of = {j.id: colours(i) for i, j in enumerate(job_list)}
@@ -582,15 +586,31 @@ def save_spacetime_graph(
         for jid, (mid, t_start) in sol.assignment.items():
             selected.add((jid, mid, t_start))
 
-    fig_w = max(14.0, H * 0.35)
-    fig_h = n_types * 3.2 + 1.2
-    fig, axes = plt.subplots(n_types, 1, figsize=(fig_w, fig_h))
-    if n_types == 1:
-        axes = [axes]
+    saved: list[Path] = []
 
-    for ax_idx, itype in enumerate(inst.instance_types):
-        ax  = axes[ax_idx]
+    for itype in inst.instance_types:
         mid = itype.id
+
+        # ── idle-flow weights: y[m,t] = capacity − jobs running at t ──────────
+        cap_int = itype.capacity  # None for cloud (infinite)
+        if cap_int is not None:
+            jobs_at: list[int] = [0] * (H + 1)
+            if sol and sol.assignment:
+                for jid, (m, ts) in sol.assignment.items():
+                    if m == mid:
+                        p_j = inst.p_occ[jid, mid]
+                        for tt in range(ts, min(ts + p_j, H + 1)):
+                            jobs_at[tt] += 1
+            for rj in inst.running_jobs:
+                if rj.type_id == mid:
+                    for tt in range(0, min(rj.end, H + 1)):
+                        jobs_at[tt] += 1
+            idle_flow: list[int | None] = [max(0, cap_int - jobs_at[t]) for t in range(H + 1)]
+        else:
+            idle_flow = [None] * (H + 1)  # infinite capacity — don't label
+
+        fig_w = max(14.0, H * 0.35)
+        fig, ax = plt.subplots(1, 1, figsize=(fig_w, 3.6))
 
         # ── nodes ─────────────────────────────────────────────────────────────
         ax.scatter(range(H + 1), [0.0] * (H + 1), s=40, color="black", zorder=5)
@@ -601,9 +621,15 @@ def save_spacetime_graph(
                 "", xy=(t + 1, 0.0), xytext=(t, 0.0),
                 arrowprops=dict(arrowstyle="-|>", color="silver", lw=1.2),
             )
+            w = idle_flow[t]
+            if w is not None:
+                ax.text(
+                    t + 0.5, -0.12, str(w),
+                    ha="center", va="top", fontsize=6,
+                    color="gray", zorder=6,
+                )
 
         # ── job arcs ──────────────────────────────────────────────────────────
-        # Collect arcs; if solution is loaded, restrict to selected arcs only.
         arc_entries: list[tuple[int, int, int, bool]] = []  # (jid, t_start, p_occ, is_selected)
         for j in job_list:
             if mid not in inst.F[j.id]:
@@ -639,10 +665,7 @@ def save_spacetime_graph(
             lw  = 2.2 if is_sel else 0.8
             alp = 1.0 if is_sel else 0.22
 
-            # Arc bows upward: rad < 0 for horizontal left-to-right FancyArrowPatch.
-            # Target peak height = 0.4 + lane * 0.3; control-point height ≈ 2×peak.
             target_peak = 0.4 + lane * 0.3
-            # control_y = -rad * p  →  rad = -control_y / p = -2*target_peak / p
             rad = -2.0 * target_peak / max(p, 1)
 
             patch = FancyArrowPatch(
@@ -658,28 +681,32 @@ def save_spacetime_graph(
                 label_x = t_start + p / 2
                 label_y = target_peak + 0.05
                 ax.text(
-                    label_x, label_y, f"j{jid}",
+                    label_x, label_y, f"j{jid} [p={p}]",
                     ha="center", va="bottom", fontsize=7,
                     color=c, fontweight="bold",
                 )
+            elif not is_sel and n_jobs <= _LABEL_JOB_LIMIT:
+                # Feasible-but-unselected arcs: show duration as faint weight
+                label_x = t_start + p / 2
+                label_y = target_peak + 0.02
+                ax.text(
+                    label_x, label_y, str(p),
+                    ha="center", va="bottom", fontsize=5,
+                    color=c, alpha=0.4,
+                )
 
         # ── boundary labels ────────────────────────────────────────────────────
-        n_running  = inst.n_running.get(mid, 0)
-        cap        = itype.capacity if itype.capacity is not None else "∞"
-        n_avail    = (itype.capacity or n_jobs) - n_running
+        n_running = inst.n_running.get(mid, 0)
+        cap       = itype.capacity if itype.capacity is not None else "∞"
+        n_avail   = (itype.capacity or n_jobs) - n_running
         ax.text(-0.8, 0.0, f"N={n_avail}", ha="right", va="center",
                 fontsize=8, color="dimgray")
         ax.text(H + 0.8, 0.0, f"N={cap}", ha="left", va="center",
                 fontsize=8, color="dimgray")
 
-        cap_str = f"cap={cap}"
-        ax.set_title(
-            f"Type {mid}  [{itype.kind}]  perf={itype.perf}  {cap_str}",
-            fontsize=9, pad=4,
-        )
         y_top = max(0.6, 0.4 + max_lane * 0.3 + 0.45)
         ax.set_xlim(-1.5, H + 1.5)
-        ax.set_ylim(-0.35, y_top)
+        ax.set_ylim(-0.45, y_top)
         ax.axhline(0, color="black", lw=0.5, zorder=1)
         ax.set_xlabel("Time (slots)", fontsize=8)
         ax.yaxis.set_visible(False)
@@ -691,23 +718,30 @@ def save_spacetime_graph(
         ax.tick_params(axis="x", labelsize=7)
         ax.grid(axis="x", linestyle=":", alpha=0.3)
 
-    # ── shared legend ──────────────────────────────────────────────────────────
-    if n_jobs <= _LEGEND_JOB_LIMIT:
-        ncols = max(1, math.ceil(n_jobs / 8))
-        handles = [
-            mpatches.Patch(color=colour_of[j.id], label=f"Job {j.id}")
-            for j in job_list
-        ]
-        fig.legend(handles=handles, ncols=ncols, loc="lower center",
-                   fontsize=8, bbox_to_anchor=(0.5, 0.0))
-        fig.subplots_adjust(bottom=0.06 + 0.025 * math.ceil(n_jobs / ncols))
+        # ── legend ────────────────────────────────────────────────────────────
+        if n_jobs <= _LEGEND_JOB_LIMIT:
+            ncols = max(1, math.ceil(n_jobs / 8))
+            handles = [
+                mpatches.Patch(color=colour_of[j.id], label=f"Job {j.id}")
+                for j in job_list
+            ]
+            fig.legend(handles=handles, ncols=ncols, loc="lower center",
+                       fontsize=8, bbox_to_anchor=(0.5, 0.0))
+            fig.subplots_adjust(bottom=0.06 + 0.025 * math.ceil(n_jobs / ncols))
 
-    fig.suptitle(title, fontsize=12, fontweight="bold")
-    fig.tight_layout(rect=(0, 0.04, 1, 1))
-    path = Path(path)
-    fig.savefig(path, dpi=120, bbox_inches="tight")
-    plt.close(fig)
-    return path
+        cap_str = f"cap={cap}"
+        fig.suptitle(
+            f"{title} — Type {mid}  [{itype.kind}]  perf={itype.perf}  {cap_str}",
+            fontsize=11, fontweight="bold",
+        )
+        fig.tight_layout(rect=(0, 0.04, 1, 1))
+
+        out_path = out_dir / f"{stem}_type{mid}{suffix}"
+        fig.savefig(out_path, dpi=120, bbox_inches="tight")
+        plt.close(fig)
+        saved.append(out_path)
+
+    return saved
 
 
 # ──────────────────────────────────────────────────────────────────────────────
