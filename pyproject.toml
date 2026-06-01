@@ -17,8 +17,12 @@ dependencies = [
 fedhpc = "fedhpc:main"
 
 [build-system]
-requires = ["uv_build>=0.11.2,<0.12.0"]
-build-backend = "uv_build"
+requires = ["scikit-build-core>=0.9", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[tool.scikit-build]
+wheel.packages = ["src/fedhpc"]
+cmake.build-type = "Release"
 
 [dependency-groups]
 dev = [
