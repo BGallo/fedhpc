@@ -28,7 +28,7 @@
       "  completes t=3, costs 6). On-prem is cheaper but slower due to the running job."
     ]
   },
-  "horizon": 12,
+  "horizon": 20,
   "budget": 20.0,
   "instance_types": [
     {
@@ -48,11 +48,11 @@
     {
       "id": 1,
       "kind": "cloud",
-      "perf": 2.0,
+      "perf": 1.0,
       "io_time": 0.5,
       "deploy": 1,
       "cost_io": 1.0,
-      "cost_vm": 1.0,
+      "cost_vm": 0.5,
       "cost_stor": 0.01,
       "cpu": 8,
       "mem": 32,
@@ -64,7 +64,7 @@
     {
       "id": 0,
       "arrival": 0,
-      "exec_time": 4,
+      "exec_time": 8,
       "io_volume": 0,
       "cpu": 2,
       "mem": 8,

@@ -10,7 +10,7 @@ from pathlib import Path
 from .data import Instance
 from .formulations import OccupancyFormulation, SpaceTimeFormulation, configure_env
 from .model import Solution, solve_epsilon_cost, solve_epsilon_turnaround, solve_f1, solve_f2, solve_weighted_sum
-from .pareto import epsilon_constraint_frontier, weighted_sum_frontier
+from .pareto import epsilon_constraint_frontier, hybrid_frontier, weighted_sum_frontier
 from .viz import (
     compute_stats, format_summary,
     save_feasibility_graph, save_gantt, save_machine_schedule, save_spacetime_graph,
@@ -21,8 +21,9 @@ _FORMULATIONS = {
     "occupancy": OccupancyFormulation,
 }
 
-_EA_METHODS = {"nsga2", "moead"}
-_MIP_METHODS = {"f1", "f2", "weighted", "epsilon", "epsilon-t", "pareto-ws", "pareto-eps"}
+_EA_METHODS     = {"nsga2", "moead"}
+_HYBRID_METHODS = {"hybrid"}
+_MIP_METHODS    = {"f1", "f2", "weighted", "epsilon", "epsilon-t", "pareto-ws", "pareto-eps"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -34,14 +35,16 @@ def build_parser() -> argparse.ArgumentParser:
             "  f1, f2, weighted, epsilon, epsilon-t, pareto-ws, pareto-eps\n\n"
             "Heuristic evolutionary methods (no licence required):\n"
             "  nsga2 — NSGA-II with constrained-dominance ranking\n"
-            "  moead — MOEA/D with Tchebycheff decomposition\n"
+            "  moead — MOEA/D with Tchebycheff decomposition\n\n"
+            "Hybrid (requires both C++ extension and Gurobi):\n"
+            "  hybrid — EA exploration + Gurobi ε-constraint verification\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--instance", required=True, metavar="FILE",
                    help="Path to instance JSON file.")
     p.add_argument("--method", default="weighted",
-                   choices=sorted(_MIP_METHODS | _EA_METHODS),
+                   choices=sorted(_MIP_METHODS | _EA_METHODS | _HYBRID_METHODS),
                    help=(
                        "Solving method (default: weighted).\n"
                        "\n"
@@ -57,14 +60,18 @@ def build_parser() -> argparse.ArgumentParser:
                        "  Heuristic (no licence, parallelised with OpenMP):\n"
                        "    nsga2       — NSGA-II (pop_size × n_gen generations)\n"
                        "    moead       — MOEA/D with Tchebycheff decomposition\n"
+                       "\n"
+                       "  Hybrid (requires C++ extension + Gurobi):\n"
+                       "    hybrid      — NSGA-II + MOEA/D exploration, then Gurobi\n"
+                       "                  ε-constraint verification at each EA cost level\n"
                    ))
 
-    # ── MIP options ───────────────────────────────────────────────────────────
-    mip = p.add_argument_group("MIP options (exact methods only)")
+    # ── MIP / hybrid options ──────────────────────────────────────────────────
+    mip = p.add_argument_group("MIP / hybrid options (exact methods and hybrid)")
     mip.add_argument("--formulation", default="spacetime",
                      choices=list(_FORMULATIONS),
                      help=(
-                         "MIP formulation (default: spacetime):\n"
+                         "MIP formulation used by exact and hybrid methods (default: spacetime):\n"
                          "  spacetime  — space-time network with flow conservation\n"
                          "  occupancy  — occupancy-equality formulation\n"
                      ))
@@ -73,28 +80,36 @@ def build_parser() -> argparse.ArgumentParser:
     mip.add_argument("--epsilon", type=float, default=None,
                      help="ε bound for epsilon-constraint methods.")
     mip.add_argument("--steps", type=int, default=20,
-                     help="Number of frontier points for Pareto sweep. Default: 20.")
+                     help="Number of frontier points for Pareto sweep methods. Default: 20.")
     mip.add_argument("--time-limit", type=float, default=300.0,
-                     help="Gurobi time limit per solve in seconds. Default: 300.")
+                     help=(
+                         "Gurobi time limit in seconds. For exact methods: per solve. "
+                         "For hybrid: per ε-constraint solve (one per EA candidate). "
+                         "Default: 300."
+                     ))
     mip.add_argument("--mip-gap", type=float, default=1e-4,
-                     help="Gurobi MIPGap. Default: 1e-4.")
+                     help="Gurobi MIPGap (used by exact and hybrid methods). Default: 1e-4.")
 
-    # ── EA options ────────────────────────────────────────────────────────────
-    ea = p.add_argument_group("Evolutionary algorithm options (nsga2 / moead)")
+    # ── EA / hybrid options ───────────────────────────────────────────────────
+    ea = p.add_argument_group("Evolutionary algorithm options (nsga2 / moead / hybrid)")
     ea.add_argument("--pop-size", type=int, default=200, metavar="N",
                     help=(
-                        "Population size for NSGA-II, or number of weight vectors for MOEA/D. "
-                        "Default: 200."
+                        "Population size for NSGA-II, number of weight vectors for MOEA/D, "
+                        "or EA population for each algorithm in hybrid. Default: 200."
                     ))
     ea.add_argument("--n-gen", type=int, default=300, metavar="N",
-                    help="Number of generations. Default: 300.")
+                    help="Number of EA generations (nsga2, moead, hybrid). Default: 300.")
     ea.add_argument("--neighborhood-size", type=int, default=20, metavar="T",
-                    help="MOEA/D neighbourhood size |T|. Default: 20.")
+                    help="MOEA/D neighbourhood size |T| (moead, hybrid). Default: 20.")
     ea.add_argument("--seed", type=int, default=42,
-                    help="RNG seed for reproducibility. Default: 42.")
+                    help=(
+                        "RNG seed for reproducibility. "
+                        "For hybrid, NSGA-II uses this seed and MOEA/D uses seed+1. "
+                        "Default: 42."
+                    ))
     ea.add_argument("--n-threads", type=int, default=0, metavar="N",
                     help=(
-                        "OpenMP thread count for evolutionary algorithms. "
+                        "OpenMP thread count for evolutionary algorithms (nsga2, moead, hybrid). "
                         "0 = use all available cores (default)."
                     ))
 
@@ -102,7 +117,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output-dir", default=".", metavar="DIR",
                    help="Directory for Gantt PNG and machine-schedule files. Default: current dir.")
     p.add_argument("--verbose", action="store_true",
-                   help="Show Gurobi log output (MIP methods) or algorithm progress (EA methods).")
+                   help=(
+                       "Show detailed progress. MIP methods: Gurobi solver log. "
+                       "EA methods: run parameters. "
+                       "hybrid: phase progress, per-solve Gurobi log, and timing."
+                   ))
     p.add_argument("--json", action="store_true",
                    help="Output results as JSON.")
     p.add_argument("--graph", action="store_true",
@@ -132,6 +151,12 @@ def main(argv: list[str] | None = None) -> None:
 
     if method in _EA_METHODS:
         _run_ea(args, inst, method, out_dir)
+        return
+
+    # ── hybrid method — needs both C++ extension and Gurobi ──────────────────
+
+    if method in _HYBRID_METHODS:
+        _run_hybrid(args, inst, out_dir)
         return
 
     # ── MIP methods — need Gurobi ─────────────────────────────────────────────
@@ -239,6 +264,43 @@ def _run_ea(args: argparse.Namespace, inst: Instance, method: str, out_dir: Path
 
     _print_pareto(solutions, inst, args.json, method=method)
     _save_pareto_outputs(solutions, inst, out_dir, stem=method)
+
+
+def _run_hybrid(args: argparse.Namespace, inst: Instance, out_dir: Path) -> None:
+    """Run the hybrid EA + Gurobi frontier and print results."""
+    try:
+        from .moea import moead_frontier, nsga2_frontier  # noqa: F401
+    except ImportError as e:
+        print(f"hybrid requires the fedhpc C++ extension: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    configure_env(verbose=args.verbose)
+    formulation = _FORMULATIONS[args.formulation]()
+
+    if args.verbose:
+        print(
+            f"Running HYBRID  pop={args.pop_size}  gen={args.n_gen}"
+            f"  T={args.neighborhood_size}  seed={args.seed}"
+            + (f"  threads={args.n_threads}" if args.n_threads else "  threads=all")
+            + f"  time_limit={args.time_limit}s  mip_gap={args.mip_gap}",
+            file=sys.stderr,
+        )
+
+    solutions = hybrid_frontier(
+        inst,
+        pop_size          = args.pop_size,
+        n_gen             = args.n_gen,
+        neighborhood_size = args.neighborhood_size,
+        seed              = args.seed,
+        n_threads         = args.n_threads,
+        formulation       = formulation,
+        time_limit        = args.time_limit,
+        mip_gap           = args.mip_gap,
+        verbose           = args.verbose,
+    )
+
+    _print_pareto(solutions, inst, args.json, method="hybrid")
+    _save_pareto_outputs(solutions, inst, out_dir, stem="hybrid", graph=args.graph)
 
 
 # ── Console output helpers ────────────────────────────────────────────────────

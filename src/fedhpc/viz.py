@@ -319,14 +319,23 @@ def save_gantt(
     for jid, (mid, t_start) in sol.assignment.items():
         by_type[mid].append((t_start, sol.completion[jid], jid))
 
+    # Running jobs: use negative IDs to avoid collision with new job IDs.
+    # They run from t=0 until rj.end (clipped to horizon).
+    _RJ_ID_OFFSET = 10_000_000
+    rj_by_type: dict[int, list[tuple[int, int, int]]] = {m.id: [] for m in inst.instance_types}
+    for rj in inst.running_jobs:
+        if rj.type_id in rj_by_type:
+            end = min(rj.end, inst.horizon)
+            rj_by_type[rj.type_id].append((0, end, -(rj.id + _RJ_ID_OFFSET)))
+
     machine_ids = [m.id for m in inst.instance_types]
 
-    # Lane assignments per machine
+    # Lane assignments per machine — running jobs are included so new jobs don't overlap them.
     lanes_for: dict[int, list[tuple[int, int, int, int]]] = {}
     n_lanes:   dict[int, int] = {}
     for mid in machine_ids:
-        assigned, nl = _assign_lanes(by_type[mid])
-        lanes_for[mid] = assigned
+        combined, nl = _assign_lanes(rj_by_type[mid] + by_type[mid])
+        lanes_for[mid] = combined
         n_lanes[mid]   = nl
 
     # Cumulative Y base for each machine band
@@ -349,22 +358,41 @@ def save_gantt(
 
     show_labels = n_jobs <= _LABEL_JOB_LIMIT
 
+    _running_legend_added = False
     for mid in machine_ids:
         base = machine_base[mid]
         for t_start, t_end, jid, lane in lanes_for[mid]:
             bar_center = base + (lane + 0.5) * sub_h
             width      = t_end - t_start
-            ax.barh(
-                bar_center, width, left=t_start,
-                height=sub_h * 0.85,
-                color=colour_of[jid], edgecolor="black", linewidth=0.5,
-            )
-            if show_labels:
-                ax.text(
-                    t_start + width / 2, bar_center, f"j{jid}",
-                    ha="center", va="center",
-                    fontsize=8, color="white", fontweight="bold",
+            is_running = jid < 0
+            if is_running:
+                label_kw = {"label": "Running (busy)"} if not _running_legend_added else {}
+                ax.barh(
+                    bar_center, width, left=t_start,
+                    height=sub_h * 0.85,
+                    color="red", edgecolor="darkred", linewidth=0.5,
+                    alpha=0.65, hatch="//", **label_kw,
                 )
+                _running_legend_added = True
+                if show_labels:
+                    real_id = -(jid + _RJ_ID_OFFSET)
+                    ax.text(
+                        t_start + width / 2, bar_center, f"r{real_id}",
+                        ha="center", va="center",
+                        fontsize=8, color="white", fontweight="bold",
+                    )
+            else:
+                ax.barh(
+                    bar_center, width, left=t_start,
+                    height=sub_h * 0.85,
+                    color=colour_of[jid], edgecolor="black", linewidth=0.5,
+                )
+                if show_labels:
+                    ax.text(
+                        t_start + width / 2, bar_center, f"j{jid}",
+                        ha="center", va="center",
+                        fontsize=8, color="white", fontweight="bold",
+                    )
         sep_y = base + n_lanes[mid] * sub_h + gap / 2
         ax.axhline(sep_y, color="grey", linewidth=0.5, linestyle="--")
 
@@ -378,12 +406,19 @@ def save_gantt(
     ax.set_title(title)
     ax.grid(axis="x", linestyle="--", alpha=0.4)
 
+    has_running = any(rj_by_type[mid] for mid in machine_ids)
     if n_jobs <= _LEGEND_JOB_LIMIT:
         ncols = max(1, math.ceil(n_jobs / 8))
         legend_patches = [
             mpatches.Patch(color=colour_of[jid], label=f"Job {jid}")
             for jid in job_ids
         ]
+        if has_running:
+            legend_patches.insert(
+                0,
+                mpatches.Patch(facecolor="red", edgecolor="darkred",
+                               alpha=0.65, hatch="//", label="Running (busy)"),
+            )
         ax.legend(handles=legend_patches, ncols=ncols, loc="upper right", fontsize=8)
 
     fig.tight_layout()
@@ -551,16 +586,20 @@ def save_spacetime_graph(
     path: str | Path = "spacetime_graph.png",
     *,
     title: str = "Space-Time Network",
+    show_feasible_arcs: bool = False,
+    show_boundary_flow: bool = False,
 ) -> list[Path]:
     """Save one space-time network PNG per instance type, all in the same folder.
 
     Files are named ``<stem>_type{mid}<suffix>`` next to *path*.
     Each file shows one machine type with:
-      - Black dots at every integer time step t = 0 … H (network nodes).
+      - Black dots at every integer time step t = 0 … H (network nodes),
+        each labelled with its time index T directly on the node.
       - Silver horizontal arrows for idle-capacity arcs (y[m,t] flow).
       - Coloured arched arrows for job assignment arcs x[j,m,t]:
-          bold + labelled if *sol* is provided and x=1 for that arc,
-          faint if *sol* is None (all feasible arcs shown as background).
+          bold + labelled when selected in *sol*;
+          faint when *show_feasible_arcs* is True (all feasible arcs shown).
+      - ``N=`` source/sink labels at t=0 and t=H when *show_boundary_flow* is True.
 
     Returns an empty list when H > _MAX_GRAPH_HORIZON (too dense to render legibly).
     """
@@ -612,8 +651,11 @@ def save_spacetime_graph(
         fig_w = max(14.0, H * 0.35)
         fig, ax = plt.subplots(1, 1, figsize=(fig_w, 3.6))
 
-        # ── nodes ─────────────────────────────────────────────────────────────
+        # ── nodes (labelled with time index) ─────────────────────────────────
         ax.scatter(range(H + 1), [0.0] * (H + 1), s=40, color="black", zorder=5)
+        for t in range(H + 1):
+            ax.text(t, -0.30, str(t), ha="center", va="top",
+                    fontsize=6, color="black", zorder=6)
 
         # ── idle-capacity arcs (horizontal) ───────────────────────────────────
         for t in range(H):
@@ -637,7 +679,7 @@ def save_spacetime_graph(
             p = inst.p_occ[j.id, mid]
             for t in inst.T[j.id, mid]:
                 is_sel = (j.id, mid, t) in selected
-                if sol is not None and not is_sel:
+                if not show_feasible_arcs and sol is not None and not is_sel:
                     continue
                 arc_entries.append((j.id, t, p, is_sel))
 
@@ -695,27 +737,26 @@ def save_spacetime_graph(
                     color=c, alpha=0.4,
                 )
 
-        # ── boundary labels ────────────────────────────────────────────────────
-        n_running = inst.n_running.get(mid, 0)
-        cap       = itype.capacity if itype.capacity is not None else "∞"
-        n_avail   = (itype.capacity or n_jobs) - n_running
-        ax.text(-0.8, 0.0, f"N={n_avail}", ha="right", va="center",
-                fontsize=8, color="dimgray")
-        ax.text(H + 0.8, 0.0, f"N={cap}", ha="left", va="center",
-                fontsize=8, color="dimgray")
+        # ── boundary labels (source / sink flow) ──────────────────────────────
+        cap     = itype.capacity if itype.capacity is not None else "∞"
+        if show_boundary_flow:
+            n_running = inst.n_running.get(mid, 0)
+            n_avail   = (itype.capacity or n_jobs) - n_running
+            # For unlimited capacity N_end must equal N_start (no net consumption).
+            right_n   = n_avail if itype.capacity is None else cap
+            ax.text(-0.8, 0.0, f"N={n_avail}", ha="right", va="center",
+                    fontsize=8, color="dimgray")
+            ax.text(H + 0.8, 0.0, f"N={right_n}", ha="left", va="center",
+                    fontsize=8, color="dimgray")
 
         y_top = max(0.6, 0.4 + max_lane * 0.3 + 0.45)
         ax.set_xlim(-1.5, H + 1.5)
-        ax.set_ylim(-0.45, y_top)
+        ax.set_ylim(-0.55, y_top)
         ax.axhline(0, color="black", lw=0.5, zorder=1)
-        ax.set_xlabel("Time (slots)", fontsize=8)
         ax.yaxis.set_visible(False)
-        for spine in ("top", "left", "right"):
+        ax.xaxis.set_visible(False)
+        for spine in ("top", "left", "right", "bottom"):
             ax.spines[spine].set_visible(False)
-
-        step = max(1, H // 20)
-        ax.set_xticks(range(0, H + 1, step))
-        ax.tick_params(axis="x", labelsize=7)
         ax.grid(axis="x", linestyle=":", alpha=0.3)
 
         # ── legend ────────────────────────────────────────────────────────────
@@ -738,8 +779,166 @@ def save_spacetime_graph(
 
         out_path = out_dir / f"{stem}_type{mid}{suffix}"
         fig.savefig(out_path, dpi=120, bbox_inches="tight")
+        out_pdf = out_path.with_suffix(".pdf")
+        fig.savefig(out_pdf, bbox_inches="tight")
         plt.close(fig)
         saved.append(out_path)
+        saved.append(out_pdf)
+
+    saved.extend(
+        _save_spacetime_graph_gv(
+            inst, sol, base,
+            title=title,
+            show_feasible_arcs=show_feasible_arcs,
+            show_boundary_flow=show_boundary_flow,
+        )
+    )
+    return saved
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Space-time network — Graphviz / DOT renderer
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _rgba_to_hex(rgba) -> str:
+    r, g, b, _ = rgba
+    return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
+
+
+def _save_spacetime_graph_gv(
+    inst: Instance,
+    sol: Solution | None,
+    base_path: Path,
+    *,
+    title: str,
+    show_feasible_arcs: bool,
+    show_boundary_flow: bool,
+) -> list[Path]:
+    """Render one Graphviz SVG space-time graph per instance type.
+
+    Files are saved as ``<stem>_type{mid}_gv.svg`` next to *base_path*.
+    The graph shares the same arc-visibility rules as the matplotlib version:
+    selected arcs are bold and coloured; feasible-only arcs are dashed and
+    faint, shown only when *show_feasible_arcs* is True.
+    """
+    import graphviz
+
+    H       = inst.horizon
+    stem    = base_path.stem
+    out_dir = base_path.parent
+
+    job_list  = sorted(inst.jobs, key=lambda j: j.id)
+    n_jobs    = len(job_list)
+
+    colours   = plt.colormaps["tab10"].resampled(max(n_jobs, 1))
+    colour_of = {j.id: colours(i) for i, j in enumerate(job_list)}
+
+    selected: set[tuple[int, int, int]] = set()
+    if sol and sol.assignment:
+        for jid, (mid_s, t_start) in sol.assignment.items():
+            selected.add((jid, mid_s, t_start))
+
+    saved: list[Path] = []
+
+    for itype in inst.instance_types:
+        mid     = itype.id
+        cap_int = itype.capacity
+        cap_str = str(cap_int) if cap_int is not None else "∞"
+
+        # ── idle-flow weights (same logic as matplotlib renderer) ─────────────
+        if cap_int is not None:
+            jobs_at: list[int] = [0] * (H + 1)
+            if sol and sol.assignment:
+                for jid, (m, ts) in sol.assignment.items():
+                    if m == mid:
+                        p_j = inst.p_occ[jid, mid]
+                        for tt in range(ts, min(ts + p_j, H + 1)):
+                            jobs_at[tt] += 1
+            for rj in inst.running_jobs:
+                if rj.type_id == mid:
+                    for tt in range(0, min(rj.end, H + 1)):
+                        jobs_at[tt] += 1
+            idle_flow: list[int | None] = [max(0, cap_int - jobs_at[t]) for t in range(H + 1)]
+        else:
+            idle_flow = [None] * (H + 1)
+
+        # ── Digraph setup ─────────────────────────────────────────────────────
+        gv = graphviz.Digraph(
+            graph_attr={
+                "rankdir":  "LR",
+                "label":    (f"{title} — Type {mid}  [{itype.kind}]"
+                             f"  perf={itype.perf}  cap={cap_str}"),
+                "labelloc": "t",
+                "fontsize": "13",
+                "splines":  "spline",
+                "nodesep":  "0.6",
+                "ranksep":  "0.4",
+                "bgcolor":  "white",
+            },
+            node_attr={
+                "shape":     "circle",
+                "style":     "filled",
+                "fillcolor": "black",
+                "fontcolor": "white",
+                "fontsize":  "9",
+                "width":     "0.28",
+                "height":    "0.28",
+                "fixedsize": "true",
+            },
+            edge_attr={"fontsize": "7"},
+        )
+
+        # ── nodes ─────────────────────────────────────────────────────────────
+        for t in range(H + 1):
+            gv.node(f"t{t}", label=str(t))
+
+        # ── idle-capacity arcs ────────────────────────────────────────────────
+        for t in range(H):
+            w   = idle_flow[t]
+            lbl = str(w) if w is not None else ""
+            gv.edge(f"t{t}", f"t{t + 1}", label=lbl,
+                    color="silver", fontcolor="gray",
+                    arrowsize="0.6", penwidth="1.2")
+
+        # ── job arcs ──────────────────────────────────────────────────────────
+        for j in job_list:
+            if mid not in inst.F[j.id]:
+                continue
+            p = inst.p_occ[j.id, mid]
+            for t in inst.T[j.id, mid]:
+                is_sel = (j.id, mid, t) in selected
+                if not show_feasible_arcs and sol is not None and not is_sel:
+                    continue
+                c_hex = _rgba_to_hex(colour_of[j.id])
+                if is_sel:
+                    gv.edge(f"t{t}", f"t{t + p}",
+                            label=f"j{j.id} [p={p}]",
+                            color=c_hex, fontcolor=c_hex,
+                            penwidth="2.5",
+                            constraint="false", weight="0")
+                else:
+                    faint = f"{c_hex}38"  # ~22 % opacity (graphviz #rrggbbaa)
+                    gv.edge(f"t{t}", f"t{t + p}",
+                            label=str(p),
+                            color=faint, fontcolor=faint,
+                            penwidth="0.8", style="dashed",
+                            constraint="false", weight="0")
+
+        # ── boundary flow labels ──────────────────────────────────────────────
+        if show_boundary_flow:
+            n_running = inst.n_running.get(mid, 0)
+            cap       = itype.capacity if itype.capacity is not None else "∞"
+            n_avail   = (itype.capacity or n_jobs) - n_running
+            right_n   = n_avail if itype.capacity is None else cap
+            gv.node("t0",     label="0",    xlabel=f"N={n_avail}")
+            gv.node(f"t{H}", label=str(H), xlabel=f"N={right_n}")
+
+        # ── render ────────────────────────────────────────────────────────────
+        out_stem = str(out_dir / f"{stem}_type{mid}_gv")
+        gv.render(out_stem, format="svg", cleanup=False)
+        gv.render(out_stem, format="pdf", cleanup=True)
+        saved.append(Path(f"{out_stem}.svg"))
+        saved.append(Path(f"{out_stem}.pdf"))
 
     return saved
 

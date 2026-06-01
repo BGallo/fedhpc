@@ -180,10 +180,37 @@ Individual crossover(const Individual& p1, const Individual& p2, std::mt19937& r
     Individual child;
     const int n = static_cast<int>(p1.genes.size());
     child.genes.resize(n);
-    std::uniform_int_distribution<int> coin(0, 1);
+    if (n <= 2) {
+        std::uniform_int_distribution<int> coin(0, 1);
+        for (int j = 0; j < n; j++)
+            child.genes[j] = coin(rng) ? p1.genes[j] : p2.genes[j];
+        return child;
+    }
+    // 2-point crossover: takes a contiguous segment from p2, rest from p1.
+    // Produces structurally different offspring vs uniform when parents are similar.
+    std::uniform_int_distribution<int> pt(1, n - 1);
+    int c1 = pt(rng), c2 = pt(rng);
+    if (c1 > c2) std::swap(c1, c2);
     for (int j = 0; j < n; j++)
-        child.genes[j] = coin(rng) ? p1.genes[j] : p2.genes[j];
+        child.genes[j] = (j >= c1 && j < c2) ? p2.genes[j] : p1.genes[j];
     return child;
+}
+
+Individual make_greedy(const Problem& prob, bool minimize_cost) {
+    Individual ind;
+    ind.genes.resize(prob.n_jobs);
+    for (int j = 0; j < prob.n_jobs; j++) {
+        int best = 0;
+        double best_val = minimize_cost ? prob.job_slots[j][0].cost
+                                        : prob.job_slots[j][0].f1_contrib;
+        for (int k = 1; k < (int)prob.job_slots[j].size(); k++) {
+            const double val = minimize_cost ? prob.job_slots[j][k].cost
+                                             : prob.job_slots[j][k].f1_contrib;
+            if (val < best_val) { best_val = val; best = k; }
+        }
+        ind.genes[j] = best;
+    }
+    return ind;
 }
 
 void mutate(Individual& ind, const Problem& prob, double p_mut, std::mt19937& rng) {
@@ -327,7 +354,7 @@ ResultList run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed,
     set_num_threads(n_threads);
 
     std::mt19937 rng(seed);
-    const double p_mut = 1.0 / prob.n_jobs;
+    const double p_mut = 2.0 / prob.n_jobs;
 
     // ── Initial population ────────────────────────────────────────────────
 
@@ -336,6 +363,9 @@ ResultList run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed,
     for (auto& s : init_seeds) s = rng();
 
     std::vector<Individual> pop(pop_size);
+    // Anchor both ends of the Pareto front with extremal greedy seeds.
+    if (pop_size >= 1) pop[0] = make_greedy(prob, false); // minimize time (f1)
+    if (pop_size >= 2) pop[1] = make_greedy(prob, true);  // minimize cost (f2)
 
 #ifdef _OPENMP
     #pragma omp parallel
@@ -344,8 +374,10 @@ ResultList run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed,
         ws.reset(prob.n_types, prob.max_slot);
         #pragma omp for schedule(static)
         for (int k = 0; k < pop_size; k++) {
-            std::mt19937 lrng(init_seeds[k]);
-            pop[k] = make_random(prob, lrng);
+            if (k >= 2) {
+                std::mt19937 lrng(init_seeds[k]);
+                pop[k] = make_random(prob, lrng);
+            }
             evaluate(pop[k], prob, ws);
         }
     }
@@ -354,8 +386,10 @@ ResultList run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed,
         EvalWorkspace ws;
         ws.reset(prob.n_types, prob.max_slot);
         for (int k = 0; k < pop_size; k++) {
-            std::mt19937 lrng(init_seeds[k]);
-            pop[k] = make_random(prob, lrng);
+            if (k >= 2) {
+                std::mt19937 lrng(init_seeds[k]);
+                pop[k] = make_random(prob, lrng);
+            }
             evaluate(pop[k], prob, ws);
         }
     }
@@ -461,10 +495,12 @@ ResultList run_moead(const Problem& prob, int n_weights, int n_gen,
     const double p_mut = 1.0 / prob.n_jobs;
 
     // Weight vectors: uniformly spaced on the 2-objective simplex.
+    // W_EPS floor prevents degenerate single-objective subproblems at the extremes.
+    constexpr double W_EPS = 1e-4;
     std::vector<std::pair<double,double>> W(n_weights);
     for (int i = 0; i < n_weights; i++) {
         const double lam = (n_weights > 1) ? (double)i / (n_weights - 1) : 0.5;
-        W[i] = {lam, 1.0 - lam};
+        W[i] = {lam + W_EPS, 1.0 - lam + W_EPS};
     }
 
     // Precompute T-nearest neighbourhoods.
@@ -490,9 +526,11 @@ ResultList run_moead(const Problem& prob, int n_weights, int n_gen,
     std::vector<Individual> pop(n_weights);
     double z1 = std::numeric_limits<double>::infinity();
     double z2 = std::numeric_limits<double>::infinity();
+    double n1 = -std::numeric_limits<double>::infinity();
+    double n2 = -std::numeric_limits<double>::infinity();
 
 #ifdef _OPENMP
-    #pragma omp parallel reduction(min : z1, z2)
+    #pragma omp parallel reduction(min : z1, z2) reduction(max : n1, n2)
     {
         EvalWorkspace ws;
         ws.reset(prob.n_types, prob.max_slot);
@@ -504,6 +542,8 @@ ResultList run_moead(const Problem& prob, int n_weights, int n_gen,
             if (pop[i].cv == 0.0) {
                 if (pop[i].f1 < z1) z1 = pop[i].f1;
                 if (pop[i].f2 < z2) z2 = pop[i].f2;
+                if (pop[i].f1 > n1) n1 = pop[i].f1;
+                if (pop[i].f2 > n2) n2 = pop[i].f2;
             }
         }
     }
@@ -518,19 +558,27 @@ ResultList run_moead(const Problem& prob, int n_weights, int n_gen,
             if (pop[i].cv == 0.0) {
                 z1 = std::min(z1, pop[i].f1);
                 z2 = std::min(z2, pop[i].f2);
+                n1 = std::max(n1, pop[i].f1);
+                n2 = std::max(n2, pop[i].f2);
             }
         }
     }
 #endif
     if (!std::isfinite(z1)) z1 = 0.0;
     if (!std::isfinite(z2)) z2 = 0.0;
+    if (!std::isfinite(n1)) n1 = z1 + 1.0;
+    if (!std::isfinite(n2)) n2 = z2 + 1.0;
 
-    // Tchebycheff scalarization with penalty for infeasibles.
+    // Normalized Tchebycheff scalarization: each objective is scaled by its observed
+    // range [ideal, nadir] so that weight vectors evenly spread across the tradeoff
+    // regardless of the absolute scale difference between f1 and f2.
     auto scalar = [&](const Individual& ind, int i) noexcept -> double {
         if (ind.cv > 0.0) return 1e18 + ind.cv * 1e6;
         const double lam1 = W[i].first, lam2 = W[i].second;
-        return std::max(lam1 * std::abs(ind.f1 - z1),
-                        lam2 * std::abs(ind.f2 - z2));
+        const double r1 = std::max(n1 - z1, 1.0);
+        const double r2 = std::max(n2 - z2, 1.0);
+        return std::max(lam1 * (ind.f1 - z1) / r1,
+                        lam2 * (ind.f2 - z2) / r2);
     };
 
     // Pre-allocate children buffer.
@@ -542,10 +590,11 @@ ResultList run_moead(const Problem& prob, int n_weights, int n_gen,
 
         for (auto& s : child_seeds) s = rng();
 
-        double dz1 = z1, dz2 = z2;  // local ideal point deltas for this generation
+        double dz1 = z1, dz2 = z2;
+        double dn1 = n1, dn2 = n2;
 
 #ifdef _OPENMP
-        #pragma omp parallel reduction(min : dz1, dz2)
+        #pragma omp parallel reduction(min : dz1, dz2) reduction(max : dn1, dn2)
         {
             EvalWorkspace ws;
             ws.reset(prob.n_types, prob.max_slot);
@@ -561,6 +610,8 @@ ResultList run_moead(const Problem& prob, int n_weights, int n_gen,
                 if (children[i].cv == 0.0) {
                     if (children[i].f1 < dz1) dz1 = children[i].f1;
                     if (children[i].f2 < dz2) dz2 = children[i].f2;
+                    if (children[i].f1 > dn1) dn1 = children[i].f1;
+                    if (children[i].f2 > dn2) dn2 = children[i].f2;
                 }
             }
         }
@@ -579,11 +630,13 @@ ResultList run_moead(const Problem& prob, int n_weights, int n_gen,
                 if (children[i].cv == 0.0) {
                     dz1 = std::min(dz1, children[i].f1);
                     dz2 = std::min(dz2, children[i].f2);
+                    dn1 = std::max(dn1, children[i].f1);
+                    dn2 = std::max(dn2, children[i].f2);
                 }
             }
         }
 #endif
-        z1 = dz1; z2 = dz2;
+        z1 = dz1; z2 = dz2; n1 = dn1; n2 = dn2;
 
         // ── Phase 2: sequential neighbourhood update ─────────────────────
 
