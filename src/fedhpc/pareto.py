@@ -110,14 +110,20 @@ def hybrid_frontier(
     Phase 1 — EA: run NSGA-II (seed) and MOEA/D (seed+1) to build a pool of
     non-dominated candidate solutions that jointly span the tradeoff space.
 
-    Phase 2 — MIP: for each candidate cost threshold f2_k (sorted ascending),
-    solve  min f1  s.t.  f2 ≤ f2_k  exactly with Gurobi, warm-started from
-    the EA assignment.  The EA candidates act as guided ε-values; any candidate
-    that was sub-optimal at its cost level is promoted to the true Pareto point.
+    Phase 2a — Anchors: take the EA's best-cost and best-turnaround solutions and
+    solve the complementary objective exactly (min f1 s.t. f2 ≤ f2_ea_best and
+    min f2 s.t. f1 ≤ f1_ea_best).  These two exact Pareto-frontier corners are
+    used to prune the remaining candidate pool aggressively.
 
-    Phase 3 — Filter: final Pareto filter on exact solutions removes duplicates
-    and dominances that arise when multiple EA ε-values collapse to the same
-    exact optimal point.
+    Phase 2b — Prune: a candidate is interior only if it strictly improves on
+    both anchors simultaneously (f1_c < anchor_cheap.f1 AND f2_c < anchor_fast.f2).
+    All other candidates are already dominated and are discarded.
+
+    Phase 2c — MIP interior: for each surviving interior candidate's cost threshold
+    solve  min f1  s.t.  f2 ≤ f2_k  exactly with Gurobi, warm-started from the EA
+    assignment.
+
+    Phase 3 — Filter: final Pareto filter removes duplicates and dominances.
 
     Parameters
     ----------
@@ -168,32 +174,108 @@ def hybrid_frontier(
     if not candidates:
         return []
 
-    # ── Phase 2: MIP verification at each EA cost level ──────────────────────
-
     configure_env(verbose=verbose)
     fmt = formulation or SpaceTimeFormulation()
 
     mip_kw: dict = {"TimeLimit": time_limit, "MIPGap": mip_gap, **mip_params}
-    # OutputFlag: 1 when verbose so individual solve logs are visible.
     mip_kw["OutputFlag"] = 1 if verbose else mip_kw.get("OutputFlag", 0)
 
-    # Sort by f2 ascending and deduplicate by cost level: two EA candidates at the
-    # same f2 threshold produce identical MIP instances, so keep only the one with
-    # the better (lower) f1 hint as the warm-start source.
-    sorted_cands = sorted(candidates, key=lambda s: (s.f2 or 0.0, s.f1 or 0.0))
-    deduped_cands: list[Solution] = []
+    def _mip_solve(
+        hint: Solution | None,
+        *,
+        constrain_f2: float | None = None,
+        constrain_f1: float | None = None,
+        minimize_cost: bool = False,
+    ) -> Solution:
+        t0 = _time.perf_counter()
+        mdl, vars_ = fmt.build(inst)
+        build_time = _time.perf_counter() - t0
+        _apply_params(mdl, mip_kw)
+        x = vars_["x"]
+        if hint is not None:
+            for j in inst.jobs:
+                if j.id not in hint.assignment:
+                    continue
+                m_hint, t_hint = hint.assignment[j.id]
+                for m_id in inst.F[j.id]:
+                    for t in inst.T[j.id, m_id]:
+                        x[j.id, m_id, t].Start = (
+                            1.0 if (m_id == m_hint and t == t_hint) else 0.0
+                        )
+        if constrain_f2 is not None:
+            mdl.addConstr(fmt.f2_expr(inst, x) <= constrain_f2, name="eps_cost")
+        if constrain_f1 is not None:
+            mdl.addConstr(fmt.f1_expr(inst, x) <= constrain_f1, name="eps_turnaround")
+        obj = fmt.f2_expr(inst, x) if minimize_cost else fmt.f1_expr(inst, x)
+        mdl.setObjective(obj, GRB.MINIMIZE)
+        t1 = _time.perf_counter()
+        mdl.optimize()
+        return _extract(inst, mdl, vars_, build_time=build_time,
+                        solve_time=_time.perf_counter() - t1)
+
+    # ── Phase 2a: Anchor solves — pin both extremes of the Pareto front ───────
+    # ea_fast  has the lowest turnaround among EA candidates.
+    # ea_cheap has the lowest cost among EA candidates.
+    # We solve the complementary objective for each to get exact Pareto corners.
+
+    ea_fast  = min(candidates, key=lambda s: s.f1 or float('inf'))
+    ea_cheap = min(candidates, key=lambda s: s.f2 or float('inf'))
+
+    if verbose:
+        print(
+            f"hybrid: phase 2a — anchor solves"
+            f"  (EA f1_min={ea_fast.f1:.1f}  f2_min={ea_cheap.f2:.4f}) …",
+            file=sys.stderr, flush=True,
+        )
+
+    # min turnaround at EA's best cost level → exact right-end of front
+    anchor_fast  = _mip_solve(ea_cheap, constrain_f2=ea_cheap.f2)
+    # min cost at EA's best turnaround level → exact left-end of front
+    anchor_cheap = _mip_solve(ea_fast,  constrain_f1=ea_fast.f1, minimize_cost=True)
+
+    exact: list[Solution] = [s for s in (anchor_fast, anchor_cheap) if s.f1 is not None]
+    exact = _filter_dominated(exact)
+
+    if verbose:
+        for sol, label in ((anchor_fast, "anchor_fast"), (anchor_cheap, "anchor_cheap")):
+            if sol.f1 is not None:
+                print(
+                    f"  {label}: f1={sol.f1:.1f}  f2={sol.f2:.4f}  [{sol.status}]",
+                    file=sys.stderr, flush=True,
+                )
+
+    # ── Phase 2b: Prune candidates dominated by the anchors ───────────────────
+    # An interior Pareto point must strictly improve on both anchors:
+    #   f1_c < anchor_cheap.f1  — better turnaround than the min-cost corner
+    #   f2_c < anchor_fast.f2   — better cost than the min-turnaround corner
+    f1_cut = anchor_cheap.f1 if anchor_cheap.f1 is not None else float('inf')
+    f2_cut = anchor_fast.f2  if anchor_fast.f2  is not None else float('inf')
+
+    interior = [c for c in candidates
+                if (c.f1 or float('inf')) < f1_cut
+                and (c.f2 or float('inf')) < f2_cut]
+
+    # Sort by f2 ascending; deduplicate equal cost levels (keep best-f1 hint).
+    sorted_interior = sorted(interior, key=lambda s: (s.f2 or 0.0, s.f1 or 0.0))
+    deduped: list[Solution] = []
     seen_f2: list[float] = []
-    for cand in sorted_cands:
+    for cand in sorted_interior:
         f2 = cand.f2 or 0.0
         if not any(abs(f2 - prev) < 1e-9 for prev in seen_f2):
             seen_f2.append(f2)
-            deduped_cands.append(cand)
-    sorted_cands = deduped_cands
+            deduped.append(cand)
 
-    n = len(sorted_cands)
-    exact: list[Solution] = []
+    if verbose:
+        print(
+            f"hybrid: {len(candidates)} candidates"
+            f" → {len(deduped)} interior after anchor pruning",
+            file=sys.stderr, flush=True,
+        )
 
-    for i, cand in enumerate(sorted_cands):
+    # ── Phase 2c: MIP verification for interior candidates ────────────────────
+
+    n = len(deduped)
+    for i, cand in enumerate(deduped):
         if verbose:
             print(
                 f"hybrid: [{i + 1}/{n}]  min f1  s.t. f2 ≤ {cand.f2:.4f}"
@@ -201,33 +283,7 @@ def hybrid_frontier(
                 file=sys.stderr, flush=True,
             )
 
-        t0 = _time.perf_counter()
-        mdl, vars_ = fmt.build(inst)
-        build_time = _time.perf_counter() - t0
-
-        _apply_params(mdl, mip_kw)
-
-        # Warm-start Gurobi from the EA assignment so it begins with a feasible
-        # incumbent that is at most as bad as the heuristic solution.
-        x = vars_["x"]
-        for j in inst.jobs:
-            if j.id not in cand.assignment:
-                continue
-            m_hint, t_hint = cand.assignment[j.id]
-            for m_id in inst.F[j.id]:
-                for t in inst.T[j.id, m_id]:
-                    x[j.id, m_id, t].Start = (
-                        1.0 if (m_id == m_hint and t == t_hint) else 0.0
-                    )
-
-        mdl.addConstr(fmt.f2_expr(inst, x) <= cand.f2, name="eps_cost")
-        mdl.setObjective(fmt.f1_expr(inst, x), GRB.MINIMIZE)
-
-        t1 = _time.perf_counter()
-        mdl.optimize()
-        solve_time = _time.perf_counter() - t1
-
-        sol = _extract(inst, mdl, vars_, build_time=build_time, solve_time=solve_time)
+        sol = _mip_solve(cand, constrain_f2=cand.f2)
         if sol.f1 is not None:
             prev_len = len(exact)
             exact.append(sol)
@@ -237,7 +293,6 @@ def hybrid_frontier(
                 drop_str = f"  (dropped {dropped} dominated)" if dropped else ""
                 print(
                     f"  → f1={sol.f1:.1f}  f2={sol.f2:.4f}  [{sol.status}]"
-                    f"  build={build_time:.2f}s  solve={solve_time:.2f}s"
                     f"  front={len(exact)}{drop_str}",
                     file=sys.stderr, flush=True,
                 )
