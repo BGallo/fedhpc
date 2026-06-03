@@ -213,6 +213,131 @@ Individual make_greedy(const Problem& prob, bool minimize_cost) {
     return ind;
 }
 
+// Earliest possible start on any type — no waiting past arrival.
+Individual make_no_wait(const Problem& prob) {
+    Individual ind;
+    ind.genes.resize(prob.n_jobs);
+    for (int j = 0; j < prob.n_jobs; j++) {
+        int best = 0, best_start = prob.job_slots[j][0].start;
+        for (int k = 1; k < (int)prob.job_slots[j].size(); k++)
+            if (prob.job_slots[j][k].start < best_start) {
+                best_start = prob.job_slots[j][k].start; best = k;
+            }
+        ind.genes[j] = best;
+    }
+    return ind;
+}
+
+// Earliest start on finite-capacity (on-prem) types; fall back to any type.
+Individual make_no_burst(const Problem& prob) {
+    Individual ind;
+    ind.genes.resize(prob.n_jobs);
+    for (int j = 0; j < prob.n_jobs; j++) {
+        int best = -1, best_start = std::numeric_limits<int>::max();
+        for (int k = 0; k < (int)prob.job_slots[j].size(); k++) {
+            const SlotInfo& s = prob.job_slots[j][k];
+            const int cap = (s.type_id < (int)prob.type_cap.size())
+                            ? prob.type_cap[s.type_id] : -1;
+            if (cap >= 0 && s.start < best_start) {
+                best_start = s.start; best = k;
+            }
+        }
+        if (best < 0) {
+            best = 0; best_start = prob.job_slots[j][0].start;
+            for (int k = 1; k < (int)prob.job_slots[j].size(); k++)
+                if (prob.job_slots[j][k].start < best_start) {
+                    best_start = prob.job_slots[j][k].start; best = k;
+                }
+        }
+        ind.genes[j] = best;
+    }
+    return ind;
+}
+
+// Earliest start on unlimited-capacity (cloud) types; fall back to any type.
+Individual make_full_burst(const Problem& prob) {
+    Individual ind;
+    ind.genes.resize(prob.n_jobs);
+    for (int j = 0; j < prob.n_jobs; j++) {
+        int best = -1, best_start = std::numeric_limits<int>::max();
+        for (int k = 0; k < (int)prob.job_slots[j].size(); k++) {
+            const SlotInfo& s = prob.job_slots[j][k];
+            const int cap = (s.type_id < (int)prob.type_cap.size())
+                            ? prob.type_cap[s.type_id] : -1;
+            if (cap < 0 && s.start < best_start) {
+                best_start = s.start; best = k;
+            }
+        }
+        if (best < 0) {
+            best = 0; best_start = prob.job_slots[j][0].start;
+            for (int k = 1; k < (int)prob.job_slots[j].size(); k++)
+                if (prob.job_slots[j][k].start < best_start) {
+                    best_start = prob.job_slots[j][k].start; best = k;
+                }
+        }
+        ind.genes[j] = best;
+    }
+    return ind;
+}
+
+// Each job starts at its earliest slot + round(frac * max_slot) time units.
+Individual make_fixed_wait(const Problem& prob, double frac) {
+    Individual ind;
+    ind.genes.resize(prob.n_jobs);
+    const int delay = static_cast<int>(std::round(frac * prob.max_slot));
+    for (int j = 0; j < prob.n_jobs; j++) {
+        int min_start = prob.job_slots[j][0].start;
+        for (int k = 1; k < (int)prob.job_slots[j].size(); k++)
+            min_start = std::min(min_start, prob.job_slots[j][k].start);
+        const int target = min_start + delay;
+        int best = 0, best_dist = std::numeric_limits<int>::max();
+        for (int k = 0; k < (int)prob.job_slots[j].size(); k++) {
+            const int d = std::abs(prob.job_slots[j][k].start - target);
+            if (d < best_dist) { best_dist = d; best = k; }
+        }
+        ind.genes[j] = best;
+    }
+    return ind;
+}
+
+// Stagger jobs across the horizon by index: job j targets min_start_j + j*(max_slot/(n_jobs-1)).
+Individual make_star_wait(const Problem& prob) {
+    Individual ind;
+    ind.genes.resize(prob.n_jobs);
+    for (int j = 0; j < prob.n_jobs; j++) {
+        int min_start = prob.job_slots[j][0].start;
+        for (int k = 1; k < (int)prob.job_slots[j].size(); k++)
+            min_start = std::min(min_start, prob.job_slots[j][k].start);
+        const int step = (prob.n_jobs > 1)
+            ? static_cast<int>(std::round((double)j * prob.max_slot / (prob.n_jobs - 1)))
+            : 0;
+        const int target = min_start + step;
+        int best = 0, best_dist = std::numeric_limits<int>::max();
+        for (int k = 0; k < (int)prob.job_slots[j].size(); k++) {
+            const int d = std::abs(prob.job_slots[j][k].start - target);
+            if (d < best_dist) { best_dist = d; best = k; }
+        }
+        ind.genes[j] = best;
+    }
+    return ind;
+}
+
+// All deterministic seed individuals in a fixed order:
+// greedy-time, greedy-cost, no-wait, no-burst, full-burst,
+// fixed-wait-25%, fixed-wait-50%, star-wait.
+std::vector<Individual> make_heuristic_seeds(const Problem& prob) {
+    return {
+        make_greedy(prob, false),     // 0: min turnaround (f1)
+        make_greedy(prob, true),      // 1: min cost (f2)
+        make_no_wait(prob),           // 2: ASAP any type
+        make_no_burst(prob),          // 3: ASAP on-prem, fallback cloud
+        make_full_burst(prob),        // 4: ASAP cloud, fallback on-prem
+        make_fixed_wait(prob, 0.25),  // 5: 25% horizon delay
+        make_fixed_wait(prob, 0.50),  // 6: 50% horizon delay
+        make_star_wait(prob),         // 7: staggered by job index
+    };
+}
+
 void mutate(Individual& ind, const Problem& prob, double p_mut, std::mt19937& rng) {
     std::uniform_real_distribution<double> u(0.0, 1.0);
     for (int j = 0; j < prob.n_jobs; j++) {
@@ -362,10 +487,14 @@ ResultList run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed,
     std::vector<uint32_t> init_seeds(pop_size);
     for (auto& s : init_seeds) s = rng();
 
+    // Seed the first slots with deterministic heuristic individuals that cover
+    // diverse regions of the objective space (on-prem, cloud, early, late, staggered).
+    auto h_seeds = make_heuristic_seeds(prob);
+    const int n_hseeds = static_cast<int>(h_seeds.size());
+
     std::vector<Individual> pop(pop_size);
-    // Anchor both ends of the Pareto front with extremal greedy seeds.
-    if (pop_size >= 1) pop[0] = make_greedy(prob, false); // minimize time (f1)
-    if (pop_size >= 2) pop[1] = make_greedy(prob, true);  // minimize cost (f2)
+    for (int k = 0; k < n_hseeds && k < pop_size; k++)
+        pop[k] = h_seeds[k];
 
 #ifdef _OPENMP
     #pragma omp parallel
@@ -374,7 +503,7 @@ ResultList run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed,
         ws.reset(prob.n_types, prob.max_slot);
         #pragma omp for schedule(static)
         for (int k = 0; k < pop_size; k++) {
-            if (k >= 2) {
+            if (k >= n_hseeds) {
                 std::mt19937 lrng(init_seeds[k]);
                 pop[k] = make_random(prob, lrng);
             }
@@ -386,7 +515,7 @@ ResultList run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed,
         EvalWorkspace ws;
         ws.reset(prob.n_types, prob.max_slot);
         for (int k = 0; k < pop_size; k++) {
-            if (k >= 2) {
+            if (k >= n_hseeds) {
                 std::mt19937 lrng(init_seeds[k]);
                 pop[k] = make_random(prob, lrng);
             }
@@ -523,7 +652,16 @@ ResultList run_moead(const Problem& prob, int n_weights, int n_gen,
     std::vector<uint32_t> init_seeds(n_weights);
     for (auto& s : init_seeds) s = rng();
 
+    // Seed the first slots with deterministic heuristic individuals; the rest
+    // are random. The neighbourhood update corrects any weight-vector mismatch
+    // within the first few generations.
+    auto h_seeds = make_heuristic_seeds(prob);
+    const int n_hseeds = static_cast<int>(h_seeds.size());
+
     std::vector<Individual> pop(n_weights);
+    for (int i = 0; i < n_hseeds && i < n_weights; i++)
+        pop[i] = h_seeds[i];
+
     double z1 = std::numeric_limits<double>::infinity();
     double z2 = std::numeric_limits<double>::infinity();
     double n1 = -std::numeric_limits<double>::infinity();
@@ -536,8 +674,10 @@ ResultList run_moead(const Problem& prob, int n_weights, int n_gen,
         ws.reset(prob.n_types, prob.max_slot);
         #pragma omp for schedule(static)
         for (int i = 0; i < n_weights; i++) {
-            std::mt19937 lrng(init_seeds[i]);
-            pop[i] = make_random(prob, lrng);
+            if (i >= n_hseeds) {
+                std::mt19937 lrng(init_seeds[i]);
+                pop[i] = make_random(prob, lrng);
+            }
             evaluate(pop[i], prob, ws);
             if (pop[i].cv == 0.0) {
                 if (pop[i].f1 < z1) z1 = pop[i].f1;
@@ -552,8 +692,10 @@ ResultList run_moead(const Problem& prob, int n_weights, int n_gen,
         EvalWorkspace ws;
         ws.reset(prob.n_types, prob.max_slot);
         for (int i = 0; i < n_weights; i++) {
-            std::mt19937 lrng(init_seeds[i]);
-            pop[i] = make_random(prob, lrng);
+            if (i >= n_hseeds) {
+                std::mt19937 lrng(init_seeds[i]);
+                pop[i] = make_random(prob, lrng);
+            }
             evaluate(pop[i], prob, ws);
             if (pop[i].cv == 0.0) {
                 z1 = std::min(z1, pop[i].f1);
