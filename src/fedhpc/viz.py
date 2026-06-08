@@ -42,24 +42,43 @@ def _stat_block(values: list[float]) -> dict:
 
 
 def compute_stats(sol: Solution, inst: Instance) -> dict:
-    """Compute per-job and system-level statistics from a Solution + Instance.
+    """Compute per-job, per-partition, and system-level statistics.
 
     Returns a dict with:
       n_scheduled, n_total
       wait_time, run_time, turnaround, bounded_slowdown
           — each a stat block {avg, min, max, total}
-      per_job  — list of per-job dicts sorted by job id:
-                   {id, type_id, kind, arrival, start, end,
-                    wait, run, turnaround, bounded_slowdown, cost}
-      system   — {f1, f2, onprem_jobs, cloud_jobs, onprem_cost, cloud_cost,
-                  onprem_util_pct}
+      per_job       — list of per-job dicts sorted by job id:
+                        {id, type_id, kind, arrival, start, end,
+                         wait, run, turnaround, bounded_slowdown, cost}
+      per_partition — list of per-partition dicts (one per InstanceType):
+                        {type_id, kind, cpu, mem, stor, capacity,
+                         jobs, cost, util_pct,
+                         wait_time, run_time, turnaround, bounded_slowdown}
+                      util_pct is None for elastic (unlimited) partitions.
+      system        — {f1, f2, onprem_jobs, cloud_jobs, onprem_cost, cloud_cost,
+                       onprem_util_pct}
 
     Bounded slowdown: BS(j) = max(1, turnaround / max(exec_time, 1)).
     On-prem utilisation: (sum of p_occ slots on on-prem) / (total on-prem
     capacity × horizon) × 100.
+    Partition utilisation: same formula restricted to that partition's capacity.
     """
     n_total = len(inst.jobs)
     empty   = {"avg": 0.0, "min": 0.0, "max": 0.0, "total": 0.0}
+
+    empty_partition = [
+        {
+            "type_id": m.id, "kind": m.kind,
+            "cpu": m.cpu, "mem": m.mem, "stor": m.stor,
+            "capacity": m.capacity,
+            "jobs": 0, "cost": 0.0,
+            "util_pct": 0.0 if m.capacity is not None else None,
+            "wait_time": empty, "run_time": empty,
+            "turnaround": empty, "bounded_slowdown": empty,
+        }
+        for m in inst.instance_types
+    ]
 
     if not sol.assignment:
         return {
@@ -67,6 +86,7 @@ def compute_stats(sol: Solution, inst: Instance) -> dict:
             "wait_time": empty, "run_time": empty,
             "turnaround": empty, "bounded_slowdown": empty,
             "per_job": [],
+            "per_partition": empty_partition,
             "system": {
                 "f1": sol.f1 or 0.0, "f2": sol.f2 or 0.0,
                 "onprem_jobs": 0, "cloud_jobs": 0,
@@ -87,6 +107,13 @@ def compute_stats(sol: Solution, inst: Instance) -> dict:
     onprem_cost  = 0.0; cloud_cost  = 0.0
     onprem_slots = 0.0
     per_job: list[dict] = []
+
+    # Per-partition accumulators keyed by type_id
+    part_acc: dict[int, dict] = {
+        m.id: {"jobs": 0, "cost": 0.0, "slots": 0.0,
+                "wait": [], "run": [], "turnaround": [], "bsd": []}
+        for m in inst.instance_types
+    }
 
     for jid, (mid, t_start) in sorted(sol.assignment.items()):
         j          = job_map[jid]
@@ -111,6 +138,15 @@ def compute_stats(sol: Solution, inst: Instance) -> dict:
             cloud_jobs   += 1
             cloud_cost   += cost
 
+        pa = part_acc[mid]
+        pa["jobs"]  += 1
+        pa["cost"]  += cost
+        pa["slots"] += runtime
+        pa["wait"].append(wait)
+        pa["run"].append(runtime)
+        pa["turnaround"].append(turnaround)
+        pa["bsd"].append(bsd)
+
         per_job.append({
             "id": jid, "type_id": mid, "kind": m.kind,
             "arrival": j.arrival, "start": t_start, "end": t_end,
@@ -132,6 +168,34 @@ def compute_stats(sol: Solution, inst: Instance) -> dict:
         if onprem_capacity > 0 else 0.0
     )
 
+    # Build per-partition stats
+    per_partition: list[dict] = []
+    for m in inst.instance_types:
+        pa = part_acc[m.id]
+        if m.capacity is not None:
+            cap_slots = m.capacity * inst.horizon
+            rj_slots  = sum(v for (tid, _t), v in inst.occupied.items() if tid == m.id)
+            util_pct: float | None = (
+                100.0 * (pa["slots"] + rj_slots) / cap_slots if cap_slots > 0 else 0.0
+            )
+        else:
+            util_pct = None  # elastic cloud partition — utilisation is undefined
+        per_partition.append({
+            "type_id":        m.id,
+            "kind":           m.kind,
+            "cpu":            m.cpu,
+            "mem":            m.mem,
+            "stor":           m.stor,
+            "capacity":       m.capacity,
+            "jobs":           pa["jobs"],
+            "cost":           pa["cost"],
+            "util_pct":       util_pct,
+            "wait_time":      _stat_block(pa["wait"]),
+            "run_time":       _stat_block(pa["run"]),
+            "turnaround":     _stat_block(pa["turnaround"]),
+            "bounded_slowdown": _stat_block(pa["bsd"]),
+        })
+
     return {
         "n_scheduled":    len(sol.assignment),
         "n_total":        n_total,
@@ -140,6 +204,7 @@ def compute_stats(sol: Solution, inst: Instance) -> dict:
         "turnaround":       _stat_block(turnarounds),
         "bounded_slowdown": _stat_block(bslowdowns),
         "per_job":          per_job,
+        "per_partition":    per_partition,
         "system": {
             "f1":              sol.f1 or 0.0,
             "f2":              sol.f2 or 0.0,
@@ -209,6 +274,49 @@ def _system_lines(sys: dict, slot_secs: float = 1.0) -> list[str]:
     return lines
 
 
+def _partition_lines(per_partition: list[dict], slot_secs: float = 1.0) -> list[str]:
+    """Per-partition summary block: one entry per InstanceType (partition)."""
+
+    def _prow(label: str, blk: dict, unit: str = "", total: bool = True) -> str:
+        lbl = f"{label} {unit}".strip()
+        tot = f"{blk['total'] * slot_secs:>12.1f}" if total else f"{'—':>12}"
+        return (
+            f"    {lbl:<20}"
+            f" {blk['avg'] * slot_secs:>11.1f}"
+            f" {blk['min'] * slot_secs:>11.1f}"
+            f" {blk['max'] * slot_secs:>11.1f}"
+            f" {tot}"
+        )
+
+    lines: list[str] = []
+    for pp in per_partition:
+        cap  = pp["capacity"] if pp["capacity"] is not None else "unlimited"
+        util = f"{pp['util_pct']:.1f} %" if pp["util_pct"] is not None else "N/A (elastic)"
+        lines.append(
+            f"  Partition {pp['type_id']}  [{pp['kind']}]"
+            f"  cpu={pp['cpu']}  mem={pp['mem']}  stor={pp['stor']}"
+            f"  cap={cap}"
+        )
+        lines.append(
+            f"    jobs: {pp['jobs']:>4}  cost: {pp['cost']:>12.2f} $"
+            f"  utilisation: {util}"
+        )
+        if pp["jobs"] > 0:
+            lines.append(
+                f"    {'Metric':<20}"
+                f" {'Avg':>11} {'Min':>11} {'Max':>11} {'Total':>12}"
+            )
+            lines.append(f"    {'─'*57}")
+            lines += [
+                _prow("Wait time",        pp["wait_time"],        "(s)"),
+                _prow("Run time",         pp["run_time"],          "(s)"),
+                _prow("Turnaround",       pp["turnaround"],        "(s)"),
+                _prow("Bounded slowdown", pp["bounded_slowdown"],  "   ", total=False),
+            ]
+        lines.append("")
+    return lines
+
+
 def _timing_lines(sol: "Solution") -> list[str]:
     """Return solver timing lines, or an empty list if not available."""
     from .model import Solution  # local import to avoid circular dependency
@@ -256,6 +364,8 @@ def format_summary(
     lines += _stat_table_lines(st, slot_secs)
     lines += ["", "SYSTEM STATISTICS", _rule("─")]
     lines += _system_lines(sys, slot_secs)
+    lines += ["", "PARTITION STATISTICS", _rule("─")]
+    lines += _partition_lines(st["per_partition"], slot_secs)
 
     timing = _timing_lines(sol)
     if timing:
@@ -472,6 +582,8 @@ def save_machine_schedule(
     lines += _stat_table_lines(st, slot_secs)
     lines += ["", "SYSTEM STATISTICS", thin]
     lines += _system_lines(sys, slot_secs)
+    lines += ["", "PARTITION STATISTICS", thin]
+    lines += _partition_lines(st["per_partition"], slot_secs)
 
     timing = _timing_lines(sol)
     if timing:
