@@ -9,10 +9,11 @@ from pathlib import Path
 
 from .data import Instance
 from .formulations import OccupancyFormulation, SpaceTimeFormulation, configure_env
+from .metrics import metrics_to_serialisable, pareto_metrics
 from .model import Solution, solve_epsilon_cost, solve_epsilon_turnaround, solve_f1, solve_f2, solve_weighted_sum
-from .pareto import epsilon_constraint_frontier, hybrid_frontier, weighted_sum_frontier
+from .pareto import hybrid_frontier, true_pareto_frontier
 from .viz import (
-    compute_stats, format_summary,
+    compute_stats, format_pareto_metrics, format_summary,
     save_feasibility_graph, save_gantt, save_machine_schedule, save_spacetime_graph,
 )
 
@@ -23,7 +24,7 @@ _FORMULATIONS = {
 
 _EA_METHODS     = {"nsga2", "moead"}
 _HYBRID_METHODS = {"hybrid"}
-_MIP_METHODS    = {"f1", "f2", "weighted", "epsilon", "epsilon-t", "pareto-ws", "pareto-eps"}
+_MIP_METHODS    = {"f1", "f2", "weighted", "epsilon", "epsilon-t", "pareto-true"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "FED-HPC: multi-objective MIP scheduler for HPC jobs in federated environments.\n\n"
             "Exact MIP methods (require Gurobi):\n"
-            "  f1, f2, weighted, epsilon, epsilon-t, pareto-ws, pareto-eps\n\n"
+            "  f1, f2, weighted, epsilon, epsilon-t, pareto-true\n\n"
             "Heuristic evolutionary methods (no licence required):\n"
             "  nsga2 — NSGA-II with constrained-dominance ranking\n"
             "  moead — MOEA/D with Tchebycheff decomposition\n\n"
@@ -49,13 +50,12 @@ def build_parser() -> argparse.ArgumentParser:
                        "Solving method (default: weighted).\n"
                        "\n"
                        "  Exact MIP (require Gurobi):\n"
-                       "    f1          — minimise total turnaround only\n"
-                       "    f2          — minimise total cost only\n"
+                       "    f1          — lex-min turnaround then cost (cheapest best schedule)\n"
+                       "    f2          — lex-min cost then turnaround (best schedule at min cost)\n"
                        "    weighted    — weighted-sum scalarisation (needs --alpha)\n"
                        "    epsilon     — ε-constraint min f1 s.t. f2 ≤ ε (needs --epsilon)\n"
                        "    epsilon-t   — ε-constraint min f2 s.t. f1 ≤ ε (needs --epsilon)\n"
-                       "    pareto-ws   — Pareto frontier via weighted-sum sweep\n"
-                       "    pareto-eps  — Pareto frontier via ε-constraint sweep\n"
+                       "    pareto-true — complete true Pareto front (exact, one solve per point)\n"
                        "\n"
                        "  Heuristic (no licence, parallelised with OpenMP):\n"
                        "    nsga2       — NSGA-II (pop_size × n_gen generations)\n"
@@ -212,19 +212,12 @@ def main(argv: list[str] | None = None) -> None:
                       title=f"FED-HPC — {method} (ε={args.epsilon})")
         _save_outputs(sol, inst, out_dir, stem=method, graph=args.graph)
 
-    elif method == "pareto-ws":
-        solutions = weighted_sum_frontier(
-            inst, n_points=args.steps, formulation=formulation, **gurobi_params
+    elif method == "pareto-true":
+        solutions = true_pareto_frontier(
+            inst, formulation=formulation, verbose=args.verbose, **gurobi_params
         )
         _print_pareto(solutions, inst, args.json, method=method)
-        _save_pareto_outputs(solutions, inst, out_dir, stem=method, graph=args.graph)
-
-    elif method == "pareto-eps":
-        solutions = epsilon_constraint_frontier(
-            inst, n_points=args.steps, formulation=formulation, **gurobi_params
-        )
-        _print_pareto(solutions, inst, args.json, method=method)
-        _save_pareto_outputs(solutions, inst, out_dir, stem=method, graph=args.graph)
+        _save_pareto_outputs(solutions, inst, out_dir, stem=method)
 
 
 def _run_ea(args: argparse.Namespace, inst: Instance, method: str, out_dir: Path) -> None:
@@ -251,6 +244,7 @@ def _run_ea(args: argparse.Namespace, inst: Instance, method: str, out_dir: Path
             n_gen     = args.n_gen,
             seed      = args.seed,
             n_threads = args.n_threads,
+            profile   = args.verbose,
         )
     else:  # moead
         solutions = moead_frontier(
@@ -260,6 +254,7 @@ def _run_ea(args: argparse.Namespace, inst: Instance, method: str, out_dir: Path
             neighborhood_size = args.neighborhood_size,
             seed              = args.seed,
             n_threads         = args.n_threads,
+            profile           = args.verbose,
         )
 
     _print_pareto(solutions, inst, args.json, method=method)
@@ -300,7 +295,7 @@ def _run_hybrid(args: argparse.Namespace, inst: Instance, out_dir: Path) -> None
     )
 
     _print_pareto(solutions, inst, args.json, method="hybrid")
-    _save_pareto_outputs(solutions, inst, out_dir, stem="hybrid", graph=args.graph)
+    _save_pareto_outputs(solutions, inst, out_dir, stem="hybrid")
 
 
 # ── Console output helpers ────────────────────────────────────────────────────
@@ -327,8 +322,15 @@ def _print_pareto(
     ranked = sorted(solutions, key=lambda s: s.f1 or 0)
     n      = len(ranked)
 
+    # Compute quality metrics on the ranked front.
+    m = pareto_metrics(ranked)
+
     if as_json:
-        print(json.dumps([_sol_to_dict(s, inst) for s in ranked], indent=2))
+        out = {
+            "front":   [_sol_to_dict(s, inst) for s in ranked],
+            "metrics": metrics_to_serialisable(m, ranked),
+        }
+        print(json.dumps(out, indent=2))
         return
 
     from .viz import _rule
@@ -336,23 +338,38 @@ def _print_pareto(
     print(_rule())
     print()
 
+    # Build sets of flagged solution objects for in-table annotation.
+    knee_sol  = m["knee_point"]
+    mm_sol    = m["regret"]["minimax_solution"]
+
+    def _flags(sol: Solution) -> str:
+        tag = ""
+        if sol is knee_sol:
+            tag += "K"
+        if sol is mm_sol:
+            tag += "R"
+        return f"{tag:<2}"
+
     slot_secs = inst.slot_size_seconds
     hdr = (
         f"  {'Pt':>3}  {'Status':<10}"
         f"  {'f1 (turnaround s)':>18}  {'f2 (cost $)':>12}"
         f"  {'Sched':>6}  {'OnPrem':>7}  {'Cloud':>6}"
         f"  {'AvgWait(s)':>11}  {'AvgRun(s)':>10}  {'AvgTA(s)':>10}  {'AvgBS':>7}"
+        f"  {'':>2}"
     )
     print(hdr)
     print(f"  {_rule('-')[:len(hdr) - 2]}")
 
     for i, sol in enumerate(ranked, start=1):
+        flags = _flags(sol)
         if sol.status not in _PRINTABLE:
             print(
                 f"  {i:>3}  {sol.status:<10}"
                 f"  {'—':>18}  {'—':>12}"
                 f"  {'—':>6}  {'—':>7}  {'—':>6}"
                 f"  {'—':>11}  {'—':>10}  {'—':>10}  {'—':>7}"
+                f"  {flags}"
             )
             continue
 
@@ -366,9 +383,12 @@ def _print_pareto(
             f"  {st['run_time']['avg']     * slot_secs:>10.1f}"
             f"  {st['turnaround']['avg']   * slot_secs:>10.1f}"
             f"  {st['bounded_slowdown']['avg']:>7.3f}"
+            f"  {flags}"
         )
 
+    print(f"  {'K'} = knee point   {'R'} = min-regret solution")
     print()
+    print(format_pareto_metrics(m, ranked, inst))
 
 
 # ── File-output helpers ───────────────────────────────────────────────────────
@@ -424,15 +444,21 @@ def _save_pareto_outputs(
     inst: Instance,
     out_dir: Path,
     stem: str,
-    *,
-    graph: bool = False,
 ) -> None:
+    """Save a single CSV with the Pareto frontier values (f1, f2, status)."""
+    import csv
+
     ranked = sorted(
         (s for s in solutions if s.status in ("optimal", "feasible", "heuristic")),
         key=lambda s: s.f1 or 0,
     )
-    for i, sol in enumerate(ranked, start=1):
-        _save_outputs(sol, inst, out_dir, stem=f"{stem}_{i:02d}", graph=graph)
+    csv_path = out_dir / f"{stem}_frontier.csv"
+    with open(csv_path, "w", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["rank", "f1_turnaround", "f2_cost", "status"])
+        for i, sol in enumerate(ranked, start=1):
+            writer.writerow([i, sol.f1, sol.f2, sol.status])
+    print(f"Frontier CSV     → {csv_path}", file=sys.stderr)
 
 
 # ── JSON serialisation ────────────────────────────────────────────────────────

@@ -9,10 +9,12 @@ Constraint violations (capacity, budget) are handled via constrained-dominance
 ranking (NSGA-II) or a large Tchebycheff penalty (MOEA/D).
 
 The returned ``list[Solution]`` is drop-in compatible with
-``pareto.weighted_sum_frontier`` and ``pareto.epsilon_constraint_frontier``.
+``pareto.true_pareto_frontier`` and ``pareto.hybrid_frontier``.
 Status is set to ``"heuristic"`` instead of ``"optimal"``.
 """
 from __future__ import annotations
+
+import sys
 
 try:
     from . import _moea as _ext
@@ -88,9 +90,83 @@ def _to_solutions(
     return out
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+# ── Profile display ───────────────────────────────────────────────────────────
+
+_W = 72  # report width
+
+def _print_profile(prof: dict, *, algorithm: str, label: str = "") -> None:
+    """Print a per-phase timing breakdown to stderr.
+
+    *prof* is the dict returned by the C++ binding.  Algorithm-specific phase
+    keys are detected by name so this function works for both NSGA-II and MOEA/D.
+    """
+    sep   = "─" * _W
+    thin  = "─" * (_W - 4)
+    n_gen = int(prof.get("n_gen", 0))
+    total = prof.get("total_ms", 0.0)
+
+    # Phases reported as (label, total_ms, per_gen_ms_or_None)
+    if algorithm == "nsga2":
+        phases: list[tuple[str, float, float | None]] = [
+            ("Initial eval (seeds + random)",
+             prof.get("init_eval_ms", 0.0), None),
+            ("NDS + rank (parent pop)",
+             prof.get("nds_total_ms", 0.0),
+             prof.get("nds_avg_ms")),
+            ("Crowding distance",
+             prof.get("crowding_total_ms", 0.0),
+             prof.get("crowding_avg_ms")),
+            ("Offspring generate + eval  ← hot path",
+             prof.get("offspring_total_ms", 0.0),
+             prof.get("offspring_avg_ms")),
+            ("Combine NDS + crowding + select",
+             prof.get("combine_select_total_ms", 0.0),
+             prof.get("combine_select_avg_ms")),
+            ("Extract + Pareto filter",
+             prof.get("extract_ms", 0.0), None),
+        ]
+    else:  # moead
+        phases = [
+            ("Initial eval (seeds + random)",
+             prof.get("init_eval_ms", 0.0), None),
+            ("Offspring + eval + ideal update  ← hot path",
+             prof.get("offspring_total_ms", 0.0),
+             prof.get("offspring_avg_ms")),
+            ("Neighbourhood replacement (sequential)",
+             prof.get("replacement_total_ms", 0.0),
+             prof.get("replacement_avg_ms")),
+            ("Extract + Pareto filter",
+             prof.get("extract_ms", 0.0), None),
+        ]
+
+    hdr_tag = f" {label}" if label else ""
+    print(f"\n{algorithm.upper()} Profile{hdr_tag}  [{n_gen} gen]", file=sys.stderr)
+    print(sep, file=sys.stderr)
+
+    col_w = 46
+    print(
+        f"  {'Phase':<{col_w}}  {'Total (ms)':>10}  {'Per-gen (ms)':>12}  {'Share':>6}",
+        file=sys.stderr,
+    )
+    print(f"  {thin}", file=sys.stderr)
+
+    for name, t_ms, per_ms in phases:
+        share = 100.0 * t_ms / total if total > 0 else 0.0
+        per_str = f"{per_ms:>12.3f}" if per_ms is not None else f"{'—':>12}"
+        print(
+            f"  {name:<{col_w}}  {t_ms:>10.2f}  {per_str}  {share:>5.1f} %",
+            file=sys.stderr,
+        )
+
+    print(f"  {thin}", file=sys.stderr)
+    print(
+        f"  {'Total':<{col_w}}  {total:>10.2f}  {'—':>12}  {'100.0':>5} %",
+        file=sys.stderr,
+    )
+    print(sep, file=sys.stderr)
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
 
 def nsga2_frontier(
     inst: Instance,
@@ -99,6 +175,7 @@ def nsga2_frontier(
     n_gen: int = 200,
     seed: int = 42,
     n_threads: int = 0,
+    profile: bool = False,
 ) -> list[Solution]:
     """Approximate the Pareto frontier via NSGA-II.
 
@@ -109,6 +186,7 @@ def nsga2_frontier(
     n_gen      : number of generations.
     seed       : RNG seed for reproducibility.
     n_threads  : OpenMP thread count; 0 = use all available cores.
+    profile    : if True, print a per-phase timing breakdown to stderr.
 
     Returns
     -------
@@ -116,7 +194,7 @@ def nsga2_frontier(
     globally optimal — use MIP-based pareto.py for exact results.
     """
     _require_ext()
-    raw = _ext.nsga2(
+    raw, prof = _ext.nsga2(
         n_jobs    = len(inst.jobs),
         budget    = inst.budget,
         job_slots = _job_slots(inst),
@@ -127,6 +205,9 @@ def nsga2_frontier(
         seed      = seed,
         n_threads = n_threads,
     )
+    if profile:
+        _print_profile(prof, algorithm="nsga2",
+                       label=f"pop={pop_size}  threads={n_threads or 'all'}")
     return _to_solutions(inst, raw)
 
 
@@ -138,6 +219,7 @@ def moead_frontier(
     neighborhood_size: int = 20,
     seed: int = 42,
     n_threads: int = 0,
+    profile: bool = False,
 ) -> list[Solution]:
     """Approximate the Pareto frontier via MOEA/D (Tchebycheff decomposition).
 
@@ -149,6 +231,7 @@ def moead_frontier(
     neighborhood_size : |T| nearest weight vectors used for mating/replacement.
     seed              : RNG seed for reproducibility.
     n_threads         : OpenMP thread count; 0 = use all available cores.
+    profile           : if True, print a per-phase timing breakdown to stderr.
 
     Returns
     -------
@@ -156,7 +239,7 @@ def moead_frontier(
     globally optimal — use MIP-based pareto.py for exact results.
     """
     _require_ext()
-    raw = _ext.moead(
+    raw, prof = _ext.moead(
         n_jobs            = len(inst.jobs),
         budget            = inst.budget,
         job_slots         = _job_slots(inst),
@@ -168,4 +251,7 @@ def moead_frontier(
         seed              = seed,
         n_threads         = n_threads,
     )
+    if profile:
+        _print_profile(prof, algorithm="moead",
+                       label=f"weights={n_weights}  T={neighborhood_size}  threads={n_threads or 'all'}")
     return _to_solutions(inst, raw)

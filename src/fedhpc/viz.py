@@ -317,6 +317,73 @@ def _partition_lines(per_partition: list[dict], slot_secs: float = 1.0) -> list[
     return lines
 
 
+def format_pareto_metrics(metrics: dict, ranked: list, inst: "Instance") -> str:
+    """Format Pareto quality metrics as a human-readable block.
+
+    *ranked* must be the same list passed to pareto_metrics, sorted by f1
+    ascending, so that knee/minimax ranks are reported correctly.
+    """
+    slot_secs = inst.slot_size_seconds
+
+    def _rank(sol) -> int | None:
+        for i, s in enumerate(ranked):
+            if s is sol:
+                return i + 1
+        return None
+
+    n        = metrics["cardinality"]
+    hv       = metrics["hypervolume"]
+    igd      = metrics["igd"]
+    r2       = metrics["r2"]
+    spread   = metrics["spread"]
+    coverage = metrics["coverage"]
+    knee     = metrics["knee_point"]
+    regret   = metrics["regret"]
+
+    W = 50    # label column width
+    lines = ["PARETO QUALITY METRICS", _rule("─"), ""]
+
+    def _mrow(label: str, value: str, note: str = "") -> str:
+        return f"  {label:<{W}} {value}  {note}"
+
+    lines += [
+        _mrow("Cardinality    (# non-dominated pts)",     f"{n}"),
+        _mrow("Hypervolume    (norm, ref=(1.1,1.1))",
+              f"{hv:.6f}", "↑ higher is better"),
+        _mrow("IGD            (vs uniform diag ref)",
+              f"{igd:.6f}", "↓ lower  is better"),
+        _mrow("R2             (Tchebycheff, 101 weights)",
+              f"{r2:.6f}", "↓ lower  is better"),
+        _mrow("Spread (Δ)     (uniformity of spacing)",
+              f"{spread:.6f}", "↓ lower  is better"),
+        _mrow("Coverage       (HV / ref-box area)",
+              f"{coverage * 100:.2f} %", "↑ higher is better"),
+        "",
+    ]
+
+    if knee is not None and knee.f1 is not None:
+        rk = _rank(knee)
+        tag = f"  (point #{rk})" if rk is not None else ""
+        lines.append(
+            f"  Knee point     (max ⊥ dist from extreme line)"
+            f"  f1={knee.f1 * slot_secs:.1f} s   f2={knee.f2:.4f} ${tag}"
+        )
+
+    mm = regret.get("minimax_solution")
+    if mm is not None and mm.f1 is not None:
+        rk = _rank(mm)
+        tag = f"  (point #{rk})" if rk is not None else ""
+        lines += [
+            f"  Min regret     (minimax Chebyshev, norm.)"
+            f"  {regret['min']:.4f}  →  f1={mm.f1 * slot_secs:.1f} s   f2={mm.f2:.4f} ${tag}",
+            f"  Max regret     (worst-case point, norm.)"
+            f"  {regret['max']:.4f}",
+        ]
+
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _timing_lines(sol: "Solution") -> list[str]:
     """Return solver timing lines, or an empty list if not available."""
     from .model import Solution  # local import to avoid circular dependency

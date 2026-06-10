@@ -1,20 +1,18 @@
-"""Pareto frontier approximation for FED-HPC."""
+"""Pareto frontier exploration methods for FED-HPC."""
 from __future__ import annotations
 
 import sys
 import time as _time
 
-import numpy as np
-
 from .data import Instance
 from .formulations import Formulation, SpaceTimeFormulation
-from .model import Solution, _apply_params, _extract, solve_epsilon_cost, solve_epsilon_turnaround, solve_f1, solve_weighted_sum
+from .model import Solution, _apply_params, _extract, solve_epsilon_cost, solve_epsilon_turnaround, solve_f1, solve_f2, solve_true_pareto_step, solve_weighted_sum
 
 
 def _reference_points(
     inst: Instance, formulation: Formulation | None = None, **params
 ) -> tuple[float, float, float]:
-    """Compute the three reference points from fedhpc.pdf Section 1.10.
+    """Compute the three reference points used by the weighted-sum single solve.
 
     Returns
     -------
@@ -40,43 +38,70 @@ def _reference_points(
     return f1_T, f2_T, f1_0
 
 
-def weighted_sum_frontier(
+def true_pareto_frontier(
     inst: Instance,
-    n_points: int = 11,
     formulation: Formulation | None = None,
+    verbose: bool = False,
     **params,
 ) -> list[Solution]:
-    f1_T, f2_T, f1_0 = _reference_points(inst, formulation=formulation, **params)
-    solutions = []
-    for lam in np.linspace(0.0, 1.0, n_points):
-        sol = solve_weighted_sum(
-            inst, float(lam),
-            f1_T=f1_T, f2_T=f2_T, f1_0=f1_0,
-            formulation=formulation,
-            **params,
-        )
-        if sol.f1 is not None:
-            solutions.append(sol)
-    return _filter_dominated(solutions)
+    """Enumerate the complete true Pareto front via sequential ε-constraint sweep.
 
+    Since f1 (total turnaround) is integer-valued, the front has a finite
+    number of points and can be found exactly.  The algorithm:
 
-def epsilon_constraint_frontier(
-    inst: Instance,
-    n_points: int = 20,
-    formulation: Formulation | None = None,
-    **params,
-) -> list[Solution]:
-    _, f2_T, _ = _reference_points(inst, formulation=formulation, **params)
-    epsilons = list(np.linspace(f2_T, 0.0, n_points, endpoint=False)) + [f2_T]
-    solutions = []
-    for eps in sorted(epsilons, reverse=True):
-        sol = solve_epsilon_cost(
-            inst, epsilon=float(eps),
-            formulation=formulation,
-            **params,
+      1. Solve lex-min(f2, f1) to get the rightmost extreme point
+         (minimum cost, then best turnaround at that cost).
+      2. Set f1_bound = f1_result - 1.
+      3. Solve lex-min(f2, f1) s.t. f1 ≤ f1_bound.
+         Each solve either returns a new Pareto point or proves infeasibility.
+      4. Update f1_bound = f1_result - 1 and repeat until infeasible.
+
+    This guarantees that every non-dominated integer f1 level is visited
+    exactly once — no sampling, no heuristic, no missed points.
+    The total number of MIP solves equals the size of the Pareto front.
+    """
+    sol = solve_f2(inst, formulation=formulation, **params)
+    if sol.f1 is None:
+        return []
+
+    solutions: list[Solution] = [sol]
+    f1_bound = int(round(sol.f1)) - 1
+    n_iter = 0
+
+    if verbose:
+        print(
+            f"pareto-true: anchor  f1={int(round(sol.f1))}  f2={sol.f2:.6g}",
+            file=sys.stderr, flush=True,
         )
-        if sol.f1 is not None:
-            solutions.append(sol)
+
+    while f1_bound >= 0:
+        sol = solve_true_pareto_step(
+            inst, f1_bound=f1_bound, formulation=formulation, **params,
+        )
+        n_iter += 1
+        if sol.f1 is None:
+            if verbose:
+                print(
+                    f"pareto-true: [{n_iter:3d}]  f1 ≤ {f1_bound}  → infeasible",
+                    file=sys.stderr, flush=True,
+                )
+            break
+        solutions.append(sol)
+        f1_actual = int(round(sol.f1))
+        if verbose:
+            print(
+                f"pareto-true: [{n_iter:3d}]  f1 ≤ {f1_bound}"
+                f"  → f1={f1_actual}  f2={sol.f2:.6g}  [{sol.status}]",
+                file=sys.stderr, flush=True,
+            )
+        f1_bound = f1_actual - 1
+
+    if verbose:
+        print(
+            f"pareto-true: {len(solutions)} Pareto points in {n_iter + 1} solves",
+            file=sys.stderr, flush=True,
+        )
+
     return _filter_dominated(solutions)
 
 

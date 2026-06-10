@@ -120,16 +120,34 @@ def solve_f1(
     formulation: Formulation | None = None,
     **params,
 ) -> Solution:
-    """Minimise f1 (total turnaround) as a mono-objective problem."""
+    """Lex-min (f1, f2): minimise total turnaround, breaking ties by minimum cost."""
     fmt = formulation or _default_formulation()
     t0 = time.perf_counter()
     mdl, vars = fmt.build(inst)
     build_time = time.perf_counter() - t0
     _apply_params(mdl, params)
-    mdl.setObjective(fmt.f1_expr(inst, vars["x"]), GRB.MINIMIZE)
+
+    x = vars["x"]
+    f1_expr = fmt.f1_expr(inst, x)
+    f2_expr = fmt.f2_expr(inst, x)
+
+    # Phase 1: minimise turnaround
+    mdl.setObjective(f1_expr, GRB.MINIMIZE)
     t1 = time.perf_counter()
     mdl.optimize()
+
+    if mdl.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
+        solve_time = time.perf_counter() - t1
+        return _extract(inst, mdl, vars, build_time=build_time, solve_time=solve_time)
+
+    # Phase 2: fix turnaround at optimal, minimise cost.
+    # f1 is a sum of integer slot values, so round to nearest integer.
+    f1_star = int(round(mdl.ObjVal))
+    mdl.addConstr(f1_expr <= f1_star, name="fix_f1")
+    mdl.setObjective(f2_expr, GRB.MINIMIZE)
+    mdl.optimize()
     solve_time = time.perf_counter() - t1
+
     return _extract(inst, mdl, vars, build_time=build_time, solve_time=solve_time)
 
 
@@ -138,16 +156,37 @@ def solve_f2(
     formulation: Formulation | None = None,
     **params,
 ) -> Solution:
-    """Minimise f2 (total monetary cost) as a mono-objective problem."""
+    """Lex-min (f2, f1): minimise total cost, breaking ties by minimum turnaround.
+
+    When minimum cost is 0, phase 2 finds the best achievable turnaround at zero cost.
+    """
     fmt = formulation or _default_formulation()
     t0 = time.perf_counter()
     mdl, vars = fmt.build(inst)
     build_time = time.perf_counter() - t0
     _apply_params(mdl, params)
-    mdl.setObjective(fmt.f2_expr(inst, vars["x"]), GRB.MINIMIZE)
+
+    x = vars["x"]
+    f1_expr = fmt.f1_expr(inst, x)
+    f2_expr = fmt.f2_expr(inst, x)
+
+    # Phase 1: minimise cost
+    mdl.setObjective(f2_expr, GRB.MINIMIZE)
     t1 = time.perf_counter()
     mdl.optimize()
+
+    if mdl.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
+        solve_time = time.perf_counter() - t1
+        return _extract(inst, mdl, vars, build_time=build_time, solve_time=solve_time)
+
+    # Phase 2: fix cost at optimal, minimise turnaround.
+    # Use a small absolute tolerance to guard against floating-point noise.
+    f2_star = mdl.ObjVal
+    mdl.addConstr(f2_expr <= f2_star + 1e-6, name="fix_f2")
+    mdl.setObjective(f1_expr, GRB.MINIMIZE)
+    mdl.optimize()
     solve_time = time.perf_counter() - t1
+
     return _extract(inst, mdl, vars, build_time=build_time, solve_time=solve_time)
 
 
@@ -241,3 +280,48 @@ def solve_epsilon_turnaround(
     mdl.optimize()
     solve_time = time.perf_counter() - t1
     return _extract(inst, mdl, vars, build_time=build_time, solve_time=solve_time)
+
+
+def solve_true_pareto_step(
+    inst: Instance,
+    f1_bound: int,
+    formulation: Formulation | None = None,
+    **params,
+) -> Solution:
+    """One step of the true-Pareto sweep: lex-min (f2, f1) s.t. f1 ≤ f1_bound.
+
+    Phase 1 finds the minimum cost reachable within the turnaround budget.
+    Phase 2 tightens to that cost and minimises turnaround, ensuring the
+    returned point lies on the true Pareto front (not just the cost-efficient
+    frontier within the budget).  Returns an infeasible Solution when no
+    schedule exists with f1 ≤ f1_bound.
+    """
+    fmt = formulation or _default_formulation()
+    t0 = time.perf_counter()
+    mdl, vars = fmt.build(inst)
+    build_time = time.perf_counter() - t0
+    _apply_params(mdl, params)
+
+    x = vars["x"]
+    f1_expr = fmt.f1_expr(inst, x)
+    f2_expr = fmt.f2_expr(inst, x)
+
+    mdl.addConstr(f1_expr <= f1_bound, name="eps_f1")
+
+    # Phase 1: min cost within the turnaround budget
+    mdl.setObjective(f2_expr, GRB.MINIMIZE)
+    t1 = time.perf_counter()
+    mdl.optimize()
+
+    if mdl.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
+        return _extract(inst, mdl, vars, build_time=build_time,
+                        solve_time=time.perf_counter() - t1)
+
+    # Phase 2: fix cost, minimise turnaround (breaks f2 ties toward lower f1)
+    f2_star = mdl.ObjVal
+    mdl.addConstr(f2_expr <= f2_star + 1e-6, name="fix_f2")
+    mdl.setObjective(f1_expr, GRB.MINIMIZE)
+    mdl.optimize()
+
+    return _extract(inst, mdl, vars, build_time=build_time,
+                    solve_time=time.perf_counter() - t1)
