@@ -15,7 +15,8 @@ dependencies = [
 ]
 
 [project.scripts]
-fedhpc = "fedhpc:main"
+fedhpc          = "fedhpc:main"
+fedhpc-ablation = "fedhpc.ablation:main"
 
 [build-system]
 requires = ["scikit-build-core>=0.9", "pybind11>=2.12"]
