@@ -125,6 +125,22 @@ def _print_profile(prof: dict, *, algorithm: str, label: str = "") -> None:
             ("Extract + Pareto filter",
              prof.get("extract_ms", 0.0), None),
         ]
+    elif algorithm == "nsga3":
+        phases = [
+            ("Initial eval (seeds + random)",
+             prof.get("init_eval_ms", 0.0), None),
+            ("NDS + rank (parent pop, for mating)",
+             prof.get("rank_nds_total_ms", 0.0),
+             prof.get("rank_nds_avg_ms")),
+            ("Offspring generate + eval  ← hot path",
+             prof.get("offspring_total_ms", 0.0),
+             prof.get("offspring_avg_ms")),
+            ("Combine NDS + normalize + niching select",
+             prof.get("combine_select_total_ms", 0.0),
+             prof.get("combine_select_avg_ms")),
+            ("Extract + Pareto filter",
+             prof.get("extract_ms", 0.0), None),
+        ]
     else:  # moead
         phases = [
             ("Initial eval (seeds + random)",
@@ -208,6 +224,61 @@ def nsga2_frontier(
     if profile:
         _print_profile(prof, algorithm="nsga2",
                        label=f"pop={pop_size}  threads={n_threads or 'all'}")
+    return _to_solutions(inst, raw)
+
+
+def nsga3_frontier(
+    inst: Instance,
+    *,
+    pop_size: int = 100,
+    n_divisions: int = 99,
+    n_gen: int = 200,
+    seed: int = 42,
+    n_threads: int = 0,
+    profile: bool = False,
+) -> list[Solution]:
+    """Approximate the Pareto frontier via NSGA-III (Deb & Jain 2014).
+
+    NSGA-III replaces NSGA-II's crowding-distance diversity mechanism with
+    structured Das-Dennis reference points on the objective unit hyperplane.
+    Each generation the combined pool is normalized, individuals are associated
+    with their nearest reference point, and survival selection from the critical
+    front uses niching counts to ensure even reference-point coverage.
+
+    Parameters
+    ----------
+    inst        : built fedhpc Instance.
+    pop_size    : population size.  Should equal ``n_divisions + 1`` for best
+                  reference-point coverage (default 100 matches default 99 divisions).
+    n_divisions : number of divisions along each objective axis for the Das-Dennis
+                  reference-point lattice.  Produces ``n_divisions + 1`` reference
+                  points for the 2-objective case.
+    n_gen       : number of generations.
+    seed        : RNG seed for reproducibility.
+    n_threads   : OpenMP thread count; 0 = use all available cores.
+    profile     : if True, print a per-phase timing breakdown to stderr.
+
+    Returns
+    -------
+    Feasible non-dominated solutions (status="heuristic"). Not guaranteed
+    globally optimal — use MIP-based pareto.py for exact results.
+    """
+    _require_ext()
+    raw, prof = _ext.nsga3(
+        n_jobs      = len(inst.jobs),
+        budget      = inst.budget,
+        job_slots   = _job_slots(inst),
+        type_cap    = _type_cap(inst),
+        init_occ    = _init_occ(inst),
+        pop_size    = pop_size,
+        n_divisions = n_divisions,
+        n_gen       = n_gen,
+        seed        = seed,
+        n_threads   = n_threads,
+    )
+    if profile:
+        _print_profile(prof, algorithm="nsga3",
+                       label=f"pop={pop_size}  divs={n_divisions}  threads={n_threads or 'all'}")
     return _to_solutions(inst, raw)
 
 

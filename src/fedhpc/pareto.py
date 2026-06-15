@@ -46,35 +46,62 @@ def true_pareto_frontier(
 ) -> list[Solution]:
     """Enumerate the complete true Pareto front via sequential ε-constraint sweep.
 
-    Since f1 (total turnaround) is integer-valued, the front has a finite
-    number of points and can be found exactly.  The algorithm:
+    f1 = Σ_j (t_j + p_occ_j − arrival_j) is a float because job arrivals are
+    continuous.  However, since t and p_occ are integers, consecutive
+    Pareto-optimal f1 values always differ by at least 1 (an integer change in
+    the K = Σ(t+p_occ) component).  The sweep therefore steps by (1 − ε) in
+    f1-space to correctly bracket each integer K level.
 
-      1. Solve lex-min(f2, f1) to get the rightmost extreme point
-         (minimum cost, then best turnaround at that cost).
-      2. Set f1_bound = f1_result - 1.
-      3. Solve lex-min(f2, f1) s.t. f1 ≤ f1_bound.
-         Each solve either returns a new Pareto point or proves infeasibility.
-      4. Update f1_bound = f1_result - 1 and repeat until infeasible.
+    Algorithm:
+      1. Solve lex-min(f2, f1) → cheapest anchor (right extreme).
+      2. Solve lex-min(f1, f2) → fastest anchor (left extreme).
+      3. Sweep interior: f1_bound = f1_cheap − _STEP, solve lex-min(f2,f1)
+         s.t. f1 ≤ f1_bound, update f1_bound = f1_result − _STEP.
+      4. Stop when infeasible or f1_bound < f1_min.
 
-    This guarantees that every non-dominated integer f1 level is visited
-    exactly once — no sampling, no heuristic, no missed points.
-    The total number of MIP solves equals the size of the Pareto front.
+    Both anchors are added upfront so the extremes are always in the output.
     """
-    sol = solve_f2(inst, formulation=formulation, **params)
-    if sol.f1 is None:
+    _EPS  = 1e-6          # numerical tolerance for float comparisons
+    _STEP = 1.0 - _EPS    # sweep decrement: crosses exactly one integer K level
+
+    # ── Anchor 1: cheapest-fast (right extreme) ───────────────────────────────
+    sol_cheap = solve_f2(inst, formulation=formulation, **params)
+    if sol_cheap.f1 is None:
         return []
 
-    solutions: list[Solution] = [sol]
-    f1_bound = int(round(sol.f1)) - 1
-    n_iter = 0
+    # ── Anchor 2: fastest-cheap (left extreme) ───────────────────────────────
+    sol_fast = solve_f1(inst, formulation=formulation, **params)
+
+    f1_cheap: float = sol_cheap.f1
+    solutions: list[Solution] = [sol_cheap]
+
+    if sol_fast.f1 is not None:
+        f1_min: float = sol_fast.f1
+        solutions.append(sol_fast)
+    else:
+        f1_min = -float("inf")  # anchor failed; sweep until infeasible
 
     if verbose:
         print(
-            f"pareto-true: anchor  f1={int(round(sol.f1))}  f2={sol.f2:.6g}",
+            f"pareto-true: anchor_cheap  f1={f1_cheap:.4f}  f2={sol_cheap.f2:.6g}",
             file=sys.stderr, flush=True,
         )
+        if sol_fast.f1 is not None:
+            print(
+                f"pareto-true: anchor_fast   f1={f1_min:.4f}  f2={sol_fast.f2:.6g}",
+                file=sys.stderr, flush=True,
+            )
+        else:
+            print(
+                "pareto-true: anchor_fast   — failed, sweeping without lower bound",
+                file=sys.stderr, flush=True,
+            )
 
-    while f1_bound >= 0:
+    # ── Interior sweep between the two anchors ────────────────────────────────
+    f1_bound: float = f1_cheap - _STEP
+    n_iter = 0
+
+    while f1_bound > f1_min - _EPS:
         sol = solve_true_pareto_step(
             inst, f1_bound=f1_bound, formulation=formulation, **params,
         )
@@ -82,23 +109,25 @@ def true_pareto_frontier(
         if sol.f1 is None:
             if verbose:
                 print(
-                    f"pareto-true: [{n_iter:3d}]  f1 ≤ {f1_bound}  → infeasible",
+                    f"pareto-true: [{n_iter:3d}]  f1 ≤ {f1_bound:.4f}  → infeasible",
                     file=sys.stderr, flush=True,
                 )
             break
+        f1_actual: float = sol.f1
         solutions.append(sol)
-        f1_actual = int(round(sol.f1))
         if verbose:
             print(
-                f"pareto-true: [{n_iter:3d}]  f1 ≤ {f1_bound}"
-                f"  → f1={f1_actual}  f2={sol.f2:.6g}  [{sol.status}]",
+                f"pareto-true: [{n_iter:3d}]  f1 ≤ {f1_bound:.4f}"
+                f"  → f1={f1_actual:.4f}  f2={sol.f2:.6g}  [{sol.status}]",
                 file=sys.stderr, flush=True,
             )
-        f1_bound = f1_actual - 1
+        if f1_actual <= f1_min + _EPS:
+            break  # reached the fast anchor; done
+        f1_bound = f1_actual - _STEP
 
     if verbose:
         print(
-            f"pareto-true: {len(solutions)} Pareto points in {n_iter + 1} solves",
+            f"pareto-true: {len(solutions)} solutions in {n_iter + 2} solves",
             file=sys.stderr, flush=True,
         )
 
@@ -125,7 +154,7 @@ def hybrid_frontier(
     seed: int = 42,
     n_threads: int = 0,
     formulation: Formulation | None = None,
-    time_limit: float = 60.0,
+    time_limit: float | None = None,
     mip_gap: float = 1e-4,
     verbose: bool = False,
     **mip_params,
@@ -159,7 +188,7 @@ def hybrid_frontier(
     seed              : RNG seed for NSGA-II (MOEA/D uses seed+1).
     n_threads         : OpenMP thread count; 0 = all cores.
     formulation       : MIP formulation; defaults to SpaceTimeFormulation.
-    time_limit        : Gurobi time limit per ε-constraint solve (seconds).
+    time_limit        : Gurobi time limit per ε-constraint solve (seconds); None = no limit.
     mip_gap           : Gurobi MIPGap.
     verbose           : print phase progress and Gurobi log.
     **mip_params      : additional Gurobi parameters forwarded to every solve.
@@ -202,7 +231,9 @@ def hybrid_frontier(
     configure_env(verbose=verbose)
     fmt = formulation or SpaceTimeFormulation()
 
-    mip_kw: dict = {"TimeLimit": time_limit, "MIPGap": mip_gap, **mip_params}
+    mip_kw: dict = {"MIPGap": mip_gap, **mip_params}
+    if time_limit is not None:
+        mip_kw["TimeLimit"] = time_limit
     mip_kw["OutputFlag"] = 1 if verbose else mip_kw.get("OutputFlag", 0)
 
     def _mip_solve(

@@ -4,14 +4,16 @@
  * Algorithm implementations live in separate headers:
  *   ga_common.hpp — shared types, evaluation, operators, Pareto utilities
  *   nsga2.hpp     — NSGA-II with constrained-dominance ranking
+ *   nsga3.hpp     — NSGA-III with reference-point-based selection (Deb & Jain 2014)
  *   moead.hpp     — MOEA/D with normalised Tchebycheff decomposition
  *
- * Both run_nsga2 and run_moead now return (ResultList, Profile).  The
- * bindings below expose this as a Python tuple (solutions, profile_dict)
- * where profile_dict maps phase names to wall-clock milliseconds.
+ * All three algorithms return (ResultList, Profile).  The bindings below
+ * expose this as a Python tuple (solutions, profile_dict) where profile_dict
+ * maps phase names to wall-clock milliseconds.
  */
 
 #include "nsga2.hpp"
+#include "nsga3.hpp"
 #include "moead.hpp"
 
 // Convert a Profile (vector<pair<string,double>>) to a Python dict.
@@ -54,6 +56,33 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("seed")       = 42,
         py::arg("n_threads")  = 0,
         "NSGA-II Pareto frontier approximation (parallel).\n\n"
+        "Returns (solutions, profile_dict) where profile_dict maps phase names\n"
+        "to wall-clock milliseconds.  n_threads=0 lets OpenMP choose."
+    );
+
+    m.def("nsga3",
+        [](int n_jobs, double budget,
+           const std::vector<std::vector<std::tuple<int,int,int,double,double>>>& job_slots,
+           const std::vector<int>& type_cap,
+           const std::vector<std::tuple<int,int,int>>& init_occ,
+           int pop_size, int n_divisions, int n_gen, int seed, int n_threads) {
+            auto [results, prof] = run_nsga3(
+                build_problem(n_jobs, budget, job_slots, type_cap, init_occ),
+                pop_size, n_divisions, n_gen, seed, n_threads);
+            return py::make_tuple(results, profile_to_dict(prof));
+        },
+        py::arg("n_jobs"),
+        py::arg("budget"),
+        py::arg("job_slots"),
+        py::arg("type_cap"),
+        py::arg("init_occ"),
+        py::arg("pop_size")    = 100,
+        py::arg("n_divisions") = 99,
+        py::arg("n_gen")       = 200,
+        py::arg("seed")        = 42,
+        py::arg("n_threads")   = 0,
+        "NSGA-III Pareto frontier approximation (parallel, reference-point selection).\n\n"
+        "pop_size should equal n_divisions + 1 for best reference-point coverage.\n"
         "Returns (solutions, profile_dict) where profile_dict maps phase names\n"
         "to wall-clock milliseconds.  n_threads=0 lets OpenMP choose."
     );

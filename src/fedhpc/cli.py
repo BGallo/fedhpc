@@ -22,7 +22,7 @@ _FORMULATIONS = {
     "occupancy": OccupancyFormulation,
 }
 
-_EA_METHODS     = {"nsga2", "moead"}
+_EA_METHODS     = {"nsga2", "nsga3", "moead"}
 _HYBRID_METHODS = {"hybrid"}
 _MIP_METHODS    = {"f1", "f2", "weighted", "epsilon", "epsilon-t", "pareto-true"}
 
@@ -36,6 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  f1, f2, weighted, epsilon, epsilon-t, pareto-true\n\n"
             "Heuristic evolutionary methods (no licence required):\n"
             "  nsga2 — NSGA-II with constrained-dominance ranking\n"
+            "  nsga3 — NSGA-III with reference-point-based selection (Deb & Jain 2014)\n"
             "  moead — MOEA/D with Tchebycheff decomposition\n\n"
             "Hybrid (requires both C++ extension and Gurobi):\n"
             "  hybrid — EA exploration + Gurobi ε-constraint verification\n"
@@ -59,6 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
                        "\n"
                        "  Heuristic (no licence, parallelised with OpenMP):\n"
                        "    nsga2       — NSGA-II (pop_size × n_gen generations)\n"
+                       "    nsga3       — NSGA-III with reference-point selection\n"
                        "    moead       — MOEA/D with Tchebycheff decomposition\n"
                        "\n"
                        "  Hybrid (requires C++ extension + Gurobi):\n"
@@ -81,21 +83,28 @@ def build_parser() -> argparse.ArgumentParser:
                      help="ε bound for epsilon-constraint methods.")
     mip.add_argument("--steps", type=int, default=20,
                      help="Number of frontier points for Pareto sweep methods. Default: 20.")
-    mip.add_argument("--time-limit", type=float, default=300.0,
+    mip.add_argument("--time-limit", type=float, default=None,
                      help=(
                          "Gurobi time limit in seconds. For exact methods: per solve. "
                          "For hybrid: per ε-constraint solve (one per EA candidate). "
-                         "Default: 300."
+                         "Default: no limit (run to optimality)."
                      ))
     mip.add_argument("--mip-gap", type=float, default=1e-4,
                      help="Gurobi MIPGap (used by exact and hybrid methods). Default: 1e-4.")
 
     # ── EA / hybrid options ───────────────────────────────────────────────────
-    ea = p.add_argument_group("Evolutionary algorithm options (nsga2 / moead / hybrid)")
+    ea = p.add_argument_group("Evolutionary algorithm options (nsga2 / nsga3 / moead / hybrid)")
     ea.add_argument("--pop-size", type=int, default=200, metavar="N",
                     help=(
-                        "Population size for NSGA-II, number of weight vectors for MOEA/D, "
-                        "or EA population for each algorithm in hybrid. Default: 200."
+                        "Population size for NSGA-II / NSGA-III, number of weight vectors for MOEA/D, "
+                        "or EA population for each algorithm in hybrid. Default: 200. "
+                        "For NSGA-III, should equal --n-divisions + 1."
+                    ))
+    ea.add_argument("--n-divisions", type=int, default=199, metavar="P",
+                    help=(
+                        "NSGA-III: number of divisions for the Das-Dennis reference-point lattice. "
+                        "Produces P+1 reference points; set to pop_size - 1 for best coverage. "
+                        "Default: 199 (matches default pop_size=200)."
                     ))
     ea.add_argument("--n-gen", type=int, default=300, metavar="N",
                     help="Number of EA generations (nsga2, moead, hybrid). Default: 300.")
@@ -164,10 +173,9 @@ def main(argv: list[str] | None = None) -> None:
     formulation = _FORMULATIONS[args.formulation]()
     configure_env(verbose=args.verbose)
 
-    gurobi_params: dict = {
-        "TimeLimit": args.time_limit,
-        "MIPGap":    args.mip_gap,
-    }
+    gurobi_params: dict = {"MIPGap": args.mip_gap}
+    if args.time_limit is not None:
+        gurobi_params["TimeLimit"] = args.time_limit
     if not args.verbose:
         gurobi_params["OutputFlag"] = 0
 
@@ -221,17 +229,22 @@ def main(argv: list[str] | None = None) -> None:
 
 
 def _run_ea(args: argparse.Namespace, inst: Instance, method: str, out_dir: Path) -> None:
-    """Dispatch to nsga2_frontier or moead_frontier and print results."""
+    """Dispatch to nsga2_frontier, nsga3_frontier, or moead_frontier and print results."""
     try:
-        from .moea import moead_frontier, nsga2_frontier
+        from .moea import moead_frontier, nsga2_frontier, nsga3_frontier
     except ImportError as e:
         print(f"Evolutionary methods require the fedhpc C++ extension: {e}", file=sys.stderr)
         sys.exit(1)
 
     if args.verbose:
+        extra = ""
+        if method == "moead":
+            extra = f"  T={args.neighborhood_size}"
+        elif method == "nsga3":
+            extra = f"  divs={args.n_divisions}"
         print(
             f"Running {method.upper()}  pop={args.pop_size}  gen={args.n_gen}"
-            + (f"  T={args.neighborhood_size}" if method == "moead" else "")
+            + extra
             + f"  seed={args.seed}"
             + (f"  threads={args.n_threads}" if args.n_threads else "  threads=all"),
             file=sys.stderr,
@@ -245,6 +258,16 @@ def _run_ea(args: argparse.Namespace, inst: Instance, method: str, out_dir: Path
             seed      = args.seed,
             n_threads = args.n_threads,
             profile   = args.verbose,
+        )
+    elif method == "nsga3":
+        solutions = nsga3_frontier(
+            inst,
+            pop_size    = args.pop_size,
+            n_divisions = args.n_divisions,
+            n_gen       = args.n_gen,
+            seed        = args.seed,
+            n_threads   = args.n_threads,
+            profile     = args.verbose,
         )
     else:  # moead
         solutions = moead_frontier(
@@ -277,7 +300,8 @@ def _run_hybrid(args: argparse.Namespace, inst: Instance, out_dir: Path) -> None
             f"Running HYBRID  pop={args.pop_size}  gen={args.n_gen}"
             f"  T={args.neighborhood_size}  seed={args.seed}"
             + (f"  threads={args.n_threads}" if args.n_threads else "  threads=all")
-            + f"  time_limit={args.time_limit}s  mip_gap={args.mip_gap}",
+            + (f"  time_limit={args.time_limit}s" if args.time_limit is not None else "  time_limit=∞")
+            + f"  mip_gap={args.mip_gap}",
             file=sys.stderr,
         )
 

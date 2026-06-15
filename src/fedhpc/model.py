@@ -67,14 +67,18 @@ def _extract(
     solve_time: float | None = None,
 ) -> Solution:
     status_map = {
-        GRB.OPTIMAL: "optimal",
+        GRB.OPTIMAL:   "optimal",
         GRB.SUBOPTIMAL: "feasible",
         GRB.INFEASIBLE: "infeasible",
-        GRB.UNBOUNDED: "unbounded",
+        GRB.UNBOUNDED:  "unbounded",
+        GRB.TIME_LIMIT: "feasible",
     }
     status = status_map.get(mdl.Status, f"gurobi_status_{mdl.Status}")
 
-    if mdl.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
+    # A time-limited solve that found a feasible incumbent is treated as suboptimal.
+    time_limit_feasible = mdl.Status == GRB.TIME_LIMIT and mdl.SolCount > 0
+
+    if mdl.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL) and not time_limit_feasible:
         return Solution(
             status=status, objective=None, f1=None, f2=None,
             assignment={}, completion={},
@@ -141,9 +145,10 @@ def solve_f1(
         return _extract(inst, mdl, vars, build_time=build_time, solve_time=solve_time)
 
     # Phase 2: fix turnaround at optimal, minimise cost.
-    # f1 is a sum of integer slot values, so round to nearest integer.
-    f1_star = int(round(mdl.ObjVal))
-    mdl.addConstr(f1_expr <= f1_star, name="fix_f1")
+    # f1 = Σ(t + p_occ − arrival); arrival is float, so ObjVal is float.
+    # Use a small tolerance to avoid rounding the float constraint too tight.
+    f1_star = mdl.ObjVal
+    mdl.addConstr(f1_expr <= f1_star + 1e-6, name="fix_f1")
     mdl.setObjective(f2_expr, GRB.MINIMIZE)
     mdl.optimize()
     solve_time = time.perf_counter() - t1
@@ -284,7 +289,7 @@ def solve_epsilon_turnaround(
 
 def solve_true_pareto_step(
     inst: Instance,
-    f1_bound: int,
+    f1_bound: float,
     formulation: Formulation | None = None,
     **params,
 ) -> Solution:
@@ -295,6 +300,7 @@ def solve_true_pareto_step(
     returned point lies on the true Pareto front (not just the cost-efficient
     frontier within the budget).  Returns an infeasible Solution when no
     schedule exists with f1 ≤ f1_bound.
+    f1_bound is float because f1 = Σ(t + p_occ − arrival) with float arrivals.
     """
     fmt = formulation or _default_formulation()
     t0 = time.perf_counter()
