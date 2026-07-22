@@ -159,27 +159,35 @@ class SpaceTimeFormulation(Formulation):
         # Boundary: y_{m,−1} = N_m − n_running[m]  (reduced by pre-occupied slots)
         #           y_{m,H}  = N_m                  (terminal: all slots idle again)
         # rj_arrivals[m,v]: running jobs that complete at v (ghost completions).
+        #
+        # jobs_by_type[mid] is hoisted out of the v-loop so "mid in F[j]" is
+        # tested once per (job, type) instead of once per (job, type, v) — a
+        # factor-of-H reduction in membership checks on large instances.
+        jobs_by_type = {
+            itype.id: [j for j in inst.jobs if itype.id in inst.F[j.id]]
+            for itype in inst.instance_types
+        }
         for itype in inst.instance_types:
             mid = itype.id
             nm = N[mid]
             # Slots available to new jobs at the very start of the horizon
             nm_available = max(0, nm - inst.n_running.get(mid, 0))
+            jobs_mid = jobs_by_type[mid]
             for v in range(H + 1):  # v ∈ {0, …, H}
                 lhs_wait = nm_available if v == 0 else y[mid, v - 1]
                 rhs_wait = nm           if v == H else y[mid, v]
                 arriving = (
                     gp.quicksum(
                         x[j.id, mid, v - inst.p_occ[j.id, mid]]
-                        for j in inst.jobs
-                        if mid in inst.F[j.id]
-                        and (v - inst.p_occ[j.id, mid]) in inst.T[j.id, mid]
+                        for j in jobs_mid
+                        if (v - inst.p_occ[j.id, mid]) in inst.T[j.id, mid]
                     )
                     + inst.rj_arrivals.get((mid, v), 0)  # ghost completions
                 )
                 starting = gp.quicksum(
                     x[j.id, mid, v]
-                    for j in inst.jobs
-                    if mid in inst.F[j.id] and v in inst.T[j.id, mid]
+                    for j in jobs_mid
+                    if v in inst.T[j.id, mid]
                 )
                 mdl.addConstr(
                     lhs_wait + arriving == rhs_wait + starting,
@@ -250,15 +258,28 @@ class OccupancyFormulation(Formulation):
                 name=f"assign[{j.id}]",
             )
 
+        # jobs_by_type[mid] hoists "mid in F[j]" out of the per-t loops below —
+        # tested once per (job, type) instead of once per (job, type, t).
+        jobs_by_type = {
+            itype.id: [j for j in inst.jobs if itype.id in inst.F[j.id]]
+            for itype in inst.instance_types
+        }
+
         # Occupancy definition: w_mt = Σ jobs running during [t, t+1)
+        # tau <= t < tau + p_occ  ⟺  tau ∈ (t − p_occ, t], intersected with the
+        # feasible-start range T_jm.  Since T_jm is a contiguous range, this
+        # intersection is computed directly instead of scanning all of T_jm.
         for itype in inst.instance_types:
             mid = itype.id
+            jobs_mid = jobs_by_type[mid]
             for t in range(H):
                 running = gp.quicksum(
                     x[j.id, mid, tau]
-                    for j in inst.jobs if mid in inst.F[j.id]
-                    for tau in inst.T[j.id, mid]
-                    if tau <= t < tau + inst.p_occ[j.id, mid]
+                    for j in jobs_mid
+                    for tau in range(
+                        max(inst.T[j.id, mid].start, t - inst.p_occ[j.id, mid] + 1),
+                        min(inst.T[j.id, mid].stop, t + 1),
+                    )
                 )
                 mdl.addConstr(w[mid, t] == running, name=f"occupy[{mid},{t}]")
 
@@ -266,9 +287,7 @@ class OccupancyFormulation(Formulation):
         # Running jobs pre-occupy some slots, so new jobs can only use the remainder.
         for itype in inst.instance_types:
             mid = itype.id
-            base_ub = itype.capacity if itype.capacity is not None else sum(
-                1 for j in inst.jobs if mid in inst.F[j.id]
-            )
+            base_ub = itype.capacity if itype.capacity is not None else len(jobs_by_type[mid])
             for t in range(H):
                 # Subtract running jobs still active during [t, t+1)
                 rj_occ = inst.occupied.get((mid, t), 0)

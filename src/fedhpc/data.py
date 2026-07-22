@@ -94,8 +94,11 @@ class Instance:
     F: dict[int, list[int]] = field(default_factory=dict)
     # F_j = {m : q^cpu_j ≤ C^cpu_m, q^mem_j ≤ C^mem_m, q^stor_j ≤ C^stor_m}
 
-    T: dict[tuple[int, int], list[int]] = field(default_factory=dict)
+    T: dict[tuple[int, int], range] = field(default_factory=dict)
     # T_jm = {t ∈ T : t ≥ a_j, t + p^occ_jm ≤ H}
+    # Always a contiguous range (t + p_occ ≤ H is monotone in t for fixed p_occ),
+    # stored as `range` rather than a materialized list so `in` membership tests
+    # in the formulation builders are O(1) instead of O(len(T_jm)).
 
     # ---- Populated by build() for running jobs --------------------------------
 
@@ -137,12 +140,12 @@ class Instance:
                     + m.cost_stor * j.stor * p_bill
                 )
 
-                # (eq. 5) Feasible start times — uses p_occ
+                # (eq. 5) Feasible start times — uses p_occ.
+                # t + p_occ ≤ horizon  ⟺  t ≤ horizon − p_occ, so the feasible
+                # set is exactly the contiguous range [a_min, horizon − p_occ].
                 a_min = math.ceil(j.arrival)
-                self.T[j.id, m_id] = [
-                    t for t in range(a_min, self.horizon + 1)
-                    if t + self.p_occ[j.id, m_id] <= self.horizon
-                ]
+                t_max_excl = self.horizon - self.p_occ[j.id, m_id] + 1
+                self.T[j.id, m_id] = range(a_min, t_max_excl)
 
         infeasible = [j.id for j in self.jobs if not self.F[j.id]]
         if infeasible:

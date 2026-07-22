@@ -130,7 +130,7 @@ class TestInstance:
         inst = Instance(jobs=[j], instance_types=[it], horizon=10, budget=1e6)
         inst.build()
         # p_occ = ceil(5 + 3) = 8 → valid t: t + 8 ≤ 10 → t ∈ {0, 1, 2}
-        assert inst.T[0, 0] == [0, 1, 2]
+        assert list(inst.T[0, 0]) == [0, 1, 2]
 
     def test_T_jm_start_after_arrival(self, tiny_instance):
         for j in tiny_instance.jobs:

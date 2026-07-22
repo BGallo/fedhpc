@@ -59,6 +59,27 @@ def _apply_params(mdl: gp.Model, params: dict) -> None:
         mdl.setParam(k, v)
 
 
+def set_mip_start(inst: Instance, x: dict, hint: Solution) -> None:
+    """Seed Gurobi's MIP start (``.Start``) from a heuristic/prior ``Solution``.
+
+    Sets every x_jmt to 1.0 for the hinted (type, start-time) pair and 0.0
+    otherwise, for jobs present in ``hint.assignment``. Jobs absent from the
+    hint (e.g. an infeasible heuristic result) are left unset — Gurobi fills
+    those in on its own during the root relaxation.  This only biases the
+    B&B search toward a known-good incumbent; it never changes the feasible
+    region or the proven-optimal objective.
+    """
+    for j in inst.jobs:
+        if j.id not in hint.assignment:
+            continue
+        m_hint, t_hint = hint.assignment[j.id]
+        for m_id in inst.F[j.id]:
+            for t in inst.T[j.id, m_id]:
+                x[j.id, m_id, t].Start = (
+                    1.0 if (m_id == m_hint and t == t_hint) else 0.0
+                )
+
+
 def _extract(
     inst: Instance,
     mdl: gp.Model,
@@ -122,9 +143,15 @@ def _extract(
 def solve_f1(
     inst: Instance,
     formulation: Formulation | None = None,
+    hint: Solution | None = None,
     **params,
 ) -> Solution:
-    """Lex-min (f1, f2): minimise total turnaround, breaking ties by minimum cost."""
+    """Lex-min (f1, f2): minimise total turnaround, breaking ties by minimum cost.
+
+    ``hint`` — an optional prior/heuristic Solution (e.g. from moea.py) used to
+    seed Gurobi's MIP start. Purely a search-order hint: it cannot change the
+    proven-optimal result, only how fast the solver finds it.
+    """
     fmt = formulation or _default_formulation()
     t0 = time.perf_counter()
     mdl, vars = fmt.build(inst)
@@ -132,6 +159,8 @@ def solve_f1(
     _apply_params(mdl, params)
 
     x = vars["x"]
+    if hint is not None:
+        set_mip_start(inst, x, hint)
     f1_expr = fmt.f1_expr(inst, x)
     f2_expr = fmt.f2_expr(inst, x)
 
@@ -159,11 +188,15 @@ def solve_f1(
 def solve_f2(
     inst: Instance,
     formulation: Formulation | None = None,
+    hint: Solution | None = None,
     **params,
 ) -> Solution:
     """Lex-min (f2, f1): minimise total cost, breaking ties by minimum turnaround.
 
     When minimum cost is 0, phase 2 finds the best achievable turnaround at zero cost.
+
+    ``hint`` — an optional prior/heuristic Solution used to seed Gurobi's MIP
+    start; see :func:`solve_f1`.
     """
     fmt = formulation or _default_formulation()
     t0 = time.perf_counter()
@@ -172,6 +205,8 @@ def solve_f2(
     _apply_params(mdl, params)
 
     x = vars["x"]
+    if hint is not None:
+        set_mip_start(inst, x, hint)
     f1_expr = fmt.f1_expr(inst, x)
     f2_expr = fmt.f2_expr(inst, x)
 
@@ -202,6 +237,7 @@ def solve_weighted_sum(
     f2_T: float,
     f1_0: float,
     formulation: Formulation | None = None,
+    hint: Solution | None = None,
     **params,
 ) -> Solution:
     """Minimise λ·f̂1 + (1−λ)·f̂2 with f1 ≤ f1^0 (fedhpc.pdf eq. 34, 38).
@@ -214,6 +250,9 @@ def solve_weighted_sum(
     Degenerate cases (Section 1.11):
         f1_0 == f1_T  → no turnaround trade-off; minimise f2 subject to f1 ≤ f1_0.
         f2_T == 0     → implied by the above; same handling.
+
+    ``hint`` — an optional prior/heuristic Solution used to seed Gurobi's MIP
+    start; see :func:`solve_f1`.
     """
     if not (0.0 <= lam <= 1.0):
         raise ValueError("lam must be in [0, 1]")
@@ -224,6 +263,8 @@ def solve_weighted_sum(
     _apply_params(mdl, params)
 
     x = vars["x"]
+    if hint is not None:
+        set_mip_start(inst, x, hint)
     f1_expr = fmt.f1_expr(inst, x)
     f2_expr = fmt.f2_expr(inst, x)
 
@@ -251,14 +292,21 @@ def solve_epsilon_cost(
     inst: Instance,
     epsilon: float,
     formulation: Formulation | None = None,
+    hint: Solution | None = None,
     **params,
 ) -> Solution:
-    """ε-constraint v1: min f1 subject to f2 ≤ epsilon  (eq. 26–27)."""
+    """ε-constraint v1: min f1 subject to f2 ≤ epsilon  (eq. 26–27).
+
+    ``hint`` — an optional prior/heuristic Solution used to seed Gurobi's MIP
+    start; see :func:`solve_f1`.
+    """
     fmt = formulation or _default_formulation()
     t0 = time.perf_counter()
     mdl, vars = fmt.build(inst)
     build_time = time.perf_counter() - t0
     _apply_params(mdl, params)
+    if hint is not None:
+        set_mip_start(inst, vars["x"], hint)
     mdl.addConstr(fmt.f2_expr(inst, vars["x"]) <= epsilon, name="eps_cost")
     mdl.setObjective(fmt.f1_expr(inst, vars["x"]), GRB.MINIMIZE)
     t1 = time.perf_counter()
@@ -271,14 +319,21 @@ def solve_epsilon_turnaround(
     inst: Instance,
     epsilon: float,
     formulation: Formulation | None = None,
+    hint: Solution | None = None,
     **params,
 ) -> Solution:
-    """ε-constraint v2: min f2 subject to f1 ≤ epsilon  (eq. 28–29)."""
+    """ε-constraint v2: min f2 subject to f1 ≤ epsilon  (eq. 28–29).
+
+    ``hint`` — an optional prior/heuristic Solution used to seed Gurobi's MIP
+    start; see :func:`solve_f1`.
+    """
     fmt = formulation or _default_formulation()
     t0 = time.perf_counter()
     mdl, vars = fmt.build(inst)
     build_time = time.perf_counter() - t0
     _apply_params(mdl, params)
+    if hint is not None:
+        set_mip_start(inst, vars["x"], hint)
     mdl.addConstr(fmt.f1_expr(inst, vars["x"]) <= epsilon, name="eps_turnaround")
     mdl.setObjective(fmt.f2_expr(inst, vars["x"]), GRB.MINIMIZE)
     t1 = time.perf_counter()
@@ -291,6 +346,7 @@ def solve_true_pareto_step(
     inst: Instance,
     f1_bound: float,
     formulation: Formulation | None = None,
+    hint: Solution | None = None,
     **params,
 ) -> Solution:
     """One step of the true-Pareto sweep: lex-min (f2, f1) s.t. f1 ≤ f1_bound.
@@ -301,6 +357,9 @@ def solve_true_pareto_step(
     frontier within the budget).  Returns an infeasible Solution when no
     schedule exists with f1 ≤ f1_bound.
     f1_bound is float because f1 = Σ(t + p_occ − arrival) with float arrivals.
+
+    ``hint`` — an optional prior/heuristic Solution used to seed Gurobi's MIP
+    start; see :func:`solve_f1`.
     """
     fmt = formulation or _default_formulation()
     t0 = time.perf_counter()
@@ -309,6 +368,8 @@ def solve_true_pareto_step(
     _apply_params(mdl, params)
 
     x = vars["x"]
+    if hint is not None:
+        set_mip_start(inst, x, hint)
     f1_expr = fmt.f1_expr(inst, x)
     f2_expr = fmt.f2_expr(inst, x)
 

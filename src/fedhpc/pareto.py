@@ -4,9 +4,11 @@ from __future__ import annotations
 import sys
 import time as _time
 
+from gurobipy import GRB
+
 from .data import Instance
 from .formulations import Formulation, SpaceTimeFormulation
-from .model import Solution, _apply_params, _extract, solve_epsilon_cost, solve_epsilon_turnaround, solve_f1, solve_f2, solve_true_pareto_step, solve_weighted_sum
+from .model import Solution, _apply_params, _extract, set_mip_start
 
 
 def _reference_points(
@@ -19,21 +21,46 @@ def _reference_points(
     f1_T  — f1^T: lexicographic minimum turnaround (min f1 over all feasible x).
     f2_T  — f2^T: minimum cost at f1^T (min f2 s.t. f1 = f1^T).
     f1_0  — f1^0: minimum turnaround at zero cost (min f1 s.t. f2 = 0).
+
+    All three share the same feasible region (only the objective/bound differs),
+    so a single model is built once and reused across all three solves — each
+    solve also warm-starts from the previous one's basis/incumbent, since Gurobi
+    keeps that state across ``optimize()`` calls on the same model instance.
     """
-    sol_f1T = solve_f1(inst, formulation=formulation, **params)
-    if sol_f1T.f1 is None:
+    fmt = formulation or SpaceTimeFormulation()
+    mdl, vars_ = fmt.build(inst)
+    _apply_params(mdl, params)
+
+    x = vars_["x"]
+    f1_expr = fmt.f1_expr(inst, x)
+    f2_expr = fmt.f2_expr(inst, x)
+
+    # Phase 1: f1_T = min f1
+    mdl.setObjective(f1_expr, GRB.MINIMIZE)
+    mdl.optimize()
+    if mdl.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
         raise RuntimeError("Could not solve min-turnaround problem.")
-    f1_T = sol_f1T.f1
+    f1_T = mdl.ObjVal
 
-    sol_f2T = solve_epsilon_turnaround(inst, epsilon=f1_T, formulation=formulation, **params)
-    if sol_f2T.f2 is None:
+    # Phase 2: f2_T = min f2 s.t. f1 <= f1_T (identical to solve_f1's phase 2 —
+    # this *is* the min-cost-at-f1^T problem, so no separate epsilon_turnaround
+    # solve is needed).
+    mdl.addConstr(f1_expr <= f1_T + 1e-6, name="fix_f1")
+    mdl.setObjective(f2_expr, GRB.MINIMIZE)
+    mdl.optimize()
+    if mdl.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
         raise RuntimeError("Could not solve min-cost at f1^T problem.")
-    f2_T = sol_f2T.f2
+    f2_T = mdl.ObjVal
 
-    sol_f10 = solve_epsilon_cost(inst, epsilon=0.0, formulation=formulation, **params)
-    if sol_f10.f1 is None:
+    # Phase 3: f1_0 = min f1 s.t. f2 <= 0, reusing the same model — drop the
+    # f1_T fix and impose the zero-cost bound instead.
+    mdl.remove(mdl.getConstrByName("fix_f1"))
+    mdl.addConstr(f2_expr <= 0.0, name="eps_cost")
+    mdl.setObjective(f1_expr, GRB.MINIMIZE)
+    mdl.optimize()
+    if mdl.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
         raise RuntimeError("Could not solve min-turnaround at zero-cost problem.")
-    f1_0 = sol_f10.f1
+    f1_0 = mdl.ObjVal
 
     return f1_T, f2_T, f1_0
 
@@ -42,6 +69,7 @@ def true_pareto_frontier(
     inst: Instance,
     formulation: Formulation | None = None,
     verbose: bool = False,
+    hint: Solution | None = None,
     **params,
 ) -> list[Solution]:
     """Enumerate the complete true Pareto front via sequential ε-constraint sweep.
@@ -60,17 +88,70 @@ def true_pareto_frontier(
       4. Stop when infeasible or f1_bound < f1_min.
 
     Both anchors are added upfront so the extremes are always in the output.
+
+    Every step above shares the same feasible region (only the ε-bound on f1
+    and the lex-min order differ), so the MIP model is built exactly once and
+    reused for the whole sweep instead of once per step — the dominant cost on
+    large instances. Reusing the model also means Gurobi automatically carries
+    the basis/incumbent from one step's solve into the next step's re-optimize.
+
+    ``hint`` — an optional prior/heuristic Solution (e.g. from moea.py) used to
+    seed the MIP start of the very first solve only. It is not worth re-applying
+    on every sweep step: setting ``.Start`` over every job/type/time combination
+    costs O(|x|), comparable to a full model build on large instances, while
+    Gurobi's own cross-solve warm start (above) is free.
     """
     _EPS  = 1e-6          # numerical tolerance for float comparisons
     _STEP = 1.0 - _EPS    # sweep decrement: crosses exactly one integer K level
 
+    fmt = formulation or SpaceTimeFormulation()
+    t0 = _time.perf_counter()
+    mdl, vars_ = fmt.build(inst)
+    build_time = _time.perf_counter() - t0
+    _apply_params(mdl, params)
+    mdl.update()  # index constraint names before the first getConstrByName lookup
+
+    x = vars_["x"]
+    f1_expr = fmt.f1_expr(inst, x)
+    f2_expr = fmt.f2_expr(inst, x)
+
+    def _lexmin(
+        primary_expr, secondary_expr, *, f1_bound: float | None = None,
+        start: Solution | None = None,
+    ) -> Solution:
+        """Lex-min(primary, secondary) on the shared model, s.t. f1 <= f1_bound.
+
+        Clears constraints left over from a previous call on this model before
+        adding the ones for this call, so the model is safe to reuse repeatedly.
+        """
+        for name in ("eps_f1", "fix_primary"):
+            c = mdl.getConstrByName(name)
+            if c is not None:
+                mdl.remove(c)
+        if f1_bound is not None:
+            mdl.addConstr(f1_expr <= f1_bound, name="eps_f1")
+        if start is not None:
+            set_mip_start(inst, x, start)
+        mdl.setObjective(primary_expr, GRB.MINIMIZE)
+        t1 = _time.perf_counter()
+        mdl.optimize()
+        if mdl.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
+            return _extract(inst, mdl, vars_, build_time=build_time,
+                            solve_time=_time.perf_counter() - t1)
+        primary_star = mdl.ObjVal
+        mdl.addConstr(primary_expr <= primary_star + _EPS, name="fix_primary")
+        mdl.setObjective(secondary_expr, GRB.MINIMIZE)
+        mdl.optimize()
+        return _extract(inst, mdl, vars_, build_time=build_time,
+                        solve_time=_time.perf_counter() - t1)
+
     # ── Anchor 1: cheapest-fast (right extreme) ───────────────────────────────
-    sol_cheap = solve_f2(inst, formulation=formulation, **params)
+    sol_cheap = _lexmin(f2_expr, f1_expr, start=hint)
     if sol_cheap.f1 is None:
         return []
 
     # ── Anchor 2: fastest-cheap (left extreme) ───────────────────────────────
-    sol_fast = solve_f1(inst, formulation=formulation, **params)
+    sol_fast = _lexmin(f1_expr, f2_expr)
 
     f1_cheap: float = sol_cheap.f1
     solutions: list[Solution] = [sol_cheap]
@@ -102,9 +183,7 @@ def true_pareto_frontier(
     n_iter = 0
 
     while f1_bound > f1_min - _EPS:
-        sol = solve_true_pareto_step(
-            inst, f1_bound=f1_bound, formulation=formulation, **params,
-        )
+        sol = _lexmin(f2_expr, f1_expr, f1_bound=f1_bound)
         n_iter += 1
         if sol.f1 is None:
             if verbose:
@@ -249,15 +328,7 @@ def hybrid_frontier(
         _apply_params(mdl, mip_kw)
         x = vars_["x"]
         if hint is not None:
-            for j in inst.jobs:
-                if j.id not in hint.assignment:
-                    continue
-                m_hint, t_hint = hint.assignment[j.id]
-                for m_id in inst.F[j.id]:
-                    for t in inst.T[j.id, m_id]:
-                        x[j.id, m_id, t].Start = (
-                            1.0 if (m_id == m_hint and t == t_hint) else 0.0
-                        )
+            set_mip_start(inst, x, hint)
         if constrain_f2 is not None:
             mdl.addConstr(fmt.f2_expr(inst, x) <= constrain_f2, name="eps_cost")
         if constrain_f1 is not None:
