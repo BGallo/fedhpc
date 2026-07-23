@@ -99,17 +99,32 @@ inline const Individual& tournament(const Individual& a,
     return (a.crowding >= b.crowding) ? a : b;
 }
 
+// Generalised k-ary tournament: draws k random competitors, folds them
+// through the crowded-comparison operator. Call sites keep k=2 on the
+// original two-argument tournament() call so the default path is an exact
+// byte-for-byte match to the pre-existing implementation.
+inline const Individual& tournament_k(const std::vector<Individual>& pop, int k,
+                                      std::mt19937& rng) noexcept {
+    std::uniform_int_distribution<int> ri(0, static_cast<int>(pop.size()) - 1);
+    const Individual* best = &pop[ri(rng)];
+    for (int i = 1; i < k; i++)
+        best = &tournament(*best, pop[ri(rng)]);
+    return *best;
+}
+
 // ── NSGA-II main loop ─────────────────────────────────────────────────────────
 
 inline std::pair<ResultList, Profile>
-run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed, int n_threads) {
+run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed, int n_threads,
+          double p_mut_start = -1.0, double p_mut_end = -1.0, int crossover_kind = 0,
+          int tourn_k = 2) {
     py::gil_scoped_release release;
     set_num_threads(n_threads);
 
     const auto t_total = Clock::now();
 
     std::mt19937 rng(seed);
-    const double p_mut = 2.0 / prob.n_jobs;
+    const auto mut_sched = make_mutation_schedule(p_mut_start, p_mut_end, 2.0 / prob.n_jobs);
 
     // ── Initial population ────────────────────────────────────────────────────
 
@@ -179,6 +194,8 @@ run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed, int n_threads)
 
         for (auto& s : child_seeds) s = rng();
 
+        const double p_mut_gen = mut_sched.at(gen, n_gen);
+
         const auto t2 = Clock::now();
 
 #ifdef _OPENMP
@@ -190,10 +207,14 @@ run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed, int n_threads)
             for (int k = 0; k < pop_size; k++) {
                 std::mt19937 lrng(child_seeds[k]);
                 std::uniform_int_distribution<int> ri(0, pop_size - 1);
-                const Individual& p1 = tournament(pop[ri(lrng)], pop[ri(lrng)]);
-                const Individual& p2 = tournament(pop[ri(lrng)], pop[ri(lrng)]);
-                offspring[k] = crossover(p1, p2, lrng);
-                mutate(offspring[k], prob, p_mut, lrng);
+                const Individual& p1 = (tourn_k == 2)
+                    ? tournament(pop[ri(lrng)], pop[ri(lrng)])
+                    : tournament_k(pop, tourn_k, lrng);
+                const Individual& p2 = (tourn_k == 2)
+                    ? tournament(pop[ri(lrng)], pop[ri(lrng)])
+                    : tournament_k(pop, tourn_k, lrng);
+                offspring[k] = crossover(p1, p2, lrng, crossover_kind);
+                mutate(offspring[k], prob, p_mut_gen, lrng);
                 evaluate(offspring[k], prob, ws);
             }
         }
@@ -204,10 +225,14 @@ run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed, int n_threads)
             for (int k = 0; k < pop_size; k++) {
                 std::mt19937 lrng(child_seeds[k]);
                 std::uniform_int_distribution<int> ri(0, pop_size - 1);
-                const Individual& p1 = tournament(pop[ri(lrng)], pop[ri(lrng)]);
-                const Individual& p2 = tournament(pop[ri(lrng)], pop[ri(lrng)]);
-                offspring[k] = crossover(p1, p2, lrng);
-                mutate(offspring[k], prob, p_mut, lrng);
+                const Individual& p1 = (tourn_k == 2)
+                    ? tournament(pop[ri(lrng)], pop[ri(lrng)])
+                    : tournament_k(pop, tourn_k, lrng);
+                const Individual& p2 = (tourn_k == 2)
+                    ? tournament(pop[ri(lrng)], pop[ri(lrng)])
+                    : tournament_k(pop, tourn_k, lrng);
+                offspring[k] = crossover(p1, p2, lrng, crossover_kind);
+                mutate(offspring[k], prob, p_mut_gen, lrng);
                 evaluate(offspring[k], prob, ws);
             }
         }

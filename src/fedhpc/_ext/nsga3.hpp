@@ -67,6 +67,19 @@ tournament3(const Individual& a, const Individual& b, std::mt19937& rng) noexcep
     return (std::uniform_int_distribution<int>(0, 1)(rng) == 0) ? a : b;
 }
 
+// Generalised k-ary tournament (rank-only, random tiebreak). k=2 (default)
+// call sites keep the original two-argument tournament3() call so the
+// default path is an exact byte-for-byte match to the pre-existing
+// implementation.
+inline const Individual&
+tournament3_k(const std::vector<Individual>& pop, int k, std::mt19937& rng) noexcept {
+    std::uniform_int_distribution<int> ri(0, static_cast<int>(pop.size()) - 1);
+    const Individual* best = &pop[ri(rng)];
+    for (int i = 1; i < k; i++)
+        best = &tournament3(*best, pop[ri(rng)], rng);
+    return *best;
+}
+
 // ── Normalization helpers ─────────────────────────────────────────────────────
 
 struct RefData {
@@ -263,14 +276,16 @@ niching_select(const std::vector<RefData>& all_data, int n_S, int n_Fl,
 
 inline std::pair<ResultList, Profile>
 run_nsga3(const Problem& prob, int pop_size, int n_divisions,
-          int n_gen, int seed, int n_threads) {
+          int n_gen, int seed, int n_threads,
+          double p_mut_start = -1.0, double p_mut_end = -1.0, int crossover_kind = 0,
+          int tourn_k = 2) {
     py::gil_scoped_release release;
     set_num_threads(n_threads);
 
     const auto t_total = Clock::now();
 
     std::mt19937 rng(seed);
-    const double p_mut = 2.0 / prob.n_jobs;
+    const auto mut_sched = make_mutation_schedule(p_mut_start, p_mut_end, 2.0 / prob.n_jobs);
 
     const auto refs = make_reference_points_2d(n_divisions);
     const int  R    = (int)refs.size();
@@ -340,6 +355,8 @@ run_nsga3(const Problem& prob, int pop_size, int n_divisions,
 
         for (auto& s : child_seeds) s = rng();
 
+        const double p_mut_gen = mut_sched.at(gen, n_gen);
+
         const auto t_off = Clock::now();
 
 #ifdef _OPENMP
@@ -351,10 +368,14 @@ run_nsga3(const Problem& prob, int pop_size, int n_divisions,
             for (int k = 0; k < pop_size; k++) {
                 std::mt19937 lrng(child_seeds[k]);
                 std::uniform_int_distribution<int> ri(0, pop_size - 1);
-                const Individual& p1 = tournament3(pop[ri(lrng)], pop[ri(lrng)], lrng);
-                const Individual& p2 = tournament3(pop[ri(lrng)], pop[ri(lrng)], lrng);
-                offspring[k] = crossover(p1, p2, lrng);
-                mutate(offspring[k], prob, p_mut, lrng);
+                const Individual& p1 = (tourn_k == 2)
+                    ? tournament3(pop[ri(lrng)], pop[ri(lrng)], lrng)
+                    : tournament3_k(pop, tourn_k, lrng);
+                const Individual& p2 = (tourn_k == 2)
+                    ? tournament3(pop[ri(lrng)], pop[ri(lrng)], lrng)
+                    : tournament3_k(pop, tourn_k, lrng);
+                offspring[k] = crossover(p1, p2, lrng, crossover_kind);
+                mutate(offspring[k], prob, p_mut_gen, lrng);
                 evaluate(offspring[k], prob, ws);
             }
         }
@@ -365,10 +386,14 @@ run_nsga3(const Problem& prob, int pop_size, int n_divisions,
             for (int k = 0; k < pop_size; k++) {
                 std::mt19937 lrng(child_seeds[k]);
                 std::uniform_int_distribution<int> ri(0, pop_size - 1);
-                const Individual& p1 = tournament3(pop[ri(lrng)], pop[ri(lrng)], lrng);
-                const Individual& p2 = tournament3(pop[ri(lrng)], pop[ri(lrng)], lrng);
-                offspring[k] = crossover(p1, p2, lrng);
-                mutate(offspring[k], prob, p_mut, lrng);
+                const Individual& p1 = (tourn_k == 2)
+                    ? tournament3(pop[ri(lrng)], pop[ri(lrng)], lrng)
+                    : tournament3_k(pop, tourn_k, lrng);
+                const Individual& p2 = (tourn_k == 2)
+                    ? tournament3(pop[ri(lrng)], pop[ri(lrng)], lrng)
+                    : tournament3_k(pop, tourn_k, lrng);
+                offspring[k] = crossover(p1, p2, lrng, crossover_kind);
+                mutate(offspring[k], prob, p_mut_gen, lrng);
                 evaluate(offspring[k], prob, ws);
             }
         }

@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <numeric>
@@ -165,8 +166,8 @@ inline Individual make_random(const Problem& prob, std::mt19937& rng) {
 }
 
 // 2-point crossover: takes a contiguous segment from p2, rest from p1.
-inline Individual crossover(const Individual& p1, const Individual& p2,
-                             std::mt19937& rng) {
+inline Individual crossover_two_point(const Individual& p1, const Individual& p2,
+                                      std::mt19937& rng) {
     Individual child;
     const int n = static_cast<int>(p1.genes.size());
     child.genes.resize(n);
@@ -182,6 +183,27 @@ inline Individual crossover(const Individual& p1, const Individual& p2,
     for (int j = 0; j < n; j++)
         child.genes[j] = (j >= c1 && j < c2) ? p2.genes[j] : p1.genes[j];
     return child;
+}
+
+// Uniform crossover: each gene independently drawn from p1 or p2 (coin flip).
+// Higher allelic mixing than two-point; can disrupt building blocks more but
+// explores combinations two-point structurally cannot reach in one step.
+inline Individual crossover_uniform(const Individual& p1, const Individual& p2,
+                                    std::mt19937& rng) {
+    Individual child;
+    const int n = static_cast<int>(p1.genes.size());
+    child.genes.resize(n);
+    std::uniform_int_distribution<int> coin(0, 1);
+    for (int j = 0; j < n; j++)
+        child.genes[j] = coin(rng) ? p1.genes[j] : p2.genes[j];
+    return child;
+}
+
+// CrossoverKind: 0 = two-point (default, original behaviour), 1 = uniform.
+inline Individual crossover(const Individual& p1, const Individual& p2,
+                             std::mt19937& rng, int kind = 0) {
+    return (kind == 1) ? crossover_uniform(p1, p2, rng)
+                        : crossover_two_point(p1, p2, rng);
 }
 
 inline Individual make_greedy(const Problem& prob, bool minimize_cost) {
@@ -335,6 +357,29 @@ inline void mutate(Individual& ind, const Problem& prob, double p_mut,
             ind.genes[j] = std::uniform_int_distribution<int>(0, n - 1)(rng);
         }
     }
+}
+
+// ── Mutation-rate annealing ───────────────────────────────────────────────────
+//
+// p_mut_start < 0  ⇒ resolve to the caller's formula default (e.g. 2/n_jobs).
+// p_mut_end   < 0  ⇒ hold constant at the resolved start rate (no annealing).
+// Otherwise the rate is linearly interpolated start→end across generations.
+// Passing both as -1 (the default in every binding) reproduces the original
+// fixed-rate behaviour exactly, generation for generation.
+struct MutationSchedule {
+    double lo, hi;
+    double at(int gen, int n_gen) const noexcept {
+        if (n_gen <= 1) return lo;
+        const double frac = static_cast<double>(gen) / (n_gen - 1);
+        return lo + frac * (hi - lo);
+    }
+};
+
+inline MutationSchedule make_mutation_schedule(double p_mut_start, double p_mut_end,
+                                               double default_rate) noexcept {
+    const double lo = (p_mut_start >= 0.0) ? p_mut_start : default_rate;
+    const double hi = (p_mut_end   >= 0.0) ? p_mut_end   : lo;
+    return {lo, hi};
 }
 
 // ── Pareto utilities ──────────────────────────────────────────────────────────

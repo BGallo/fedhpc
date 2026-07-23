@@ -13,7 +13,9 @@ import math
 import pytest
 
 from fedhpc.data import Instance, InstanceType, Job, RunningJob
-from fedhpc.moea import _init_occ, _job_slots, _type_cap, moead_frontier, nsga2_frontier
+from fedhpc.moea import (
+    _init_occ, _job_slots, _type_cap, moead_frontier, nsga2_frontier, nsga3_frontier,
+)
 
 # Pull shared helpers from conftest (importable because conftest is a plain module)
 from conftest import (
@@ -643,6 +645,268 @@ class TestMoeadMaxReplace:
         inst = Instance.from_file("data/small.json")
         sols = moead_frontier(inst, n_weights=100, n_gen=200,
                               neighborhood_size=20, max_replace=5, seed=42)
+        assert len(sols) > 0
+        assert is_non_dominated_set(sols)
+        for s in sols:
+            assert s.f2 <= inst.budget + 1e-6
+            assert capacity_violations(inst, s) == []
+
+
+# ---------------------------------------------------------------------------
+# Annealed mutation rate (p_mut_start / p_mut_end)
+# ---------------------------------------------------------------------------
+
+_ANNEAL_BOTH = pytest.mark.parametrize(
+    "frontier_fn,kwargs",
+    [
+        (nsga2_frontier, {"pop_size": 50, "n_gen": 100, "seed": 42}),
+        (nsga3_frontier, {"pop_size": 50, "n_divisions": 49, "n_gen": 100, "seed": 42}),
+        (moead_frontier, {"n_weights": 50, "n_gen": 100, "neighborhood_size": 20, "seed": 42}),
+    ],
+    ids=["nsga2", "nsga3", "moead"],
+)
+
+
+class TestMutationAnnealing:
+    """Correctness invariants must hold for every (p_mut_start, p_mut_end)
+    setting. Defaults (-1, -1) must reproduce the fixed-rate formula exactly;
+    annealed settings are checked for validity, not bit-for-bit equality
+    (the schedule changes which genes mutate each generation)."""
+
+    _SCHEDULES = [
+        (-1.0, -1.0),   # default: fixed formula rate, no annealing
+        (0.5, 0.05),    # high → low (exploration → exploitation)
+        (0.05, 0.5),    # low → high
+        (0.2, 0.2),     # explicit fixed rate, no annealing
+    ]
+
+    @_ANNEAL_BOTH
+    @pytest.mark.parametrize("schedule", _SCHEDULES)
+    def test_valid_and_non_dominated_on_known_instance(self, frontier_fn, kwargs,
+                                                        schedule, known_pareto_inst):
+        p_mut_start, p_mut_end = schedule
+        inst = known_pareto_inst
+        sols = frontier_fn(inst, p_mut_start=p_mut_start, p_mut_end=p_mut_end, **kwargs)
+        assert len(sols) > 0
+        assert is_non_dominated_set(sols)
+        for s in sols:
+            assert set(s.assignment.keys()) == {j.id for j in inst.jobs}
+            assert s.f2 <= inst.budget + 1e-6
+            assert capacity_violations(inst, s) == []
+            assert recompute_f1(inst, s) == pytest.approx(s.f1, abs=1e-6)
+            assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
+
+    @_ANNEAL_BOTH
+    def test_default_matches_omitted_args(self, frontier_fn, kwargs, known_pareto_inst):
+        explicit = frontier_fn(known_pareto_inst, p_mut_start=-1.0, p_mut_end=-1.0, **kwargs)
+        default = frontier_fn(known_pareto_inst, **kwargs)
+        assert unique_front_points(explicit) == unique_front_points(default)
+
+    @_ANNEAL_BOTH
+    @pytest.mark.parametrize("schedule", _SCHEDULES[1:])
+    def test_same_seed_gives_identical_front(self, frontier_fn, kwargs,
+                                             schedule, known_pareto_inst):
+        p_mut_start, p_mut_end = schedule
+        r1 = frontier_fn(known_pareto_inst, p_mut_start=p_mut_start, p_mut_end=p_mut_end, **kwargs)
+        r2 = frontier_fn(known_pareto_inst, p_mut_start=p_mut_start, p_mut_end=p_mut_end, **kwargs)
+        assert unique_front_points(r1) == unique_front_points(r2)
+
+    @_ANNEAL_BOTH
+    def test_no_solution_dominated_by_known_optimal(self, frontier_fn, kwargs,
+                                                     known_pareto_inst, known_pareto_front):
+        sols = frontier_fn(known_pareto_inst, p_mut_start=0.5, p_mut_end=0.05, **kwargs)
+        for s in sols:
+            for (kf1, kf2) in known_pareto_front:
+                dominated = kf1 <= s.f1 and kf2 <= s.f2 and (kf1 < s.f1 or kf2 < s.f2)
+                assert not dominated, (
+                    f"annealed run: solution ({s.f1},{s.f2}) "
+                    f"dominated by known point ({kf1},{kf2})"
+                )
+
+
+# ---------------------------------------------------------------------------
+# Crossover operator choice (crossover_kind)
+# ---------------------------------------------------------------------------
+
+class TestCrossoverKind:
+    """Correctness invariants must hold for both crossover operators.
+    crossover_kind=0 (default) must reproduce omitting the arg exactly."""
+
+    @_ANNEAL_BOTH
+    @pytest.mark.parametrize("kind", [0, 1])
+    def test_valid_and_non_dominated_on_known_instance(self, frontier_fn, kwargs,
+                                                        kind, known_pareto_inst):
+        inst = known_pareto_inst
+        sols = frontier_fn(inst, crossover_kind=kind, **kwargs)
+        assert len(sols) > 0
+        assert is_non_dominated_set(sols)
+        for s in sols:
+            assert set(s.assignment.keys()) == {j.id for j in inst.jobs}
+            assert s.f2 <= inst.budget + 1e-6
+            assert capacity_violations(inst, s) == []
+            assert recompute_f1(inst, s) == pytest.approx(s.f1, abs=1e-6)
+            assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
+
+    @_ANNEAL_BOTH
+    def test_default_matches_omitted_arg(self, frontier_fn, kwargs, known_pareto_inst):
+        explicit = frontier_fn(known_pareto_inst, crossover_kind=0, **kwargs)
+        default = frontier_fn(known_pareto_inst, **kwargs)
+        assert unique_front_points(explicit) == unique_front_points(default)
+
+    @_ANNEAL_BOTH
+    @pytest.mark.parametrize("kind", [0, 1])
+    def test_same_seed_gives_identical_front(self, frontier_fn, kwargs,
+                                             kind, known_pareto_inst):
+        r1 = frontier_fn(known_pareto_inst, crossover_kind=kind, **kwargs)
+        r2 = frontier_fn(known_pareto_inst, crossover_kind=kind, **kwargs)
+        assert unique_front_points(r1) == unique_front_points(r2)
+
+    @_ANNEAL_BOTH
+    def test_uniform_crossover_no_solution_dominated_by_known_optimal(
+            self, frontier_fn, kwargs, known_pareto_inst, known_pareto_front):
+        sols = frontier_fn(known_pareto_inst, crossover_kind=1, **kwargs)
+        for s in sols:
+            for (kf1, kf2) in known_pareto_front:
+                dominated = kf1 <= s.f1 and kf2 <= s.f2 and (kf1 < s.f1 or kf2 < s.f2)
+                assert not dominated, (
+                    f"uniform crossover: solution ({s.f1},{s.f2}) "
+                    f"dominated by known point ({kf1},{kf2})"
+                )
+
+
+# ---------------------------------------------------------------------------
+# Tournament size (tourn_k) — NSGA-II / NSGA-III only (MOEA/D has no tournament)
+# ---------------------------------------------------------------------------
+
+_TOURN_K_BOTH = pytest.mark.parametrize(
+    "frontier_fn,kwargs",
+    [
+        (nsga2_frontier, {"pop_size": 50, "n_gen": 100, "seed": 42}),
+        (nsga3_frontier, {"pop_size": 50, "n_divisions": 49, "n_gen": 100, "seed": 42}),
+    ],
+    ids=["nsga2", "nsga3"],
+)
+
+
+class TestTournamentK:
+    """Correctness invariants must hold for every tournament size.
+    tourn_k=2 (default) must reproduce omitting the arg exactly (it reuses
+    the original two-argument tournament call, not the k-ary generalisation)."""
+
+    _K_VALUES = [2, 3, 5, 8]
+
+    @_TOURN_K_BOTH
+    @pytest.mark.parametrize("k", _K_VALUES)
+    def test_valid_and_non_dominated_on_known_instance(self, frontier_fn, kwargs,
+                                                        k, known_pareto_inst):
+        inst = known_pareto_inst
+        sols = frontier_fn(inst, tourn_k=k, **kwargs)
+        assert len(sols) > 0
+        assert is_non_dominated_set(sols)
+        for s in sols:
+            assert set(s.assignment.keys()) == {j.id for j in inst.jobs}
+            assert s.f2 <= inst.budget + 1e-6
+            assert capacity_violations(inst, s) == []
+            assert recompute_f1(inst, s) == pytest.approx(s.f1, abs=1e-6)
+            assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
+
+    @_TOURN_K_BOTH
+    def test_default_matches_omitted_arg(self, frontier_fn, kwargs, known_pareto_inst):
+        explicit = frontier_fn(known_pareto_inst, tourn_k=2, **kwargs)
+        default = frontier_fn(known_pareto_inst, **kwargs)
+        assert unique_front_points(explicit) == unique_front_points(default)
+
+    @_TOURN_K_BOTH
+    @pytest.mark.parametrize("k", _K_VALUES)
+    def test_same_seed_gives_identical_front(self, frontier_fn, kwargs,
+                                             k, known_pareto_inst):
+        r1 = frontier_fn(known_pareto_inst, tourn_k=k, **kwargs)
+        r2 = frontier_fn(known_pareto_inst, tourn_k=k, **kwargs)
+        assert unique_front_points(r1) == unique_front_points(r2)
+
+    @_TOURN_K_BOTH
+    @pytest.mark.parametrize("k", [3, 5, 8])
+    def test_no_solution_dominated_by_known_optimal(self, frontier_fn, kwargs,
+                                                     k, known_pareto_inst, known_pareto_front):
+        sols = frontier_fn(known_pareto_inst, tourn_k=k, **kwargs)
+        for s in sols:
+            for (kf1, kf2) in known_pareto_front:
+                dominated = kf1 <= s.f1 and kf2 <= s.f2 and (kf1 < s.f1 or kf2 < s.f2)
+                assert not dominated, (
+                    f"tourn_k={k}: solution ({s.f1},{s.f2}) "
+                    f"dominated by known point ({kf1},{kf2})"
+                )
+
+
+# ---------------------------------------------------------------------------
+# MOEA/D elitist archive (archive_size) — MOEA/D only
+# ---------------------------------------------------------------------------
+
+class TestMoeadArchiveSize:
+    """Correctness invariants must hold for every archive_size setting.
+    archive_size=0 (default) must reproduce omitting the arg exactly (the
+    archive-maintenance code path is skipped entirely, not just empty)."""
+
+    _SIZES = [0, 5, 20, 50]
+
+    @pytest.mark.parametrize("archive_size", _SIZES)
+    def test_valid_and_non_dominated_on_known_instance(self, archive_size, known_pareto_inst):
+        inst = known_pareto_inst
+        sols = moead_frontier(inst, n_weights=50, n_gen=100, neighborhood_size=20,
+                              max_replace=5, archive_size=archive_size, seed=42)
+        assert len(sols) > 0
+        assert is_non_dominated_set(sols)
+        for s in sols:
+            assert set(s.assignment.keys()) == {j.id for j in inst.jobs}
+            assert s.f2 <= inst.budget + 1e-6
+            assert capacity_violations(inst, s) == []
+            assert recompute_f1(inst, s) == pytest.approx(s.f1, abs=1e-6)
+            assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
+
+    def test_default_matches_explicit_archive_size_20(self, known_pareto_inst):
+        """moead_frontier's default (20) must be bit-for-bit identical to
+        passing archive_size=20 explicitly — chosen via A/B benchmark as the
+        new default; 0 (disabled) remains available explicitly."""
+        explicit = moead_frontier(known_pareto_inst, n_weights=50, n_gen=100,
+                                  neighborhood_size=20, max_replace=5,
+                                  archive_size=20, seed=42)
+        default = moead_frontier(known_pareto_inst, n_weights=50, n_gen=100,
+                                 neighborhood_size=20, max_replace=5, seed=42)
+        assert unique_front_points(explicit) == unique_front_points(default)
+
+    def test_disabled_still_reachable_via_archive_size_zero(self, known_pareto_inst):
+        """archive_size=0 must still disable the archive path entirely."""
+        sols = moead_frontier(known_pareto_inst, n_weights=50, n_gen=100,
+                              neighborhood_size=20, max_replace=5,
+                              archive_size=0, seed=42)
+        assert len(sols) > 0
+        assert is_non_dominated_set(sols)
+
+    @pytest.mark.parametrize("archive_size", [5, 20, 50])
+    def test_same_seed_gives_identical_front(self, archive_size, known_pareto_inst):
+        r1 = moead_frontier(known_pareto_inst, n_weights=50, n_gen=100, neighborhood_size=20,
+                            max_replace=5, archive_size=archive_size, seed=42)
+        r2 = moead_frontier(known_pareto_inst, n_weights=50, n_gen=100, neighborhood_size=20,
+                            max_replace=5, archive_size=archive_size, seed=42)
+        assert unique_front_points(r1) == unique_front_points(r2)
+
+    @pytest.mark.parametrize("archive_size", [5, 20, 50])
+    def test_no_solution_dominated_by_known_optimal(self, archive_size, known_pareto_inst,
+                                                     known_pareto_front):
+        sols = moead_frontier(known_pareto_inst, n_weights=50, n_gen=100, neighborhood_size=20,
+                              max_replace=5, archive_size=archive_size, seed=42)
+        for s in sols:
+            for (kf1, kf2) in known_pareto_front:
+                dominated = kf1 <= s.f1 and kf2 <= s.f2 and (kf1 < s.f1 or kf2 < s.f2)
+                assert not dominated, (
+                    f"archive_size={archive_size}: solution ({s.f1},{s.f2}) "
+                    f"dominated by known point ({kf1},{kf2})"
+                )
+
+    def test_valid_on_small_json(self):
+        inst = Instance.from_file("data/small.json")
+        sols = moead_frontier(inst, n_weights=100, n_gen=200, neighborhood_size=20,
+                              max_replace=5, archive_size=30, seed=42)
         assert len(sols) > 0
         assert is_non_dominated_set(sols)
         for s in sols:

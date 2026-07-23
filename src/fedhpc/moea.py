@@ -191,18 +191,31 @@ def nsga2_frontier(
     n_gen: int = 200,
     seed: int = 42,
     n_threads: int = 0,
+    p_mut_start: float = -1.0,
+    p_mut_end: float = -1.0,
+    crossover_kind: int = 0,
+    tourn_k: int = 2,
     profile: bool = False,
 ) -> list[Solution]:
     """Approximate the Pareto frontier via NSGA-II.
 
     Parameters
     ----------
-    inst       : built fedhpc Instance.
-    pop_size   : population size (individuals per generation).
-    n_gen      : number of generations.
-    seed       : RNG seed for reproducibility.
-    n_threads  : OpenMP thread count; 0 = use all available cores.
-    profile    : if True, print a per-phase timing breakdown to stderr.
+    inst           : built fedhpc Instance.
+    pop_size       : population size (individuals per generation).
+    n_gen          : number of generations.
+    seed           : RNG seed for reproducibility.
+    n_threads      : OpenMP thread count; 0 = use all available cores.
+    p_mut_start    : mutation-rate schedule start. ``<0`` (default) resolves to
+                     the fixed formula rate ``2/n_jobs``.
+    p_mut_end      : mutation-rate schedule end. ``<0`` (default) holds the
+                     resolved start rate constant (no annealing). When both are
+                     given, the rate is linearly annealed start→end across
+                     generations.
+    crossover_kind : 0 = two-point (default), 1 = uniform (per-gene coin flip).
+    tourn_k        : mating-tournament size. 2 (default) = original binary
+                     tournament; larger values increase selection pressure.
+    profile        : if True, print a per-phase timing breakdown to stderr.
 
     Returns
     -------
@@ -211,15 +224,19 @@ def nsga2_frontier(
     """
     _require_ext()
     raw, prof = _ext.nsga2(
-        n_jobs    = len(inst.jobs),
-        budget    = inst.budget,
-        job_slots = _job_slots(inst),
-        type_cap  = _type_cap(inst),
-        init_occ  = _init_occ(inst),
-        pop_size  = pop_size,
-        n_gen     = n_gen,
-        seed      = seed,
-        n_threads = n_threads,
+        n_jobs         = len(inst.jobs),
+        budget         = inst.budget,
+        job_slots      = _job_slots(inst),
+        type_cap       = _type_cap(inst),
+        init_occ       = _init_occ(inst),
+        pop_size       = pop_size,
+        n_gen          = n_gen,
+        seed           = seed,
+        n_threads      = n_threads,
+        p_mut_start    = p_mut_start,
+        p_mut_end      = p_mut_end,
+        crossover_kind = crossover_kind,
+        tourn_k        = tourn_k,
     )
     if profile:
         _print_profile(prof, algorithm="nsga2",
@@ -235,6 +252,10 @@ def nsga3_frontier(
     n_gen: int = 200,
     seed: int = 42,
     n_threads: int = 0,
+    p_mut_start: float = -1.0,
+    p_mut_end: float = -1.0,
+    crossover_kind: int = 0,
+    tourn_k: int = 2,
     profile: bool = False,
 ) -> list[Solution]:
     """Approximate the Pareto frontier via NSGA-III (Deb & Jain 2014).
@@ -256,6 +277,15 @@ def nsga3_frontier(
     n_gen       : number of generations.
     seed        : RNG seed for reproducibility.
     n_threads   : OpenMP thread count; 0 = use all available cores.
+    p_mut_start : mutation-rate schedule start. ``<0`` (default) resolves to
+                  the fixed formula rate ``2/n_jobs``.
+    p_mut_end   : mutation-rate schedule end. ``<0`` (default) holds the
+                  resolved start rate constant (no annealing). When both are
+                  given, the rate is linearly annealed start→end across
+                  generations.
+    crossover_kind : 0 = two-point (default), 1 = uniform (per-gene coin flip).
+    tourn_k     : mating-tournament size. 2 (default) = original binary
+                  tournament; larger values increase selection pressure.
     profile     : if True, print a per-phase timing breakdown to stderr.
 
     Returns
@@ -265,16 +295,20 @@ def nsga3_frontier(
     """
     _require_ext()
     raw, prof = _ext.nsga3(
-        n_jobs      = len(inst.jobs),
-        budget      = inst.budget,
-        job_slots   = _job_slots(inst),
-        type_cap    = _type_cap(inst),
-        init_occ    = _init_occ(inst),
-        pop_size    = pop_size,
-        n_divisions = n_divisions,
-        n_gen       = n_gen,
-        seed        = seed,
-        n_threads   = n_threads,
+        n_jobs         = len(inst.jobs),
+        budget         = inst.budget,
+        job_slots      = _job_slots(inst),
+        type_cap       = _type_cap(inst),
+        init_occ       = _init_occ(inst),
+        pop_size       = pop_size,
+        n_divisions    = n_divisions,
+        n_gen          = n_gen,
+        seed           = seed,
+        n_threads      = n_threads,
+        p_mut_start    = p_mut_start,
+        p_mut_end      = p_mut_end,
+        crossover_kind = crossover_kind,
+        tourn_k        = tourn_k,
     )
     if profile:
         _print_profile(prof, algorithm="nsga3",
@@ -291,6 +325,10 @@ def moead_frontier(
     seed: int = 42,
     n_threads: int = 0,
     max_replace: int = 5,
+    p_mut_start: float = -1.0,
+    p_mut_end: float = -1.0,
+    crossover_kind: int = 0,
+    archive_size: int = 20,
     profile: bool = False,
 ) -> list[Solution]:
     """Approximate the Pareto frontier via MOEA/D (Tchebycheff decomposition).
@@ -309,6 +347,20 @@ def moead_frontier(
                         replacement (ΔHV positive across small/medium/large
                         instances; see ablation.py). ``<=0`` disables the cap
                         and reproduces the original unbounded replacement.
+    p_mut_start       : mutation-rate schedule start. ``<0`` (default) resolves
+                        to the fixed formula rate ``1/n_jobs``.
+    p_mut_end         : mutation-rate schedule end. ``<0`` (default) holds the
+                        resolved start rate constant (no annealing). When both
+                        are given, the rate is linearly annealed start→end
+                        across generations.
+    crossover_kind    : 0 = two-point (default), 1 = uniform (per-gene coin flip).
+    archive_size      : bounded external elitist archive capacity, merged into
+                        the returned front at extraction. Recovers points that
+                        bounded neighbourhood replacement (max_replace) can
+                        overwrite and lose. Default 20, chosen via A/B
+                        benchmark (consistent small ΔHV gain and higher
+                        cardinality across small/medium/large; plateaus at 20,
+                        see ablation.py). ``<=0`` disables it.
     profile           : if True, print a per-phase timing breakdown to stderr.
 
     Returns
@@ -329,6 +381,10 @@ def moead_frontier(
         seed              = seed,
         n_threads         = n_threads,
         max_replace       = max_replace,
+        p_mut_start       = p_mut_start,
+        p_mut_end         = p_mut_end,
+        crossover_kind    = crossover_kind,
+        archive_size      = archive_size,
     )
     if profile:
         _print_profile(prof, algorithm="moead",

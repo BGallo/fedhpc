@@ -139,6 +139,7 @@ def run(
     n_gen:             int       = 300,
     neighborhood_size: int       = 20,
     moead_max_replace: int       = 5,
+    moead_archive_size: int      = 20,
     seeds:             list[int] | None = None,
     n_threads:         int       = 0,
     verbose:           bool      = False,
@@ -156,6 +157,9 @@ def run(
     moead_max_replace : MOEA/D bounded-replacement cap (nr); default 5
                         (A/B-benchmarked improvement). <=0 = original
                         unbounded behaviour. See moea.moead_frontier.
+    moead_archive_size : MOEA/D elitist archive capacity; default 20
+                        (A/B-benchmarked improvement). <=0 = disabled.
+                        See moea.moead_frontier.
     seeds             : RNG seeds; default [42, 43, 44, 45, 46].
     n_threads         : OpenMP threads; 0 = all cores.
     verbose           : print per-run progress to stderr.
@@ -198,7 +202,8 @@ def run(
             else:  # moead
                 raw, prof = _ext.moead(
                     n_weights=pop_size, neighborhood_size=neighborhood_size,
-                    max_replace=moead_max_replace, seed=seed, **common)
+                    max_replace=moead_max_replace, archive_size=moead_archive_size,
+                    seed=seed, **common)
 
             sols = _to_solutions(inst, raw)
             results.append(RunResult(algo=algo, seed=seed,
@@ -240,6 +245,7 @@ def report(
     n_gen:         int       = 300,
     neighborhood_size: int   = 20,
     moead_max_replace: int   = 5,
+    moead_archive_size: int  = 20,
     out_dir:       Path | None = None,
     as_json:       bool      = False,
 ) -> None:
@@ -310,7 +316,7 @@ def report(
     print(f"ABLATION STUDY{inst_tag}")
     print(f"  pop={pop_size}  gen={n_gen}  "
           f"nsga3_divs={n_divisions}  moead_T={neighborhood_size}  "
-          f"moead_nr={moead_max_replace}  "
+          f"moead_nr={moead_max_replace}  moead_archive={moead_archive_size}  "
           f"seeds={seed_tag}")
     print(sep)
 
@@ -439,6 +445,12 @@ def build_parser() -> argparse.ArgumentParser:
                        "(A/B-benchmarked improvement); <=0 = original "
                        "unbounded behaviour."
                    ))
+    p.add_argument("--moead-archive-size", type=int, default=20, metavar="N",
+                   help=(
+                       "MOEA/D elitist archive capacity, merged into the "
+                       "returned front. Default 20 (A/B-benchmarked "
+                       "improvement); <=0 = disabled."
+                   ))
     p.add_argument("--seeds", type=int, nargs="+", default=None, metavar="S",
                    help=(
                        "RNG seeds (space-separated). "
@@ -483,6 +495,7 @@ def main(argv: list[str] | None = None) -> None:
             n_gen             = args.n_gen,
             neighborhood_size = args.neighborhood_size,
             moead_max_replace = args.moead_max_replace,
+            moead_archive_size = args.moead_archive_size,
             seeds             = seeds,
             n_threads         = args.n_threads,
             verbose           = args.verbose,
@@ -499,6 +512,7 @@ def main(argv: list[str] | None = None) -> None:
         n_gen             = args.n_gen,
         neighborhood_size = args.neighborhood_size,
         moead_max_replace = args.moead_max_replace,
+        moead_archive_size = args.moead_archive_size,
         out_dir           = Path(args.output_dir) if args.output_dir else None,
         as_json           = args.json,
     )

@@ -40,10 +40,12 @@ PYBIND11_MODULE(_moea, m) {
            const std::vector<std::vector<std::tuple<int,int,int,double,double>>>& job_slots,
            const std::vector<int>& type_cap,
            const std::vector<std::tuple<int,int,int>>& init_occ,
-           int pop_size, int n_gen, int seed, int n_threads) {
+           int pop_size, int n_gen, int seed, int n_threads,
+           double p_mut_start, double p_mut_end, int crossover_kind, int tourn_k) {
             auto [results, prof] = run_nsga2(
                 build_problem(n_jobs, budget, job_slots, type_cap, init_occ),
-                pop_size, n_gen, seed, n_threads);
+                pop_size, n_gen, seed, n_threads, p_mut_start, p_mut_end, crossover_kind,
+                tourn_k);
             return py::make_tuple(results, profile_to_dict(prof));
         },
         py::arg("n_jobs"),
@@ -51,11 +53,19 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("job_slots"),
         py::arg("type_cap"),
         py::arg("init_occ"),
-        py::arg("pop_size")   = 100,
-        py::arg("n_gen")      = 200,
-        py::arg("seed")       = 42,
-        py::arg("n_threads")  = 0,
+        py::arg("pop_size")       = 100,
+        py::arg("n_gen")          = 200,
+        py::arg("seed")           = 42,
+        py::arg("n_threads")      = 0,
+        py::arg("p_mut_start")    = -1.0,
+        py::arg("p_mut_end")      = -1.0,
+        py::arg("crossover_kind") = 0,
+        py::arg("tourn_k")        = 2,
         "NSGA-II Pareto frontier approximation (parallel).\n\n"
+        "p_mut_start/p_mut_end linearly anneal the mutation rate across\n"
+        "generations; <0 (default) resolves to the fixed formula rate 2/n_jobs.\n"
+        "crossover_kind: 0 = two-point (default), 1 = uniform.\n"
+        "tourn_k: mating-tournament size; 2 (default) = original binary tournament.\n"
         "Returns (solutions, profile_dict) where profile_dict maps phase names\n"
         "to wall-clock milliseconds.  n_threads=0 lets OpenMP choose."
     );
@@ -65,10 +75,12 @@ PYBIND11_MODULE(_moea, m) {
            const std::vector<std::vector<std::tuple<int,int,int,double,double>>>& job_slots,
            const std::vector<int>& type_cap,
            const std::vector<std::tuple<int,int,int>>& init_occ,
-           int pop_size, int n_divisions, int n_gen, int seed, int n_threads) {
+           int pop_size, int n_divisions, int n_gen, int seed, int n_threads,
+           double p_mut_start, double p_mut_end, int crossover_kind, int tourn_k) {
             auto [results, prof] = run_nsga3(
                 build_problem(n_jobs, budget, job_slots, type_cap, init_occ),
-                pop_size, n_divisions, n_gen, seed, n_threads);
+                pop_size, n_divisions, n_gen, seed, n_threads, p_mut_start, p_mut_end,
+                crossover_kind, tourn_k);
             return py::make_tuple(results, profile_to_dict(prof));
         },
         py::arg("n_jobs"),
@@ -76,13 +88,21 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("job_slots"),
         py::arg("type_cap"),
         py::arg("init_occ"),
-        py::arg("pop_size")    = 100,
-        py::arg("n_divisions") = 99,
-        py::arg("n_gen")       = 200,
-        py::arg("seed")        = 42,
-        py::arg("n_threads")   = 0,
+        py::arg("pop_size")       = 100,
+        py::arg("n_divisions")    = 99,
+        py::arg("n_gen")          = 200,
+        py::arg("seed")           = 42,
+        py::arg("n_threads")      = 0,
+        py::arg("p_mut_start")    = -1.0,
+        py::arg("p_mut_end")      = -1.0,
+        py::arg("crossover_kind") = 0,
+        py::arg("tourn_k")        = 2,
         "NSGA-III Pareto frontier approximation (parallel, reference-point selection).\n\n"
         "pop_size should equal n_divisions + 1 for best reference-point coverage.\n"
+        "p_mut_start/p_mut_end linearly anneal the mutation rate across\n"
+        "generations; <0 (default) resolves to the fixed formula rate 2/n_jobs.\n"
+        "crossover_kind: 0 = two-point (default), 1 = uniform.\n"
+        "tourn_k: mating-tournament size; 2 (default) = original binary tournament.\n"
         "Returns (solutions, profile_dict) where profile_dict maps phase names\n"
         "to wall-clock milliseconds.  n_threads=0 lets OpenMP choose."
     );
@@ -93,10 +113,12 @@ PYBIND11_MODULE(_moea, m) {
            const std::vector<int>& type_cap,
            const std::vector<std::tuple<int,int,int>>& init_occ,
            int n_weights, int n_gen, int neighborhood_size,
-           int seed, int n_threads, int max_replace) {
+           int seed, int n_threads, int max_replace,
+           double p_mut_start, double p_mut_end, int crossover_kind, int archive_size) {
             auto [results, prof] = run_moead(
                 build_problem(n_jobs, budget, job_slots, type_cap, init_occ),
-                n_weights, n_gen, neighborhood_size, seed, n_threads, max_replace);
+                n_weights, n_gen, neighborhood_size, seed, n_threads, max_replace,
+                p_mut_start, p_mut_end, crossover_kind, archive_size);
             return py::make_tuple(results, profile_to_dict(prof));
         },
         py::arg("n_jobs"),
@@ -110,9 +132,18 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("seed")              = 42,
         py::arg("n_threads")         = 0,
         py::arg("max_replace")       = -1,
+        py::arg("p_mut_start")       = -1.0,
+        py::arg("p_mut_end")         = -1.0,
+        py::arg("crossover_kind")    = 0,
+        py::arg("archive_size")      = 0,
         "MOEA/D Pareto frontier approximation (parallel, Tchebycheff decomposition).\n\n"
         "max_replace caps how many neighbours a single child may overwrite per\n"
         "generation (Zhang & Li's nr); <=0 disables the cap (original behaviour).\n"
+        "p_mut_start/p_mut_end linearly anneal the mutation rate across\n"
+        "generations; <0 (default) resolves to the fixed formula rate 1/n_jobs.\n"
+        "crossover_kind: 0 = two-point (default), 1 = uniform.\n"
+        "archive_size: bounded elitist archive merged in at extraction;\n"
+        "0 (default) disables it (original extraction path, unchanged).\n"
         "Returns (solutions, profile_dict) where profile_dict maps phase names\n"
         "to wall-clock milliseconds.  n_threads=0 lets OpenMP choose."
     );
