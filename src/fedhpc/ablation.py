@@ -138,6 +138,7 @@ def run(
     n_divisions:       int       = 199,
     n_gen:             int       = 300,
     neighborhood_size: int       = 20,
+    moead_max_replace: int       = 5,
     seeds:             list[int] | None = None,
     n_threads:         int       = 0,
     verbose:           bool      = False,
@@ -152,6 +153,9 @@ def run(
     n_divisions       : NSGA-III reference-point divisions; default pop_size − 1.
     n_gen             : generations per run.
     neighborhood_size : MOEA/D neighbourhood size |T|.
+    moead_max_replace : MOEA/D bounded-replacement cap (nr); default 5
+                        (A/B-benchmarked improvement). <=0 = original
+                        unbounded behaviour. See moea.moead_frontier.
     seeds             : RNG seeds; default [42, 43, 44, 45, 46].
     n_threads         : OpenMP threads; 0 = all cores.
     verbose           : print per-run progress to stderr.
@@ -194,7 +198,7 @@ def run(
             else:  # moead
                 raw, prof = _ext.moead(
                     n_weights=pop_size, neighborhood_size=neighborhood_size,
-                    seed=seed, **common)
+                    max_replace=moead_max_replace, seed=seed, **common)
 
             sols = _to_solutions(inst, raw)
             results.append(RunResult(algo=algo, seed=seed,
@@ -235,6 +239,7 @@ def report(
     n_divisions:   int       = 199,
     n_gen:         int       = 300,
     neighborhood_size: int   = 20,
+    moead_max_replace: int   = 5,
     out_dir:       Path | None = None,
     as_json:       bool      = False,
 ) -> None:
@@ -305,6 +310,7 @@ def report(
     print(f"ABLATION STUDY{inst_tag}")
     print(f"  pop={pop_size}  gen={n_gen}  "
           f"nsga3_divs={n_divisions}  moead_T={neighborhood_size}  "
+          f"moead_nr={moead_max_replace}  "
           f"seeds={seed_tag}")
     print(sep)
 
@@ -426,6 +432,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Generations per run (default: 300).")
     p.add_argument("--neighborhood-size", type=int, default=20, metavar="T",
                    help="MOEA/D neighbourhood size |T| (default: 20).")
+    p.add_argument("--moead-max-replace", type=int, default=5, metavar="NR",
+                   help=(
+                       "MOEA/D bounded-replacement cap (nr): max neighbours a "
+                       "child may overwrite per generation. Default 5 "
+                       "(A/B-benchmarked improvement); <=0 = original "
+                       "unbounded behaviour."
+                   ))
     p.add_argument("--seeds", type=int, nargs="+", default=None, metavar="S",
                    help=(
                        "RNG seeds (space-separated). "
@@ -469,6 +482,7 @@ def main(argv: list[str] | None = None) -> None:
             n_divisions       = n_div,
             n_gen             = args.n_gen,
             neighborhood_size = args.neighborhood_size,
+            moead_max_replace = args.moead_max_replace,
             seeds             = seeds,
             n_threads         = args.n_threads,
             verbose           = args.verbose,
@@ -484,6 +498,7 @@ def main(argv: list[str] | None = None) -> None:
         n_divisions       = n_div,
         n_gen             = args.n_gen,
         neighborhood_size = args.neighborhood_size,
+        moead_max_replace = args.moead_max_replace,
         out_dir           = Path(args.output_dir) if args.output_dir else None,
         as_json           = args.json,
     )

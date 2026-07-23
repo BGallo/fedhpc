@@ -11,6 +11,14 @@
  *   weight vectors spread evenly across the tradeoff regardless of the
  *   absolute scale difference between f1 (slots) and f2 (dollars).
  *
+ * Bounded replacement (nr, Zhang & Li 2007):
+ *   A single child may overwrite at most max_replace neighbours per
+ *   generation instead of the whole neighbourhood.  This limits how fast
+ *   one good solution can take over a region of weight space, which is the
+ *   standard fix for MOEA/D's premature-convergence / diversity-loss failure
+ *   mode.  max_replace <= 0 (default) disables the cap and reproduces the
+ *   original unbounded-replacement behaviour exactly, including RNG draws.
+ *
  * Profiling:
  *   Returns a Profile (vector of (name, ms) pairs) alongside the solutions.
  *   Phases timed per generation (summed + per-gen average reported):
@@ -25,7 +33,7 @@
 
 inline std::pair<ResultList, Profile>
 run_moead(const Problem& prob, int n_weights, int n_gen,
-          int T_size, int seed, int n_threads) {
+          int T_size, int seed, int n_threads, int max_replace = -1) {
     py::gil_scoped_release release;
     set_num_threads(n_threads);
 
@@ -196,12 +204,33 @@ run_moead(const Problem& prob, int n_weights, int n_gen,
         offspring_ms += ms_since(t_off);
 
         // ── Phase 2: sequential neighbourhood replacement ─────────────────────
+        // max_replace <= 0 or >= T: unbounded, identical to the original loop
+        // (same order, no RNG draws).  Otherwise each child may only take over
+        // up to max_replace neighbours, chosen in a shuffled order, capping
+        // how fast it can dominate a region of weight space.
 
         const auto t_rep = Clock::now();
-        for (int i = 0; i < n_weights; i++)
-            for (int j : neigh[i])
-                if (scalar(children[i], j) <= scalar(pop[j], j))
+        const bool capped = max_replace > 0 && max_replace < T;
+        std::vector<int> order;
+        if (capped) order.resize(T);
+        for (int i = 0; i < n_weights; i++) {
+            if (!capped) {
+                for (int j : neigh[i])
+                    if (scalar(children[i], j) <= scalar(pop[j], j))
+                        pop[j] = children[i];
+                continue;
+            }
+            std::copy(neigh[i].begin(), neigh[i].end(), order.begin());
+            std::shuffle(order.begin(), order.end(), rng);
+            int replaced = 0;
+            for (int j : order) {
+                if (replaced >= max_replace) break;
+                if (scalar(children[i], j) <= scalar(pop[j], j)) {
                     pop[j] = children[i];
+                    replaced++;
+                }
+            }
+        }
         replacement_ms += ms_since(t_rep);
     }
 

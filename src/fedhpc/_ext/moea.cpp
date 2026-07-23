@@ -93,10 +93,10 @@ PYBIND11_MODULE(_moea, m) {
            const std::vector<int>& type_cap,
            const std::vector<std::tuple<int,int,int>>& init_occ,
            int n_weights, int n_gen, int neighborhood_size,
-           int seed, int n_threads) {
+           int seed, int n_threads, int max_replace) {
             auto [results, prof] = run_moead(
                 build_problem(n_jobs, budget, job_slots, type_cap, init_occ),
-                n_weights, n_gen, neighborhood_size, seed, n_threads);
+                n_weights, n_gen, neighborhood_size, seed, n_threads, max_replace);
             return py::make_tuple(results, profile_to_dict(prof));
         },
         py::arg("n_jobs"),
@@ -109,7 +109,10 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("neighborhood_size") = 20,
         py::arg("seed")              = 42,
         py::arg("n_threads")         = 0,
+        py::arg("max_replace")       = -1,
         "MOEA/D Pareto frontier approximation (parallel, Tchebycheff decomposition).\n\n"
+        "max_replace caps how many neighbours a single child may overwrite per\n"
+        "generation (Zhang & Li's nr); <=0 disables the cap (original behaviour).\n"
         "Returns (solutions, profile_dict) where profile_dict maps phase names\n"
         "to wall-clock milliseconds.  n_threads=0 lets OpenMP choose."
     );

@@ -290,6 +290,7 @@ def moead_frontier(
     neighborhood_size: int = 20,
     seed: int = 42,
     n_threads: int = 0,
+    max_replace: int = 5,
     profile: bool = False,
 ) -> list[Solution]:
     """Approximate the Pareto frontier via MOEA/D (Tchebycheff decomposition).
@@ -302,6 +303,12 @@ def moead_frontier(
     neighborhood_size : |T| nearest weight vectors used for mating/replacement.
     seed              : RNG seed for reproducibility.
     n_threads         : OpenMP thread count; 0 = use all available cores.
+    max_replace       : cap on how many neighbours a single child may overwrite
+                        per generation (Zhang & Li's ``nr``). Default 5, chosen
+                        via A/B benchmark against the original unbounded
+                        replacement (ΔHV positive across small/medium/large
+                        instances; see ablation.py). ``<=0`` disables the cap
+                        and reproduces the original unbounded replacement.
     profile           : if True, print a per-phase timing breakdown to stderr.
 
     Returns
@@ -321,6 +328,7 @@ def moead_frontier(
         neighborhood_size = neighborhood_size,
         seed              = seed,
         n_threads         = n_threads,
+        max_replace       = max_replace,
     )
     if profile:
         _print_profile(prof, algorithm="moead",

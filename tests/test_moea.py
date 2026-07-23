@@ -565,3 +565,86 @@ class TestMipComparison:
         inst = Instance.from_file("data/small.json")
         sols = moead_frontier(inst, n_weights=100, n_gen=200, seed=42)
         assert is_non_dominated_set(sols)
+
+
+# ---------------------------------------------------------------------------
+# MOEA/D bounded replacement (max_replace / nr)
+# ---------------------------------------------------------------------------
+
+class TestMoeadMaxReplace:
+    """Correctness invariants must hold for every max_replace setting.
+
+    max_replace=-1 must reproduce the original unbounded-replacement output
+    exactly (same seed → same RNG draws, since capping is skipped entirely).
+    Bounded settings (< neighborhood_size) introduce an extra shuffle draw
+    per parent, so they are checked for validity, not bit-for-bit equality.
+    """
+
+    _MAX_REPLACE_VALUES = [-1, 1, 5, 10, 20]  # 20 == neighborhood_size (no-op cap)
+
+    @pytest.mark.parametrize("max_replace", _MAX_REPLACE_VALUES)
+    def test_valid_and_non_dominated_on_known_instance(self, max_replace,
+                                                        known_pareto_inst):
+        inst = known_pareto_inst
+        sols = moead_frontier(inst, n_weights=50, n_gen=100,
+                              neighborhood_size=20, max_replace=max_replace, seed=42)
+        assert len(sols) > 0
+        assert is_non_dominated_set(sols)
+        for s in sols:
+            assert set(s.assignment.keys()) == {j.id for j in inst.jobs}
+            assert s.f2 <= inst.budget + 1e-6
+            assert capacity_violations(inst, s) == []
+            assert recompute_f1(inst, s) == pytest.approx(s.f1, abs=1e-6)
+            assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
+
+    @pytest.mark.parametrize("max_replace", _MAX_REPLACE_VALUES)
+    def test_no_solution_dominated_by_known_optimal(self, max_replace,
+                                                     known_pareto_inst,
+                                                     known_pareto_front):
+        sols = moead_frontier(known_pareto_inst, n_weights=50, n_gen=100,
+                              neighborhood_size=20, max_replace=max_replace, seed=42)
+        for s in sols:
+            for (kf1, kf2) in known_pareto_front:
+                dominated = kf1 <= s.f1 and kf2 <= s.f2 and (kf1 < s.f1 or kf2 < s.f2)
+                assert not dominated, (
+                    f"max_replace={max_replace}: solution ({s.f1},{s.f2}) "
+                    f"dominated by known point ({kf1},{kf2})"
+                )
+
+    def test_default_matches_explicit_max_replace_5(self, known_pareto_inst):
+        """moead_frontier's default (5) must be bit-for-bit identical to
+        passing max_replace=5 explicitly — chosen via A/B benchmark as the
+        new default; -1 (original unbounded replacement) remains available
+        explicitly."""
+        explicit = moead_frontier(known_pareto_inst, n_weights=50, n_gen=100,
+                                  neighborhood_size=20, max_replace=5, seed=42)
+        default = moead_frontier(known_pareto_inst, n_weights=50, n_gen=100,
+                                 neighborhood_size=20, seed=42)
+        assert unique_front_points(explicit) == unique_front_points(default)
+
+    def test_unbounded_still_reachable_via_max_replace_negative_one(
+            self, known_pareto_inst):
+        """max_replace=-1 must still reproduce the original unbounded
+        replacement loop (no shuffle draws), independent of the new default."""
+        sols = moead_frontier(known_pareto_inst, n_weights=50, n_gen=100,
+                              neighborhood_size=20, max_replace=-1, seed=42)
+        assert len(sols) > 0
+        assert is_non_dominated_set(sols)
+
+    @pytest.mark.parametrize("max_replace", [1, 5, 10])
+    def test_same_seed_gives_identical_front(self, max_replace, known_pareto_inst):
+        r1 = moead_frontier(known_pareto_inst, n_weights=50, n_gen=100,
+                            neighborhood_size=20, max_replace=max_replace, seed=42)
+        r2 = moead_frontier(known_pareto_inst, n_weights=50, n_gen=100,
+                            neighborhood_size=20, max_replace=max_replace, seed=42)
+        assert unique_front_points(r1) == unique_front_points(r2)
+
+    def test_valid_on_small_json(self):
+        inst = Instance.from_file("data/small.json")
+        sols = moead_frontier(inst, n_weights=100, n_gen=200,
+                              neighborhood_size=20, max_replace=5, seed=42)
+        assert len(sols) > 0
+        assert is_non_dominated_set(sols)
+        for s in sols:
+            assert s.f2 <= inst.budget + 1e-6
+            assert capacity_violations(inst, s) == []
