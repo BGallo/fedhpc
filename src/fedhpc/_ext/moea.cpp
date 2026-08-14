@@ -39,11 +39,12 @@ PYBIND11_MODULE(_moea, m) {
         [](int n_jobs, double budget,
            const std::vector<std::vector<std::tuple<int,int,int,double,double>>>& job_slots,
            const std::vector<int>& type_cap,
+           const std::vector<double>& type_risk,
            const std::vector<std::tuple<int,int,int>>& init_occ,
            int pop_size, int n_gen, int seed, int n_threads,
            double p_mut_start, double p_mut_end, int crossover_kind, int tourn_k) {
             auto [results, prof] = run_nsga2(
-                build_problem(n_jobs, budget, job_slots, type_cap, init_occ),
+                build_problem(n_jobs, budget, job_slots, type_cap, type_risk, init_occ),
                 pop_size, n_gen, seed, n_threads, p_mut_start, p_mut_end, crossover_kind,
                 tourn_k);
             return py::make_tuple(results, profile_to_dict(prof));
@@ -52,6 +53,7 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("budget"),
         py::arg("job_slots"),
         py::arg("type_cap"),
+        py::arg("type_risk"),
         py::arg("init_occ"),
         py::arg("pop_size")       = 100,
         py::arg("n_gen")          = 200,
@@ -74,11 +76,12 @@ PYBIND11_MODULE(_moea, m) {
         [](int n_jobs, double budget,
            const std::vector<std::vector<std::tuple<int,int,int,double,double>>>& job_slots,
            const std::vector<int>& type_cap,
+           const std::vector<double>& type_risk,
            const std::vector<std::tuple<int,int,int>>& init_occ,
            int pop_size, int n_divisions, int n_gen, int seed, int n_threads,
            double p_mut_start, double p_mut_end, int crossover_kind, int tourn_k) {
             auto [results, prof] = run_nsga3(
-                build_problem(n_jobs, budget, job_slots, type_cap, init_occ),
+                build_problem(n_jobs, budget, job_slots, type_cap, type_risk, init_occ),
                 pop_size, n_divisions, n_gen, seed, n_threads, p_mut_start, p_mut_end,
                 crossover_kind, tourn_k);
             return py::make_tuple(results, profile_to_dict(prof));
@@ -87,6 +90,7 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("budget"),
         py::arg("job_slots"),
         py::arg("type_cap"),
+        py::arg("type_risk"),
         py::arg("init_occ"),
         py::arg("pop_size")       = 100,
         py::arg("n_divisions")    = 99,
@@ -111,12 +115,13 @@ PYBIND11_MODULE(_moea, m) {
         [](int n_jobs, double budget,
            const std::vector<std::vector<std::tuple<int,int,int,double,double>>>& job_slots,
            const std::vector<int>& type_cap,
+           const std::vector<double>& type_risk,
            const std::vector<std::tuple<int,int,int>>& init_occ,
            int n_weights, int n_gen, int neighborhood_size,
            int seed, int n_threads, int max_replace,
            double p_mut_start, double p_mut_end, int crossover_kind, int archive_size) {
             auto [results, prof] = run_moead(
-                build_problem(n_jobs, budget, job_slots, type_cap, init_occ),
+                build_problem(n_jobs, budget, job_slots, type_cap, type_risk, init_occ),
                 n_weights, n_gen, neighborhood_size, seed, n_threads, max_replace,
                 p_mut_start, p_mut_end, crossover_kind, archive_size);
             return py::make_tuple(results, profile_to_dict(prof));
@@ -125,6 +130,7 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("budget"),
         py::arg("job_slots"),
         py::arg("type_cap"),
+        py::arg("type_risk"),
         py::arg("init_occ"),
         py::arg("n_weights")         = 100,
         py::arg("n_gen")             = 200,

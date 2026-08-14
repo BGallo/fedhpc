@@ -43,6 +43,11 @@ class InstanceType:
     mem: float           # C^mem_m
     stor: float          # C^stor_m
     capacity: int | None = None  # max simultaneous instances (None = unlimited)
+    revocation_risk: float = 0.0
+    # Probability in [0, 1] that a running instance of this type is reclaimed
+    # before the job finishes (e.g. cloud spot/preemptible capacity). 0 for
+    # on-demand/on-prem types. Informational only for the MIP; the MOEA/D and
+    # NSGA layers use it to bias random-genome initialization (see moea.py).
 
 
 @dataclass
@@ -143,7 +148,16 @@ class Instance:
                 # (eq. 5) Feasible start times — uses p_occ.
                 # t + p_occ ≤ horizon  ⟺  t ≤ horizon − p_occ, so the feasible
                 # set is exactly the contiguous range [a_min, horizon − p_occ].
-                a_min = math.ceil(j.arrival)
+                # a_min is floored at 0: a job cannot be scheduled to start
+                # before the current decision window even if its true arrival
+                # (used unclamped in f1_expr for turnaround urgency) is
+                # negative, i.e. it already waited before this window opened.
+                # The flow-conservation constraints (eq. 19) only account for
+                # capacity over v in [0, H]; a negative a_min would let a job
+                # "start" at t < 0 without that slot ever being deducted from
+                # any y[m,t]/occupancy, while still counting as a completion
+                # (ghost arrival) at v = t + p_occ — fabricating free capacity.
+                a_min = max(0, math.ceil(j.arrival))
                 t_max_excl = self.horizon - self.p_occ[j.id, m_id] + 1
                 self.T[j.id, m_id] = range(a_min, t_max_excl)
 

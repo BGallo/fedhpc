@@ -34,17 +34,59 @@ def _require_ext() -> None:
         )
 
 
+def _prune_dominated_cloud_types(
+    inst: Instance, j_id: int, type_risk: list[float], cap_of: dict[int, int | None],
+) -> list[int]:
+    """Light pre-pruning: drop unlimited-capacity (cloud) types strictly
+    dominated — same or worse cost, occupation time, and revocation risk —
+    by another *unlimited-capacity* type feasible for the same job.
+
+    Deliberately restricted to unlimited-capacity types. Finite-capacity
+    (on-prem) types are independent, concurrently-usable pools — e.g. two
+    on-prem groups can both be at their own cap at once, so "dominating" one
+    pool with another would silently shrink total available on-prem capacity
+    (jobs that need both pools simultaneously would become infeasible even
+    though nothing was actually redundant). Unlimited types have no such
+    coupling: capacity is never checked for them (see ga_common.hpp
+    evaluate()), so a strictly-dominated one can never be worth choosing.
+
+    Only affects the heuristic MOEA/D + NSGA search space built here — the
+    exact MIP formulations (model.py/formulations.py) always see the full
+    Instance.F, unpruned.
+    """
+    feasible = inst.F[j_id]
+    unlimited = [m for m in feasible if cap_of[m] is None]
+    dominated: set[int] = set()
+    for m in unlimited:
+        for m2 in unlimited:
+            if m2 == m:
+                continue
+            c1, c2 = inst.c[j_id, m], inst.c[j_id, m2]
+            p1, p2 = inst.p_occ[j_id, m], inst.p_occ[j_id, m2]
+            r1, r2 = type_risk[m], type_risk[m2]
+            if c2 <= c1 and p2 <= p1 and r2 <= r1 and (c2 < c1 or p2 < p1 or r2 < r1):
+                dominated.add(m)
+                break
+    return [m for m in feasible if m not in dominated]
+
+
 def _job_slots(inst: Instance) -> list[list[tuple[int, int, int, float, float]]]:
     """Flatten Instance into per-job slot tables for the C++ layer.
 
     Each slot is (type_id, start, p_occ, f1_contrib, cost).
     f1_contrib = start + p_occ - arrival is precomputed to avoid recomputing
     it on every evaluation inside the tight C++ inner loop.
+
+    Per-job feasible types are lightly pruned first (see
+    _prune_dominated_cloud_types) — this only shrinks the heuristic search
+    space, never the exact MIP's.
     """
+    type_risk = _type_risk(inst)
+    cap_of = {m.id: m.capacity for m in inst.instance_types}
     slots: list[list[tuple[int, int, int, float, float]]] = []
     for j in inst.jobs:
         job_slots: list[tuple[int, int, int, float, float]] = []
-        for m_id in inst.F[j.id]:
+        for m_id in _prune_dominated_cloud_types(inst, j.id, type_risk, cap_of):
             p_occ = inst.p_occ[j.id, m_id]
             cost  = inst.c[j.id, m_id]
             for t in inst.T[j.id, m_id]:
@@ -61,6 +103,15 @@ def _type_cap(inst: Instance) -> list[int]:
         if m.capacity is not None:
             cap[m.id] = m.capacity
     return cap
+
+
+def _type_risk(inst: Instance) -> list[float]:
+    """Revocation-risk list indexed by type_id. 0.0 = no revocation risk."""
+    max_id = max(m.id for m in inst.instance_types)
+    risk = [0.0] * (max_id + 1)
+    for m in inst.instance_types:
+        risk[m.id] = m.revocation_risk
+    return risk
 
 
 def _init_occ(inst: Instance) -> list[tuple[int, int, int]]:
@@ -228,6 +279,7 @@ def nsga2_frontier(
         budget         = inst.budget,
         job_slots      = _job_slots(inst),
         type_cap       = _type_cap(inst),
+        type_risk      = _type_risk(inst),
         init_occ       = _init_occ(inst),
         pop_size       = pop_size,
         n_gen          = n_gen,
@@ -299,6 +351,7 @@ def nsga3_frontier(
         budget         = inst.budget,
         job_slots      = _job_slots(inst),
         type_cap       = _type_cap(inst),
+        type_risk      = _type_risk(inst),
         init_occ       = _init_occ(inst),
         pop_size       = pop_size,
         n_divisions    = n_divisions,
@@ -374,6 +427,7 @@ def moead_frontier(
         budget            = inst.budget,
         job_slots         = _job_slots(inst),
         type_cap          = _type_cap(inst),
+        type_risk         = _type_risk(inst),
         init_occ          = _init_occ(inst),
         n_weights         = n_weights,
         n_gen             = n_gen,

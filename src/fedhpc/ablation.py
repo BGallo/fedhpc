@@ -173,7 +173,7 @@ def run(
 
     try:
         from . import _moea as _ext
-        from .moea import _init_occ, _job_slots, _to_solutions, _type_cap
+        from .moea import _init_occ, _job_slots, _to_solutions, _type_cap, _type_risk
     except ImportError as e:
         raise ImportError(f"fedhpc C++ extension not built: {e}") from e
 
@@ -182,6 +182,7 @@ def run(
         budget    = inst.budget,
         job_slots = _job_slots(inst),
         type_cap  = _type_cap(inst),
+        type_risk = _type_risk(inst),
         init_occ  = _init_occ(inst),
         n_gen     = n_gen,
         n_threads = n_threads,
