@@ -134,8 +134,8 @@ class RunResult(NamedTuple):
 def run(
     inst: Instance,
     *,
-    pop_size:          int       = 200,
-    n_divisions:       int       = 199,
+    pop_size:          int       = 400,
+    n_divisions:       int       = 399,
     n_gen:             int       = 300,
     neighborhood_size: int       = 20,
     moead_max_replace: int       = 5,
@@ -241,8 +241,8 @@ def report(
     results:  list[RunResult],
     *,
     instance_name: str       = "",
-    pop_size:      int       = 200,
-    n_divisions:   int       = 199,
+    pop_size:      int       = 400,
+    n_divisions:   int       = 399,
     n_gen:         int       = 300,
     neighborhood_size: int   = 20,
     moead_max_replace: int   = 5,
@@ -428,8 +428,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--instance", required=True, metavar="FILE",
                    help="Path to instance JSON file.")
-    p.add_argument("--pop-size", type=int, default=200, metavar="N",
-                   help="Population size for all algorithms (default: 200).")
+    p.add_argument("--pop-size", type=int, default=400, metavar="N",
+                   help="Population size for all algorithms (default: 400).")
     p.add_argument("--n-divisions", type=int, default=None, metavar="P",
                    help=(
                        "NSGA-III reference-point divisions (default: pop_size − 1). "

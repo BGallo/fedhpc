@@ -73,7 +73,7 @@ inline std::pair<ResultList, Profile>
 run_moead(const Problem& prob, int n_weights, int n_gen,
           int T_size, int seed, int n_threads, int max_replace = -1,
           double p_mut_start = -1.0, double p_mut_end = -1.0, int crossover_kind = 0,
-          int archive_size = 0) {
+          int archive_size = 0, int local_search_interval = -1) {
     py::gil_scoped_release release;
     set_num_threads(n_threads);
 
@@ -81,6 +81,10 @@ run_moead(const Problem& prob, int n_weights, int n_gen,
 
     std::mt19937 rng(seed);
     const auto mut_sched = make_mutation_schedule(p_mut_start, p_mut_end, 1.0 / prob.n_jobs);
+
+    // See nsga2.hpp for the interval convention (<0 auto, 0 disabled, >0 explicit).
+    const int ls_interval = (local_search_interval < 0)
+        ? std::max(1, n_gen / 10) : local_search_interval;
 
     // ── Weight vectors: uniformly spaced on the 2-objective simplex ──────────
     // W_EPS floor prevents degenerate single-objective subproblems at extremes.
@@ -115,6 +119,18 @@ run_moead(const Problem& prob, int n_weights, int n_gen,
 
     auto h_seeds   = make_heuristic_seeds(prob);
     const int n_hs = static_cast<int>(h_seeds.size());
+
+    // See nsga2.hpp for why the seeds need repairing before entering the
+    // population: make_greedy() in particular is typically wildly
+    // capacity-infeasible on its own.
+    {
+        EvalWorkspace ws_seed;
+        ws_seed.reset(prob.n_types, prob.max_slot);
+        for (auto& s : h_seeds) {
+            local_search(s, prob, ws_seed);
+            evaluate(s, prob, ws_seed);
+        }
+    }
 
     std::vector<Individual> pop(n_weights);
     for (int i = 0; i < n_hs && i < n_weights; i++)
@@ -188,7 +204,7 @@ run_moead(const Problem& prob, int n_weights, int n_gen,
     std::vector<Individual> archive;
     if (archive_size > 0) archive.reserve(archive_size + 1);
 
-    double offspring_ms = 0.0, replacement_ms = 0.0;
+    double offspring_ms = 0.0, replacement_ms = 0.0, local_search_ms = 0.0;
 
     for (int gen = 0; gen < n_gen; gen++) {
         // ── Phase 1: parallel offspring generation + ideal update ─────────────
@@ -280,11 +296,60 @@ run_moead(const Problem& prob, int n_weights, int n_gen,
             }
         }
         replacement_ms += ms_since(t_rep);
+
+        // ── Periodic local search ──────────────────────────────────────────────
+        // See nsga2.hpp for rationale. Note: this can push some pop[j].f1/f2
+        // below the current ideal point z1/z2 outside of the usual
+        // children-only reduction above; that's a real improvement, just one
+        // the Tchebycheff normalisation catches up to on the next
+        // generation's reduction rather than immediately — self-correcting,
+        // not a correctness issue.
+
+        if (ls_interval > 0 && (gen + 1) % ls_interval == 0) {
+            const auto t_ls = Clock::now();
+#ifdef _OPENMP
+            #pragma omp parallel
+            {
+                EvalWorkspace ws;
+                ws.reset(prob.n_types, prob.max_slot);
+                #pragma omp for schedule(static)
+                for (int i = 0; i < n_weights; i++) {
+                    local_search(pop[i], prob, ws, /*max_passes=*/1);
+                    evaluate(pop[i], prob, ws);
+                }
+            }
+#else
+            {
+                EvalWorkspace ws;
+                ws.reset(prob.n_types, prob.max_slot);
+                for (auto& ind : pop) {
+                    local_search(ind, prob, ws, 1);
+                    evaluate(ind, prob, ws);
+                }
+            }
+#endif
+            local_search_ms += ms_since(t_ls);
+        }
     }
 
     // ── Extract Pareto front ──────────────────────────────────────────────────
 
     const auto t_extract = Clock::now();
+
+    // Polish pop + archive before extraction — see nsga2.hpp's extraction
+    // step for rationale.
+    {
+        EvalWorkspace ws_polish;
+        ws_polish.reset(prob.n_types, prob.max_slot);
+        for (auto& ind : pop) {
+            local_search(ind, prob, ws_polish);
+            evaluate(ind, prob, ws_polish);
+        }
+        for (auto& ind : archive) {
+            local_search(ind, prob, ws_polish);
+            evaluate(ind, prob, ws_polish);
+        }
+    }
 
     ResultList results;
     for (auto& ind : pop)
@@ -307,6 +372,7 @@ run_moead(const Problem& prob, int n_weights, int n_gen,
         {"offspring_avg_ms",    offspring_ms  / gen_d},
         {"replacement_total_ms",replacement_ms},
         {"replacement_avg_ms",  replacement_ms / gen_d},
+        {"local_search_total_ms",local_search_ms},
         {"extract_ms",          extract_ms},
     };
 

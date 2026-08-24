@@ -91,20 +91,33 @@ def build_parser() -> argparse.ArgumentParser:
                      ))
     mip.add_argument("--mip-gap", type=float, default=1e-4,
                      help="Gurobi MIPGap (used by exact and hybrid methods). Default: 1e-4.")
+    mip.add_argument("--max-solves", type=int, default=None,
+                     help=(
+                         "pareto-true only: cap on box-search solves. On exit, returns a "
+                         "PARTIAL but still individually-exact front instead of the complete "
+                         "one. Default: no limit (full exact enumeration)."
+                     ))
+    mip.add_argument("--pareto-time-budget", type=float, default=None,
+                     help=(
+                         "pareto-true only: wall-clock seconds cap on the box-search phase "
+                         "(anchors always solve to completion first). Same partial-front "
+                         "semantics as --max-solves; whichever limit is hit first applies. "
+                         "Default: no limit."
+                     ))
 
     # ── EA / hybrid options ───────────────────────────────────────────────────
     ea = p.add_argument_group("Evolutionary algorithm options (nsga2 / nsga3 / moead / hybrid)")
-    ea.add_argument("--pop-size", type=int, default=200, metavar="N",
+    ea.add_argument("--pop-size", type=int, default=400, metavar="N",
                     help=(
                         "Population size for NSGA-II / NSGA-III, number of weight vectors for MOEA/D, "
-                        "or EA population for each algorithm in hybrid. Default: 200. "
+                        "or EA population for each algorithm in hybrid. Default: 400. "
                         "For NSGA-III, should equal --n-divisions + 1."
                     ))
-    ea.add_argument("--n-divisions", type=int, default=199, metavar="P",
+    ea.add_argument("--n-divisions", type=int, default=399, metavar="P",
                     help=(
                         "NSGA-III: number of divisions for the Das-Dennis reference-point lattice. "
                         "Produces P+1 reference points; set to pop_size - 1 for best coverage. "
-                        "Default: 199 (matches default pop_size=200)."
+                        "Default: 399 (matches default pop_size=400)."
                     ))
     ea.add_argument("--n-gen", type=int, default=300, metavar="N",
                     help="Number of EA generations (nsga2, moead, hybrid). Default: 300.")
@@ -222,7 +235,9 @@ def main(argv: list[str] | None = None) -> None:
 
     elif method == "pareto-true":
         solutions = true_pareto_frontier(
-            inst, formulation=formulation, verbose=args.verbose, **gurobi_params
+            inst, formulation=formulation, verbose=args.verbose,
+            max_solves=args.max_solves, time_budget=args.pareto_time_budget,
+            **gurobi_params
         )
         _print_pareto(solutions, inst, args.json, method=method)
         _save_pareto_outputs(solutions, inst, out_dir, stem=method)

@@ -35,6 +35,7 @@
 #include <random>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -91,6 +92,19 @@ struct Problem {
     // [j] = cumulative sampling weights over job_slots[j], for make_random().
     // Precomputed once here (not per draw) since job_slots is fixed for the
     // whole run.
+
+    std::vector<std::vector<int>> job_candidates;
+    // [j] = shortlist of indices into job_slots[j] for local_search(): the
+    // best few (by f1_contrib, then cost) slots *per feasible type*. Per-job
+    // slot counts run into the thousands (one per feasible start time), but
+    // the (f1_contrib, cost) Pareto frontier collapses to a single point per
+    // job in practice — every job's unconstrained-best slot is unambiguous,
+    // which is exactly why capacity congestion happens (many jobs want the
+    // same one slot). A shortlist ranked by (f1_contrib, cost) alone would
+    // therefore only ever surface *one* type (whichever is cheapest) at many
+    // nearby times, never a fallback type — so it's built per-type instead,
+    // capped at PER_TYPE_K slots each, to keep every feasible type reachable
+    // for congestion-relief moves while staying cheap enough to scan.
 };
 
 // Per-thread occupancy workspace — no heap allocation inside evaluate().
@@ -256,17 +270,32 @@ inline Individual crossover(const Individual& p1, const Individual& p2,
                         : crossover_two_point(p1, p2, rng);
 }
 
+// Greedy single-objective seed, tie-broken on the *other* objective.
+// Picking the primary-minimal slot alone leaves ties (very common — many
+// slots often share the same earliest start or same zero cost) resolved by
+// arbitrary job_slots iteration order, which silently anchors the seed (and
+// the population it draws from) on whichever type happens to come first
+// rather than the true co-optimal slot. Comparing the secondary objective
+// within an epsilon band closes that gap at zero extra asymptotic cost.
 inline Individual make_greedy(const Problem& prob, bool minimize_cost) {
     Individual ind;
     ind.genes.resize(prob.n_jobs);
+    constexpr double eps = 1e-9;
     for (int j = 0; j < prob.n_jobs; j++) {
         int best = 0;
-        double best_val = minimize_cost ? prob.job_slots[j][0].cost
-                                        : prob.job_slots[j][0].f1_contrib;
+        const auto primary_of   = [&](int k) { return minimize_cost ? prob.job_slots[j][k].cost
+                                                                     : prob.job_slots[j][k].f1_contrib; };
+        const auto secondary_of = [&](int k) { return minimize_cost ? prob.job_slots[j][k].f1_contrib
+                                                                     : prob.job_slots[j][k].cost; };
+        double best_primary = primary_of(0), best_secondary = secondary_of(0);
         for (int k = 1; k < (int)prob.job_slots[j].size(); k++) {
-            const double val = minimize_cost ? prob.job_slots[j][k].cost
-                                             : prob.job_slots[j][k].f1_contrib;
-            if (val < best_val) { best_val = val; best = k; }
+            const double primary = primary_of(k), secondary = secondary_of(k);
+            const bool strictly_better = primary < best_primary - eps;
+            const bool tied_but_cheaper_secondary =
+                primary < best_primary + eps && secondary < best_secondary;
+            if (strictly_better || tied_but_cheaper_secondary) {
+                best_primary = primary; best_secondary = secondary; best = k;
+            }
         }
         ind.genes[j] = best;
     }
@@ -283,32 +312,6 @@ inline Individual make_no_wait(const Problem& prob) {
             if (prob.job_slots[j][k].start < best_start) {
                 best_start = prob.job_slots[j][k].start; best = k;
             }
-        ind.genes[j] = best;
-    }
-    return ind;
-}
-
-// Earliest start on finite-capacity (on-prem) types; fall back to any type.
-inline Individual make_no_burst(const Problem& prob) {
-    Individual ind;
-    ind.genes.resize(prob.n_jobs);
-    for (int j = 0; j < prob.n_jobs; j++) {
-        int best = -1, best_start = std::numeric_limits<int>::max();
-        for (int k = 0; k < (int)prob.job_slots[j].size(); k++) {
-            const SlotInfo& s = prob.job_slots[j][k];
-            const int cap = (s.type_id < (int)prob.type_cap.size())
-                            ? prob.type_cap[s.type_id] : -1;
-            if (cap >= 0 && s.start < best_start) {
-                best_start = s.start; best = k;
-            }
-        }
-        if (best < 0) {
-            best = 0; best_start = prob.job_slots[j][0].start;
-            for (int k = 1; k < (int)prob.job_slots[j].size(); k++)
-                if (prob.job_slots[j][k].start < best_start) {
-                    best_start = prob.job_slots[j][k].start; best = k;
-                }
-        }
         ind.genes[j] = best;
     }
     return ind;
@@ -382,19 +385,152 @@ inline Individual make_star_wait(const Problem& prob) {
     return ind;
 }
 
+// Capacity-aware list-scheduling seed: minimises total completion time
+// *under* each type's capacity constraint, instead of ignoring it like the
+// other greedy seeds.
+//
+// Rationale: reaching the cost-minimal extreme forces (almost) every job
+// onto the same one or two free/cheapest types, whose capacity is far
+// smaller than the job count — the true optimum there requires spreading
+// jobs across the horizon in a specific load-balanced way. That's a
+// textbook parallel-machine, capacity-constrained, minimise-total-
+// completion-time scheduling problem: process jobs in order of their own
+// earliest feasible start on their preferred type, and greedily place each
+// at the earliest still-has-room window (first-fit list scheduling). This
+// is the same shape of result as SPT/list-scheduling optimality for that
+// problem — local_search()'s bounded candidate shortlist can polish
+// starting from here, but can't discover this global a rearrangement from
+// scratch (see its own comment for why).
+inline Individual make_list_schedule(const Problem& prob) {
+    Individual ind;
+    ind.genes.resize(prob.n_jobs);
+
+    // Each job's preferred type: same lexicographic (cost, then f1_contrib)
+    // minimisation make_greedy(prob, /*minimize_cost=*/true) uses, so the
+    // "preferred type" here matches what that seed would pick per job.
+    std::vector<int> pref_type(prob.n_jobs);
+    for (int j = 0; j < prob.n_jobs; j++) {
+        const auto& slots = prob.job_slots[j];
+        int best = 0;
+        for (int k = 1; k < (int)slots.size(); k++) {
+            const bool cheaper = slots[k].cost < slots[best].cost - 1e-9;
+            const bool tied_faster = slots[k].cost < slots[best].cost + 1e-9
+                                    && slots[k].f1_contrib < slots[best].f1_contrib;
+            if (cheaper || tied_faster) best = k;
+        }
+        pref_type[j] = slots[best].type_id;
+    }
+
+    std::vector<std::vector<int>> groups(prob.n_types);
+    for (int j = 0; j < prob.n_jobs; j++) groups[pref_type[j]].push_back(j);
+
+    const int stride = prob.max_slot + 1;
+    std::vector<int> occ = prob.init_occ_flat;  // seed from running-job occupancy
+
+    for (int m = 0; m < prob.n_types; m++) {
+        auto& jobs_m = groups[m];
+        if (jobs_m.empty()) continue;
+        const int cap = prob.type_cap[m];
+
+        if (cap < 0) {
+            // Unlimited-capacity type: no congestion possible, just take
+            // each job's own preferred (cheapest, then fastest) slot on m.
+            for (int j : jobs_m) {
+                const auto& slots = prob.job_slots[j];
+                int best = -1;
+                for (int k = 0; k < (int)slots.size(); k++) {
+                    if (slots[k].type_id != m) continue;
+                    if (best < 0 || slots[k].cost < slots[best].cost - 1e-9
+                        || (slots[k].cost < slots[best].cost + 1e-9
+                            && slots[k].f1_contrib < slots[best].f1_contrib))
+                        best = k;
+                }
+                ind.genes[j] = best;
+            }
+            continue;
+        }
+
+        // Finite-capacity type: process jobs first-come-first-served by
+        // their own earliest feasible start on this type, greedily placing
+        // each at the earliest window with room across its whole [start,
+        // start+p_occ) span.
+        std::vector<std::pair<int,int>> order;  // (earliest_start_on_m, job_id)
+        order.reserve(jobs_m.size());
+        for (int j : jobs_m) {
+            int earliest = std::numeric_limits<int>::max();
+            for (const SlotInfo& s : prob.job_slots[j])
+                if (s.type_id == m) earliest = std::min(earliest, s.start);
+            order.emplace_back(earliest, j);
+        }
+        std::sort(order.begin(), order.end());
+
+        for (auto& [_, j] : order) {
+            const auto& slots = prob.job_slots[j];
+            std::vector<int> cand_idx;  // indices with type_id == m, start ascending
+            for (int k = 0; k < (int)slots.size(); k++)
+                if (slots[k].type_id == m) cand_idx.push_back(k);
+            std::sort(cand_idx.begin(), cand_idx.end(), [&](int a, int b) {
+                return slots[a].start < slots[b].start;
+            });
+
+            int chosen = -1;
+            for (int k : cand_idx) {
+                const SlotInfo& s = slots[k];
+                bool fits = true;
+                const int base = m * stride;
+                for (int t = s.start; t < s.start + s.p_occ; t++)
+                    if (occ[base + t] >= cap) { fits = false; break; }
+                if (fits) { chosen = k; break; }
+            }
+            if (chosen < 0) {
+                // Type m is saturated across its whole horizon for this job
+                // (rare) — fall back to the job's cheapest slot on any type;
+                // evaluate() will penalise it normally like any other
+                // individual if that reintroduces a violation.
+                chosen = 0;
+                for (int k = 1; k < (int)slots.size(); k++)
+                    if (slots[k].cost < slots[chosen].cost - 1e-9
+                        || (slots[k].cost < slots[chosen].cost + 1e-9
+                            && slots[k].f1_contrib < slots[chosen].f1_contrib))
+                        chosen = k;
+            } else {
+                const SlotInfo& s = slots[chosen];
+                const int base = m * stride;
+                for (int t = s.start; t < s.start + s.p_occ; t++) occ[base + t]++;
+            }
+            ind.genes[j] = chosen;
+        }
+    }
+    return ind;
+}
+
 // All deterministic seed individuals:
-// greedy-time, greedy-cost, no-wait, no-burst, full-burst,
-// fixed-wait-25%, fixed-wait-50%, star-wait.
+// greedy-time, greedy-cost, no-wait, full-burst,
+// fixed-wait-25%, fixed-wait-50%, star-wait, list-schedule.
+//
+// make_no_burst() (earliest start on finite-capacity types, cloud fallback)
+// was dropped from this list: an ablation across all 10 bundled instances
+// (see moea.time_seeds()) showed it converges to *exactly* the same
+// post-repair (f1, f2) as make_no_wait() on every single one — the two are
+// provably redundant once local_search() repairs them, so keeping both only
+// added construction cost with no diversity benefit. The other seeds don't
+// have this property: greedy_time/greedy_cost/full_burst/fixed_wait_25/
+// fixed_wait_50 each converge to points identical to their neighbours on
+// roughly half the tested instances and to genuinely distinct points on the
+// other half (particularly on the smaller, less capacity-congested
+// instances) — removing any of *those* would lose real basin coverage on a
+// majority of cases, even though they look redundant on the two largest,
+// most heavily congested instances alone.
 inline std::vector<Individual> make_heuristic_seeds(const Problem& prob) {
     return {
         make_greedy(prob, false),     // 0: min turnaround (f1)
         make_greedy(prob, true),      // 1: min cost (f2)
         make_no_wait(prob),           // 2: ASAP any type
-        make_no_burst(prob),          // 3: ASAP on-prem, fallback cloud
-        make_full_burst(prob),        // 4: ASAP cloud, fallback on-prem
-        make_fixed_wait(prob, 0.25),  // 5: 25% horizon delay
-        make_fixed_wait(prob, 0.50),  // 6: 50% horizon delay
-        make_star_wait(prob),         // 7: staggered by job index
+        make_full_burst(prob),        // 3: ASAP cloud, fallback on-prem
+        make_fixed_wait(prob, 0.25),  // 4: 25% horizon delay
+        make_fixed_wait(prob, 0.50),  // 5: 50% horizon delay
+        make_star_wait(prob),         // 6: staggered by job index
+        make_list_schedule(prob),     // 7: capacity-aware list scheduling
     };
 }
 
@@ -407,6 +543,122 @@ inline void mutate(Individual& ind, const Problem& prob, double p_mut,
             ind.genes[j] = std::uniform_int_distribution<int>(0, n - 1)(rng);
         }
     }
+}
+
+// ── Local search (congestion repair + iso-objective cost/time descent) ────────
+//
+// Coordinate descent over job assignments, restricted to each job's
+// per-type candidate shortlist (Problem::job_candidates — see its comment
+// for why the full slot list isn't the right search space here). For each
+// job, in turn:
+//   - if the current slot contributes to a capacity violation, any
+//     candidate that strictly reduces this job's marginal violation is
+//     preferred, regardless of cost/f1_contrib (repair always wins);
+//   - among candidates tied on marginal violation, only a *weakly
+//     dominating* one (same-or-better f1_contrib and cost, strictly better
+//     in at least one) is accepted (safe polish — never regresses either
+//     objective without an offsetting violation reduction).
+//
+// This targets exactly the failure mode plain mutation/crossover can't:
+// resolving many jobs contending for the same over-subscribed slot needs a
+// *directed* move to a specific alternative, and escaping a flat iso-f1
+// plateau toward the cheapest co-optimal combination needs a move that
+// dominance-based selection alone has no gradient to find.
+//
+// Mutates ind.genes in place; does NOT refresh ind.f1/f2/cv — call
+// evaluate() again afterwards. Safe to call on an already-feasible,
+// already-locally-optimal individual (returns false, does no useful work
+// beyond one O(n_jobs) scan).
+inline bool local_search(Individual& ind, const Problem& prob, EvalWorkspace& ws,
+                          int max_passes = 3) {
+    const int stride = prob.max_slot + 1;
+    constexpr double eps = 1e-9;
+    bool any_improved = false;
+
+    for (int pass = 0; pass < max_passes; pass++) {
+        // Rebuild occupancy from the individual's current genes.
+        for (int idx : ws.dirty) ws.occ[idx] = 0;
+        ws.dirty.clear();
+        for (int j = 0; j < prob.n_jobs; j++) {
+            const SlotInfo& s = prob.job_slots[j][ind.genes[j]];
+            const int cap = prob.type_cap[s.type_id];
+            if (cap < 0) continue;
+            const int base = s.type_id * stride;
+            for (int t = s.start; t < s.start + s.p_occ; t++) {
+                const int idx = base + t;
+                if (ws.occ[idx] == 0) ws.dirty.push_back(idx);
+                ws.occ[idx]++;
+            }
+        }
+
+        const auto marginal_violation = [&](const SlotInfo& s, int cap) -> int {
+            if (cap < 0) return 0;
+            const int base = s.type_id * stride;
+            int v = 0;
+            for (int t = s.start; t < s.start + s.p_occ; t++) {
+                const int idx = base + t;
+                const int exc = ws.occ[idx] + prob.init_occ_flat[idx] + 1 - cap;
+                if (exc > 0) v += exc;
+            }
+            return v;
+        };
+
+        bool pass_improved = false;
+
+        for (int j = 0; j < prob.n_jobs; j++) {
+            const int cur_k = ind.genes[j];
+            const SlotInfo& cur = prob.job_slots[j][cur_k];
+            const int cur_cap = prob.type_cap[cur.type_id];
+
+            // Remove this job's own contribution so violation below is
+            // computed relative to "everyone else".
+            if (cur_cap >= 0) {
+                const int base = cur.type_id * stride;
+                for (int t = cur.start; t < cur.start + cur.p_occ; t++)
+                    ws.occ[base + t]--;
+            }
+
+            int best_k = cur_k;
+            int best_viol = marginal_violation(cur, cur_cap);
+            double best_f1c = cur.f1_contrib, best_cost = cur.cost;
+
+            for (int k : prob.job_candidates[j]) {
+                if (k == cur_k) continue;
+                const SlotInfo& cand = prob.job_slots[j][k];
+                const int cand_cap = prob.type_cap[cand.type_id];
+                const int v = marginal_violation(cand, cand_cap);
+                if (v < best_viol) {
+                    best_viol = v; best_k = k;
+                    best_f1c = cand.f1_contrib; best_cost = cand.cost;
+                } else if (v == best_viol) {
+                    const bool weakly_better =
+                        cand.f1_contrib <= best_f1c + eps && cand.cost <= best_cost + eps;
+                    const bool strictly_better =
+                        cand.f1_contrib < best_f1c - eps || cand.cost < best_cost - eps;
+                    if (weakly_better && strictly_better) {
+                        best_k = k; best_f1c = cand.f1_contrib; best_cost = cand.cost;
+                    }
+                }
+            }
+
+            if (best_k != cur_k) { ind.genes[j] = best_k; pass_improved = true; }
+
+            const SlotInfo& applied = prob.job_slots[j][ind.genes[j]];
+            const int applied_cap = prob.type_cap[applied.type_id];
+            if (applied_cap >= 0) {
+                const int base = applied.type_id * stride;
+                for (int t = applied.start; t < applied.start + applied.p_occ; t++) {
+                    const int idx = base + t;
+                    if (ws.occ[idx] == 0) ws.dirty.push_back(idx);
+                    ws.occ[idx]++;
+                }
+            }
+        }
+
+        any_improved = any_improved || pass_improved;
+        if (!pass_improved) break;
+    }
+    return any_improved;
 }
 
 // ── Mutation-rate annealing ───────────────────────────────────────────────────
@@ -496,6 +748,8 @@ inline Problem build_problem(
 
     prob.job_slots.resize(n_jobs);
     prob.slot_cum_weight.resize(n_jobs);
+    prob.job_candidates.resize(n_jobs);
+    constexpr int PER_TYPE_K = 4;
     int max_slot = 0;
     for (int j = 0; j < n_jobs; j++) {
         prob.job_slots[j].reserve(raw_slots[j].size());
@@ -504,6 +758,42 @@ inline Problem build_problem(
             max_slot = std::max(max_slot, start + pocc);
         }
         compute_slot_weights(prob.job_slots[j], prob.type_risk, prob.slot_cum_weight[j]);
+
+        // Build the per-type candidate shortlist for local_search(): group
+        // this job's slot indices by type, sort each group by (f1_contrib,
+        // cost), keep the first PER_TYPE_K.
+        std::unordered_map<int, std::vector<int>> by_type;
+        for (int k = 0; k < (int)prob.job_slots[j].size(); k++)
+            by_type[prob.job_slots[j][k].type_id].push_back(k);
+        auto& cand = prob.job_candidates[j];
+        for (auto& [tid, idxs] : by_type) {
+            std::sort(idxs.begin(), idxs.end(), [&](int a, int b) {
+                const SlotInfo& sa = prob.job_slots[j][a];
+                const SlotInfo& sb = prob.job_slots[j][b];
+                if (sa.f1_contrib != sb.f1_contrib) return sa.f1_contrib < sb.f1_contrib;
+                return sa.cost < sb.cost;
+            });
+            // f1_contrib is a strictly increasing function of start for a
+            // fixed (job, type) pair (p_occ is constant across start times
+            // there), so this sort already orders idxs by start time
+            // ascending — i.e. earliest-first.
+            const int n = (int)idxs.size();
+            const int n_keep = std::min(n, PER_TYPE_K);
+            cand.insert(cand.end(), idxs.begin(), idxs.begin() + n_keep);
+
+            // The earliest-PER_TYPE_K block alone means local_search() can
+            // only ever resolve *local* congestion (a job's own next couple
+            // of slots) — it has no visibility into a free slot far later in
+            // the horizon, which is exactly what's needed once many jobs are
+            // all congesting a type's early slots simultaneously. Add
+            // geometrically-spaced positions further out (cheap: O(log n)
+            // extra candidates) plus the very last slot as a guaranteed
+            // last-resort, so local_search can reach across the whole
+            // horizon without scanning it.
+            for (int pos = PER_TYPE_K * 2; pos < n; pos *= 2)
+                cand.push_back(idxs[pos]);
+            if (n > n_keep) cand.push_back(idxs[n - 1]);
+        }
     }
     prob.max_slot = max_slot;
 

@@ -278,7 +278,7 @@ inline std::pair<ResultList, Profile>
 run_nsga3(const Problem& prob, int pop_size, int n_divisions,
           int n_gen, int seed, int n_threads,
           double p_mut_start = -1.0, double p_mut_end = -1.0, int crossover_kind = 0,
-          int tourn_k = 2) {
+          int tourn_k = 2, int local_search_interval = -1) {
     py::gil_scoped_release release;
     set_num_threads(n_threads);
 
@@ -286,6 +286,10 @@ run_nsga3(const Problem& prob, int pop_size, int n_divisions,
 
     std::mt19937 rng(seed);
     const auto mut_sched = make_mutation_schedule(p_mut_start, p_mut_end, 2.0 / prob.n_jobs);
+
+    // See nsga2.hpp for the interval convention (<0 auto, 0 disabled, >0 explicit).
+    const int ls_interval = (local_search_interval < 0)
+        ? std::max(1, n_gen / 10) : local_search_interval;
 
     const auto refs = make_reference_points_2d(n_divisions);
     const int  R    = (int)refs.size();
@@ -299,6 +303,18 @@ run_nsga3(const Problem& prob, int pop_size, int n_divisions,
 
     auto      h_seeds = make_heuristic_seeds(prob);
     const int n_hs    = (int)h_seeds.size();
+
+    // See nsga2.hpp for why the seeds need repairing before entering the
+    // population: make_greedy() in particular is typically wildly
+    // capacity-infeasible on its own.
+    {
+        EvalWorkspace ws_seed;
+        ws_seed.reset(prob.n_types, prob.max_slot);
+        for (auto& s : h_seeds) {
+            local_search(s, prob, ws_seed);
+            evaluate(s, prob, ws_seed);
+        }
+    }
 
     std::vector<Individual> pop(pop_size);
     for (int k = 0; k < n_hs && k < pop_size; k++)
@@ -339,7 +355,7 @@ run_nsga3(const Problem& prob, int pop_size, int n_divisions,
     combined.reserve(2 * pop_size);
     std::vector<uint32_t> child_seeds(pop_size);
 
-    double rank_nds_ms = 0.0, offspring_ms = 0.0, combine_select_ms = 0.0;
+    double rank_nds_ms = 0.0, offspring_ms = 0.0, combine_select_ms = 0.0, local_search_ms = 0.0;
 
     for (int gen = 0; gen < n_gen; gen++) {
         // ── Rank parent population for tournament selection ────────────────────
@@ -467,11 +483,51 @@ run_nsga3(const Problem& prob, int pop_size, int n_divisions,
         if ((int)pop.size() > pop_size) pop.resize(pop_size);
 
         combine_select_ms += ms_since(t_sel);
+
+        // ── Periodic local search ──────────────────────────────────────────────
+        // See nsga2.hpp for rationale.
+
+        if (ls_interval > 0 && (gen + 1) % ls_interval == 0) {
+            const auto t_ls = Clock::now();
+#ifdef _OPENMP
+            #pragma omp parallel
+            {
+                EvalWorkspace ws;
+                ws.reset(prob.n_types, prob.max_slot);
+                #pragma omp for schedule(static)
+                for (int k = 0; k < (int)pop.size(); k++) {
+                    local_search(pop[k], prob, ws, /*max_passes=*/1);
+                    evaluate(pop[k], prob, ws);
+                }
+            }
+#else
+            {
+                EvalWorkspace ws;
+                ws.reset(prob.n_types, prob.max_slot);
+                for (auto& ind : pop) {
+                    local_search(ind, prob, ws, 1);
+                    evaluate(ind, prob, ws);
+                }
+            }
+#endif
+            local_search_ms += ms_since(t_ls);
+        }
     }
 
     // ── Extract Pareto front ──────────────────────────────────────────────────
 
     const auto t_extract = Clock::now();
+
+    // Polish the final population before ranking — see nsga2.hpp's
+    // extraction step for rationale.
+    {
+        EvalWorkspace ws_polish;
+        ws_polish.reset(prob.n_types, prob.max_slot);
+        for (auto& ind : pop) {
+            local_search(ind, prob, ws_polish);
+            evaluate(ind, prob, ws_polish);
+        }
+    }
 
     auto fronts = fast_nds(pop);
     assign_ranks(pop, fronts);
@@ -495,6 +551,7 @@ run_nsga3(const Problem& prob, int pop_size, int n_divisions,
         {"offspring_avg_ms",          offspring_ms     / gen_d},
         {"combine_select_total_ms",   combine_select_ms},
         {"combine_select_avg_ms",     combine_select_ms / gen_d},
+        {"local_search_total_ms",     local_search_ms},
         {"extract_ms",                extract_ms},
     };
 

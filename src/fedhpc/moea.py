@@ -173,6 +173,8 @@ def _print_profile(prof: dict, *, algorithm: str, label: str = "") -> None:
             ("Combine NDS + crowding + select",
              prof.get("combine_select_total_ms", 0.0),
              prof.get("combine_select_avg_ms")),
+            ("Periodic local search",
+             prof.get("local_search_total_ms", 0.0), None),
             ("Extract + Pareto filter",
              prof.get("extract_ms", 0.0), None),
         ]
@@ -189,6 +191,8 @@ def _print_profile(prof: dict, *, algorithm: str, label: str = "") -> None:
             ("Combine NDS + normalize + niching select",
              prof.get("combine_select_total_ms", 0.0),
              prof.get("combine_select_avg_ms")),
+            ("Periodic local search",
+             prof.get("local_search_total_ms", 0.0), None),
             ("Extract + Pareto filter",
              prof.get("extract_ms", 0.0), None),
         ]
@@ -202,6 +206,8 @@ def _print_profile(prof: dict, *, algorithm: str, label: str = "") -> None:
             ("Neighbourhood replacement (sequential)",
              prof.get("replacement_total_ms", 0.0),
              prof.get("replacement_avg_ms")),
+            ("Periodic local search",
+             prof.get("local_search_total_ms", 0.0), None),
             ("Extract + Pareto filter",
              prof.get("extract_ms", 0.0), None),
         ]
@@ -238,7 +244,7 @@ def _print_profile(prof: dict, *, algorithm: str, label: str = "") -> None:
 def nsga2_frontier(
     inst: Instance,
     *,
-    pop_size: int = 100,
+    pop_size: int = 400,
     n_gen: int = 200,
     seed: int = 42,
     n_threads: int = 0,
@@ -246,6 +252,7 @@ def nsga2_frontier(
     p_mut_end: float = -1.0,
     crossover_kind: int = 0,
     tourn_k: int = 2,
+    local_search_interval: int = -1,
     profile: bool = False,
 ) -> list[Solution]:
     """Approximate the Pareto frontier via NSGA-II.
@@ -266,6 +273,13 @@ def nsga2_frontier(
     crossover_kind : 0 = two-point (default), 1 = uniform (per-gene coin flip).
     tourn_k        : mating-tournament size. 2 (default) = original binary
                      tournament; larger values increase selection pressure.
+    local_search_interval : generations between periodic capacity-repair /
+                     cost-descent local search on the population (see
+                     ga_common.hpp's ``local_search``). ``<0`` (default)
+                     resolves to ~10 applications spread across the run;
+                     ``0`` disables it, restoring seeds+final-polish-only
+                     behaviour. Always applied to the heuristic seeds and the
+                     final population regardless of this setting.
     profile        : if True, print a per-phase timing breakdown to stderr.
 
     Returns
@@ -289,6 +303,7 @@ def nsga2_frontier(
         p_mut_end      = p_mut_end,
         crossover_kind = crossover_kind,
         tourn_k        = tourn_k,
+        local_search_interval = local_search_interval,
     )
     if profile:
         _print_profile(prof, algorithm="nsga2",
@@ -299,8 +314,8 @@ def nsga2_frontier(
 def nsga3_frontier(
     inst: Instance,
     *,
-    pop_size: int = 100,
-    n_divisions: int = 99,
+    pop_size: int = 400,
+    n_divisions: int = 399,
     n_gen: int = 200,
     seed: int = 42,
     n_threads: int = 0,
@@ -308,6 +323,7 @@ def nsga3_frontier(
     p_mut_end: float = -1.0,
     crossover_kind: int = 0,
     tourn_k: int = 2,
+    local_search_interval: int = -1,
     profile: bool = False,
 ) -> list[Solution]:
     """Approximate the Pareto frontier via NSGA-III (Deb & Jain 2014).
@@ -322,7 +338,7 @@ def nsga3_frontier(
     ----------
     inst        : built fedhpc Instance.
     pop_size    : population size.  Should equal ``n_divisions + 1`` for best
-                  reference-point coverage (default 100 matches default 99 divisions).
+                  reference-point coverage (default 400 matches default 399 divisions).
     n_divisions : number of divisions along each objective axis for the Das-Dennis
                   reference-point lattice.  Produces ``n_divisions + 1`` reference
                   points for the 2-objective case.
@@ -338,6 +354,9 @@ def nsga3_frontier(
     crossover_kind : 0 = two-point (default), 1 = uniform (per-gene coin flip).
     tourn_k     : mating-tournament size. 2 (default) = original binary
                   tournament; larger values increase selection pressure.
+    local_search_interval : generations between periodic capacity-repair /
+                  cost-descent local search on the population; see
+                  nsga2_frontier for the convention.
     profile     : if True, print a per-phase timing breakdown to stderr.
 
     Returns
@@ -362,6 +381,7 @@ def nsga3_frontier(
         p_mut_end      = p_mut_end,
         crossover_kind = crossover_kind,
         tourn_k        = tourn_k,
+        local_search_interval = local_search_interval,
     )
     if profile:
         _print_profile(prof, algorithm="nsga3",
@@ -372,7 +392,7 @@ def nsga3_frontier(
 def moead_frontier(
     inst: Instance,
     *,
-    n_weights: int = 100,
+    n_weights: int = 400,
     n_gen: int = 200,
     neighborhood_size: int = 20,
     seed: int = 42,
@@ -382,6 +402,7 @@ def moead_frontier(
     p_mut_end: float = -1.0,
     crossover_kind: int = 0,
     archive_size: int = 20,
+    local_search_interval: int = -1,
     profile: bool = False,
 ) -> list[Solution]:
     """Approximate the Pareto frontier via MOEA/D (Tchebycheff decomposition).
@@ -414,6 +435,9 @@ def moead_frontier(
                         benchmark (consistent small ΔHV gain and higher
                         cardinality across small/medium/large; plateaus at 20,
                         see ablation.py). ``<=0`` disables it.
+    local_search_interval : generations between periodic capacity-repair /
+                        cost-descent local search on the population; see
+                        nsga2_frontier for the convention.
     profile           : if True, print a per-phase timing breakdown to stderr.
 
     Returns
@@ -439,8 +463,36 @@ def moead_frontier(
         p_mut_end         = p_mut_end,
         crossover_kind    = crossover_kind,
         archive_size      = archive_size,
+        local_search_interval = local_search_interval,
     )
     if profile:
         _print_profile(prof, algorithm="moead",
                        label=f"weights={n_weights}  T={neighborhood_size}  threads={n_threads or 'all'}")
     return _to_solutions(inst, raw)
+
+
+def time_seeds(inst: Instance) -> list[dict]:
+    """Diagnostic: time each deterministic heuristic seed individually.
+
+    Times construction, initial evaluation, and local_search() repair
+    separately for each of the 8 heuristic seeds (greedy-time, greedy-cost,
+    no-wait, full-burst, fixed-wait-25%, fixed-wait-50%,
+    star-wait, list-schedule), on the given instance. Not used by
+    nsga2_frontier/nsga3_frontier/moead_frontier — those construct and
+    repair the same seeds internally without this per-seed breakdown.
+
+    Returns
+    -------
+    List of per-seed dicts: name, construct_ms, eval_ms, repair_ms,
+    f1_before/f2_before/cv_before (post initial evaluate, pre-repair),
+    f1_after/f2_after/cv_after (post local_search + re-evaluate).
+    """
+    _require_ext()
+    return _ext.time_seeds(
+        n_jobs    = len(inst.jobs),
+        budget    = inst.budget,
+        job_slots = _job_slots(inst),
+        type_cap  = _type_cap(inst),
+        type_risk = _type_risk(inst),
+        init_occ  = _init_occ(inst),
+    )
