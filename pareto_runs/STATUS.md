@@ -14,7 +14,11 @@ undertaking rather than the few-minutes job the anchor-only view suggested.
 ## How to resume
 
 ```bash
-cd /home/bernardo/Documentos/programs/fedhpc
+cd /home/bernardo/Documentos/programas/fedhpc
+# both regions, back-to-back (recommended):
+bash scripts/resume_true_frontier.sh 3600
+
+# or one checkpoint at a time:
 uv run python pareto_runs/resume_map.py \
     data/fedhpc_known_runtime_offline_10min.json \
     pareto_runs/fedhpc_10min_map_checkpoint.json \
@@ -25,81 +29,105 @@ Safe to run repeatedly — each call resumes exactly where the last one left
 off and re-saves the checkpoint after every box resolution. If interrupted
 (Ctrl-C, kill, crash), nothing is lost beyond the box currently mid-solve.
 
-## Current state (as of 2026-08-27, after a further ~63 min resume session)
+## Current state (as of 2026-08-28, after a further ~1h + ~1h resume session)
 
-Previous checkpoint (2026-08-15): 9 points, 5 open boxes, 29 solves.
-A 3600s resume run on 2026-08-27 added 17 interior points (63 solves total,
-3771s wall). Backup of the pre-2026-08-27 checkpoint:
-`fedhpc_10min_map_checkpoint.json.bak-20260827`.
+History: 2026-08-15 checkpoint 9 pts / 5 boxes / 29 solves → 2026-08-27
++17 interior pts (63 solves, 3771s) → 2026-08-28 session below. Backup of the
+pre-2026-08-27 MAIN checkpoint: `fedhpc_10min_map_checkpoint.json.bak-20260827`.
 
-- **26 exact points found** (2 anchors + 24 interior), all proven optimal:
+**Combined exact-point count across both checkpoints: 52** (up from 33).
+Every point is individually proven optimal (MIPGap 1e-9); the front is still
+incomplete (47 open boxes total + 5 boxes dropped as inconclusive over the
+whole history).
+
+### 2026-08-28 session — `scripts/resume_true_frontier.sh 3600`
+
+Ran both checkpoints back-to-back, 3600s budget each (200s per-solve for MAIN,
+600s for GAP), `n_seed_retries=3`. Added **19 new proven points** (+16 MAIN,
++3 GAP).
+
+### MAIN checkpoint — `fedhpc_10min_map_checkpoint.json`
+
+- **42 exact points** (2 anchors + 40 interior), all in f1 ∈ [11151, 16577].
+  This session: 3682s wall, 32 solves, **0 inconclusive**, +16 pts.
+
+  | f1 | f2 |   | f1 | f2 |
+  |---|---|---|---|---|
+  | 11151.04 | 361.96 | | 12979.04 | 140.21 |
+  | 11156.04 | 359.21 | | 13042.04 | 136.08 |
+  | 11160.04 | 357.09 | | 13105.04 | 131.98 |
+  | 11168.04 | 352.96 | | 13168.04 | 127.91 |
+  | 11179.04 | 348.40 | | 13231.04 | 123.88 |
+  | 11189.04 | 344.32 | | 13294.04 | 119.85 |
+  | 11201.04 | 339.71 | | 13326.04 | 117.84 |
+  | 11213.04 | 335.49 | | 13358.04 | 115.81 |
+  | 11226.04 | 331.00 | | 13421.04 | 111.87 |
+  | 11238.04 | 327.14 | | 13484.04 | 107.95 |
+  | 11253.04 | 322.58 | | 13515.04 | 106.03 |
+  | 11267.04 | 318.29 | | 13547.04 | 104.06 |
+  | 11275.04 | 315.92 | | 13579.04 | 102.08 |
+  | 11283.04 | 313.68 | | 13611.04 | 100.13 |
+  | 11298.04 | 309.63 | | 13674.04 |  96.29 |
+  | 11315.04 | 305.20 | | 13737.04 |  92.49 |
+  | 11332.04 | 300.89 | | 13800.04 |  88.70 |
+  | 11349.04 | 296.67 | | 13832.04 |  86.80 |
+  | 11367.04 | 292.47 | | 13864.04 |  84.94 |
+  | 11843.04 | 223.43 | | 16577.04 |   0.00 |
+  | 12853.04 | 148.51 | |          |        |
+  | 12916.04 | 144.34 | |          |        |
+
+- **38 boxes still open** (widths 4–63), all in f1 ∈ [11151, 13864]. The
+  front is essentially continuous here — bisection finds a new optimal point
+  in nearly every box it splits, so each solve tends to spawn ~1 more box.
+  Open-box count keeps *rising* (22 → 38). Full closure of this region still
+  looks like many more hours (rough order: 100–200+ total points).
+- Nearly every MAIN solve hits the 200s `per_solve_time_limit`; throughput
+  ~1 point / 3–4 min.
+- 3 boxes dropped as inconclusive earlier in the history (see limitation #1);
+  none new this session.
+
+### GAP checkpoint — `fedhpc_10min_gap_checkpoint.json`
+
+The big f1 ∈ [13864, 16577] gap, attacked separately (independent checkpoint,
+600s `per_solve_time_limit`). Resume with:
+```
+uv run python pareto_runs/resume_map.py \
+    data/fedhpc_known_runtime_offline_10min.json \
+    pareto_runs/fedhpc_10min_gap_checkpoint.json  3600 600 3
+```
+
+- **12 exact points**, f1 ∈ [13864, 16577]:
 
   | f1 | f2 |
   |---|---|
-  | 11151.04 | 361.96 |
-  | 11160.04 | 357.09 |
-  | 11168.04 | 352.96 |
-  | 11189.04 | 344.32 |
-  | 11213.04 | 335.49 |
-  | 11238.04 | 327.14 |
-  | 11253.04 | 322.58 |
-  | 11267.04 | 318.29 |
-  | 11298.04 | 309.63 |
-  | 11332.04 | 300.89 |
-  | 11367.04 | 292.47 |
-  | 11843.04 | 223.43 |
-  | 12853.04 | 148.51 |
-  | 12979.04 | 140.21 |
-  | 13105.04 | 131.98 |
-  | 13231.04 | 123.88 |
-  | 13294.04 | 119.85 |
-  | 13358.04 | 115.81 |
-  | 13421.04 | 111.87 |
-  | 13484.04 | 107.95 |
-  | 13547.04 | 104.06 |
-  | 13611.04 | 100.13 |
-  | 13737.04 | 92.49 |
-  | 13800.04 | 88.70 |
   | 13864.04 | 84.94 |
-  | 16577.04 | 0.0 |
-
-- **22 boxes still open** (checkpoint `boxes`), all in f1 ∈ [11151, 13864],
-  widths 8–126. The front is essentially continuous here — bisection keeps
-  finding a new optimal point in nearly every box it splits, so each solve
-  tends to spawn ~1 more box. Full closure of this region looks like many
-  more hours of compute (rough order: 100–200+ total points).
-- **The big f1 ∈ [13864, 16577] gap (width 2713)** — being attacked
-  separately as of 2026-08-27 in its own checkpoint
-  `fedhpc_10min_gap_checkpoint.json`, seeded with just the two bracketing
-  anchors (13864.04/84.94 and 16577.04/0.0) as one box, run with a longer
-  600s `per_solve_time_limit`. Resume it with:
-  ```
-  uv run python pareto_runs/resume_map.py \
-      data/fedhpc_known_runtime_offline_10min.json \
-      pareto_runs/fedhpc_10min_gap_checkpoint.json  3600 600 3
-  ```
-  Points found here must be merged back into the main solution set by hand
-  (or just reported together) — the two checkpoints are independent.
-
-  **First gap session (2026-08-27, 3795s, 15 solves, 0 inconclusive):**
-  the region is NOT hard — the 600s limit was enough, every solve proved
-  optimal. Found 7 new exact interior points:
-
-  | f1 | f2 |
-  |---|---|
   | 14154.04 | 68.39 |
+  | 14308.04 | 60.09 |
   | 14466.04 | 51.84 |
   | 14650.04 | 42.54 |
   | 14843.04 | 33.34 |
+  | 15031.04 | 25.27 |
   | 15220.04 | 18.81 |
-  | 15898.04 | 7.13 |
-  | 16237.04 | 3.01 |
+  | 15559.04 | 12.44 |
+  | 15898.04 |  7.13 |
+  | 16237.04 |  3.01 |
+  | 16577.04 |  0.00 |
 
-  8 boxes still open in the gap (widths 184–678), much sparser than the
-  [11151,13864] region — a few more hours should close it fully.
-  **Combined exact-point count across both checkpoints: 33.**
-- Nearly every solve now hits the 200s `per_solve_time_limit` (the region
-  is genuinely hard), so throughput is ~1 point / 3–4 min.
+- This session: 5145s wall (one solve overran the 600s cap in presolve,
+  pushing past the 3600s budget), 12 solves, +3 pts, **2 inconclusive** —
+  a change from the first gap session (0 inconclusive). The two dropped
+  boxes are `[13864.04, 14154.04]` and `[14466.04, 14650.04]`; per
+  limitation #1 they are gone from the search and will not be revisited on
+  resume. To recover them: reproduce the sub-problem with a longer
+  `per_solve_time_limit` / more seeds (manual).
+- **9 boxes still open** (widths 154–340). Sparser than MAIN — a few more
+  hours should close most of it.
+
+### Merging the two checkpoints
+
+They are independent. To get the combined front, load `solutions` from both
+JSONs and run `_filter_dominated` (they share the two anchors 13864.04/84.94
+and 16577.04/0.0). `scripts/compare_moea_vs_known_front.py` already does this.
 
 ## Known limitations / follow-ups
 
@@ -128,7 +156,7 @@ A 3600s resume run on 2026-08-27 added 17 interior points (63 solves total,
    worse — timed out with zero feasible solutions found). The
    `n_seed_retries` mechanism is the mitigation currently in place.
 
-## Related work this session
+## Related code
 
 - `map_pareto_frontier()` and `true_pareto_frontier()` in
   `src/fedhpc/pareto.py` both gained: `max_solves`/`time_budget` (bounded
@@ -139,3 +167,10 @@ A 3600s resume run on 2026-08-27 added 17 interior points (63 solves total,
   the largest-known-gap first (alternating f1/f2 direction) instead of
   always resolving the immediate neighbour, so it gives broad coverage of
   the whole range quickly instead of exhaustively resolving one end first.
+- `scripts/resume_true_frontier.sh <budget_s>` runs both checkpoints
+  back-to-back with the right per-solve limits.
+- `scripts/compare_moea_vs_known_front.py` scores the NSGA-II/III + MOEA/D
+  heuristics against this combined proven front (loads both checkpoints,
+  `_filter_dominated`). As of 2026-08-28 the EAs get IGD ≈ 0.05–0.10
+  normalised, 0 exact hits, and never dominate a proven point — see the
+  "FED-HPC Evolutionary Solver" artifact / `scripts/ea_improvement_prompt.md`.
