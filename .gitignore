@@ -11,6 +11,3 @@ wheels/
 
 # Documents
 *.pdf
-
-# Long-running Pareto-frontier mapping checkpoints (see pareto_runs/STATUS.md)
-pareto_runs/
