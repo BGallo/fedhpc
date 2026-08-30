@@ -66,7 +66,7 @@ def main():
     }
     print(f"  {'algo':8} {'sr':>3}  {'card':>4} {'exact':>5} {'dom':>4} {'eadom':>5} {'IGD':>9} {'eps+':>9}  {'t(s)':>6}")
     for name, fn in algos.items():
-        for sr in (0, 1):
+        for sr in (0, 1, 2):
             ts = time.time()
             try:
                 front = fn(sr)

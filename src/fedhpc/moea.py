@@ -291,7 +291,11 @@ def nsga2_frontier(
                      subproblem gap coordinate descent can't, especially at the
                      low-cost / high-turnaround corner. Chosen as the default
                      via A/B benchmark (see scripts/ab_sched_repair.py);
-                     ``0`` = pre-change behaviour, byte-for-byte.
+                     ``0`` = pre-change behaviour, byte-for-byte. ``2`` also
+                     lets the decoder spread each job's schedule across every
+                     equal-price type (e.g. multiple free on-prem pools),
+                     which further improves NSGA-II / NSGA-III at the
+                     cost-minimal end but regresses MOEA/D — opt-in only.
     profile        : if True, print a per-phase timing breakdown to stderr.
 
     Returns
@@ -372,7 +376,8 @@ def nsga3_frontier(
                   cost-descent local search on the population; see
                   nsga2_frontier for the convention.
     sched_repair : ``1`` (default) SPT list-scheduling repair on seeds + final
-                  population; ``0`` = pre-change behaviour. See ``nsga2_frontier``.
+                  population; ``0`` = pre-change; ``2`` adds equal-price pool balancing.
+                  See ``nsga2_frontier``.
     profile     : if True, print a per-phase timing breakdown to stderr.
 
     Returns
@@ -457,7 +462,8 @@ def moead_frontier(
                         cost-descent local search on the population; see
                         nsga2_frontier for the convention.
     sched_repair : ``1`` (default) SPT list-scheduling repair on seeds + final
-                        population; ``0`` = pre-change behaviour. See ``nsga2_frontier``.
+                        population; ``0`` = pre-change; ``2`` adds equal-price pool balancing.
+                        See ``nsga2_frontier``.
     profile           : if True, print a per-phase timing breakdown to stderr.
 
     Returns

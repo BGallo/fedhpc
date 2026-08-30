@@ -48,9 +48,9 @@ struct WeightedScalar {
 inline bool weighted_local_search(Individual& ind, const Problem& prob,
                                   EvalWorkspace& ws, const WeightedScalar& G,
                                   int max_moves, int shortlist) {
-    schedule_repair(ind, prob, ws);
+    schedule_repair(ind, prob, ws, /*max_passes=*/2, /*free_pool_balance=*/1);
     local_search(ind, prob, ws);
-    schedule_repair(ind, prob, ws);
+    schedule_repair(ind, prob, ws, /*max_passes=*/2, /*free_pool_balance=*/1);
     evaluate(ind, prob, ws);
     double g = G(ind);
     bool improved = false;
@@ -81,7 +81,7 @@ inline bool weighted_local_search(Individual& ind, const Problem& prob,
         for (int c = 0; c < K; c++) {
             Individual w = ind;
             w.genes[cand[c].j] = cand[c].k;
-            schedule_repair(w, prob, ws);
+            schedule_repair(w, prob, ws, /*max_passes=*/2, /*free_pool_balance=*/1);
             local_search(w, prob, ws);
             evaluate(w, prob, ws);
             const double gw = G(w);

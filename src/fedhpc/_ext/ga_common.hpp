@@ -678,13 +678,14 @@ inline bool local_search(Individual& ind, const Problem& prob, EvalWorkspace& ws
 // as early as capacity allows: a classic capacity-constrained list-scheduling
 // problem the generic operators have no gradient toward.
 //
-// schedule_repair() keeps every gene's *type* and only rewrites its *start*:
-// jobs are processed shortest-processing-time-first (SPT — the classic rule
-// for minimising total completion time on parallel machines) and each is
-// moved to the earliest capacity-feasible slot on its own type. Because
-// job_slots[j] is start-sorted within a type (job_type_span), the first
-// feasible slot found is the earliest one, so f1 is non-increasing per job
-// and capacity violations only ever shrink. Cost never changes.
+// schedule_repair() rewrites each gene's *start* (and, with free_pool_balance,
+// possibly its type — but only to a weakly-dominating one): jobs are processed
+// shortest-processing-time-first (SPT — the classic rule for minimising total
+// completion time on parallel machines) and each is moved to the earliest
+// capacity-feasible slot. Because job_slots[j] is start-sorted within a type
+// (job_type_span), the first feasible slot found is the earliest one, so f1 is
+// non-increasing per job and capacity violations only ever shrink. With the
+// default single-type scan, cost also never changes.
 //
 // This is where local_search() (bounded per-type shortlist, coordinate
 // descent) structurally can't reach: relocating the whole population of jobs
@@ -692,10 +693,23 @@ inline bool local_search(Individual& ind, const Problem& prob, EvalWorkspace& ws
 // coherent sweep — exactly the move the cost-minimal corner of the front
 // needs. Mutates ind.genes in place; does NOT refresh f1/f2/cv (call
 // evaluate() afterwards). Returns true if any gene moved.
+//
+// free_pool_balance != 0: each job's earliest-slot scan spans *every* type
+// that weakly dominates its current one — cost ≤ current AND p_occ ≤ current —
+// not just the current type. On instances where several types share a price
+// (e.g. multiple free on-prem pools) this lets the decoder spread load across
+// all of them instead of queueing every job on the one pool its gene names,
+// which is otherwise the dominant source of avoidable turnaround at the
+// cost-minimal end. Still a weakly-dominating move: cost never rises, p_occ
+// never rises, start never rises. Default 0 keeps the single-type scan.
 inline bool schedule_repair(Individual& ind, const Problem& prob, EvalWorkspace& ws,
-                            int max_passes = 2) {
+                            int max_passes = 2, int free_pool_balance = 0) {
     const int stride = prob.max_slot + 1;
     bool any_improved = false;
+
+    // Per-job candidate type-spans that weakly dominate the current gene
+    // (rebuilt each pass since the current gene can change). Reused scratch.
+    std::vector<std::array<int, 3>> dom_spans;
 
     for (int pass = 0; pass < max_passes; pass++) {
         // Rebuild finite-type occupancy from the individual's current genes.
@@ -742,40 +756,59 @@ inline bool schedule_repair(Individual& ind, const Problem& prob, EvalWorkspace&
                 if (sp[0] == tid) { begin = sp[1]; end = sp[2]; break; }
             if (begin < 0) continue;
 
-            if (cap < 0) {
-                // Unlimited capacity: earliest slot on this type is the block
-                // start (blocks are start-ascending).
-                if (begin != cur_k) {
-                    ind.genes[j] = begin;
-                    pass_improved = true;
+            // Candidate type-spans to scan for j's earliest feasible slot.
+            dom_spans.clear();
+            if (free_pool_balance) {
+                for (const auto& sp : prob.job_type_span[j]) {
+                    const SlotInfo& first = prob.job_slots[j][sp[1]];
+                    if (first.cost <= cur.cost + 1e-9 && first.p_occ <= cur.p_occ)
+                        dom_spans.push_back(sp);
                 }
-                continue;
+            } else {
+                dom_spans.push_back({tid, begin, end});
             }
 
-            const int base = tid * stride;
-            // Drop this job's own contribution so the scan sees "everyone else".
-            for (int t = cur.start; t < cur.start + cur.p_occ; t++)
-                ws.occ[base + t]--;
+            // Drop j's own contribution (finite type only) so the scan sees
+            // "everyone else".
+            if (cap >= 0) {
+                const int base = tid * stride;
+                for (int t = cur.start; t < cur.start + cur.p_occ; t++)
+                    ws.occ[base + t]--;
+            }
 
-            int chosen = cur_k;
-            for (int k = begin; k < end; k++) {
-                const SlotInfo& s = prob.job_slots[j][k];
-                bool fits = true;
-                for (int t = s.start; t < s.start + s.p_occ; t++)
-                    if (ws.occ[base + t] + prob.init_occ_flat[base + t] >= cap) {
-                        fits = false; break;
-                    }
-                if (fits) { chosen = k; break; }
-                if (k == cur_k) break;  // never worth going later than current
+            int chosen = cur_k, chosen_start = cur.start;
+            for (const auto& sp : dom_spans) {
+                const int m = sp[0], b = sp[1], e = sp[2];
+                const int mcap = prob.type_cap[m];
+                if (mcap < 0) {
+                    // Unlimited: earliest slot is the block start.
+                    const int st = prob.job_slots[j][b].start;
+                    if (st < chosen_start) { chosen = b; chosen_start = st; }
+                    continue;
+                }
+                const int mbase = m * stride;
+                for (int k = b; k < e; k++) {
+                    const SlotInfo& s = prob.job_slots[j][k];
+                    if (s.start >= chosen_start) break;   // no earlier slot ahead
+                    bool fits = true;
+                    for (int t = s.start; t < s.start + s.p_occ; t++)
+                        if (ws.occ[mbase + t] + prob.init_occ_flat[mbase + t] >= mcap) {
+                            fits = false; break;
+                        }
+                    if (fits) { chosen = k; chosen_start = s.start; break; }
+                }
             }
 
             if (chosen != cur_k) { ind.genes[j] = chosen; pass_improved = true; }
 
             const SlotInfo& applied = prob.job_slots[j][ind.genes[j]];
-            for (int t = applied.start; t < applied.start + applied.p_occ; t++) {
-                const int idx = base + t;
-                if (ws.occ[idx] == 0) ws.dirty.push_back(idx);
-                ws.occ[idx]++;
+            if (prob.type_cap[applied.type_id] >= 0) {
+                const int abase = applied.type_id * stride;
+                for (int t = applied.start; t < applied.start + applied.p_occ; t++) {
+                    const int idx = abase + t;
+                    if (ws.occ[idx] == 0) ws.dirty.push_back(idx);
+                    ws.occ[idx]++;
+                }
             }
         }
 

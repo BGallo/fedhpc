@@ -936,7 +936,7 @@ class TestSchedRepair:
     arg's pre-change behaviour exactly (the repair code path is skipped)."""
 
     @_SCHED_ALL
-    @pytest.mark.parametrize("sched_repair", [0, 1])
+    @pytest.mark.parametrize("sched_repair", [0, 1, 2])
     def test_valid_and_non_dominated_on_known_instance(self, frontier_fn, kwargs,
                                                        sched_repair, known_pareto_inst):
         inst = known_pareto_inst
@@ -961,7 +961,7 @@ class TestSchedRepair:
         assert unique_front_points(explicit) == unique_front_points(default)
 
     @_SCHED_ALL
-    @pytest.mark.parametrize("sched_repair", [0, 1])
+    @pytest.mark.parametrize("sched_repair", [0, 1, 2])
     def test_same_seed_gives_identical_front(self, frontier_fn, kwargs,
                                              sched_repair, known_pareto_inst):
         r1 = frontier_fn(known_pareto_inst, sched_repair=sched_repair, **kwargs)
@@ -969,7 +969,7 @@ class TestSchedRepair:
         assert unique_front_points(r1) == unique_front_points(r2)
 
     @_SCHED_ALL
-    @pytest.mark.parametrize("sched_repair", [0, 1])
+    @pytest.mark.parametrize("sched_repair", [0, 1, 2])
     def test_no_solution_dominated_by_known_optimal(self, frontier_fn, kwargs,
                                                     sched_repair, known_pareto_inst,
                                                     known_pareto_front):

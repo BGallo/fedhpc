@@ -153,7 +153,7 @@ run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed, int n_threads,
         ws_seed.reset(prob.n_types, prob.max_slot);
         for (auto& s : h_seeds) {
             local_search(s, prob, ws_seed);
-            if (sched_repair) schedule_repair(s, prob, ws_seed);
+            if (sched_repair) schedule_repair(s, prob, ws_seed, 2, sched_repair >= 2 ? 1 : 0);
             evaluate(s, prob, ws_seed);
         }
     }
@@ -338,7 +338,7 @@ run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed, int n_threads,
         ws_polish.reset(prob.n_types, prob.max_slot);
         for (auto& ind : pop) {
             local_search(ind, prob, ws_polish);
-            if (sched_repair) schedule_repair(ind, prob, ws_polish);
+            if (sched_repair) schedule_repair(ind, prob, ws_polish, 2, sched_repair >= 2 ? 1 : 0);
             evaluate(ind, prob, ws_polish);
         }
     }
