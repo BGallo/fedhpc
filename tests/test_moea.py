@@ -1073,3 +1073,62 @@ class TestWeightedSolve:
             known_pareto_inst, pop_size=16, n_gen=20)
         assert f1_T <= f1_0 + 1e-6
         assert f2_T >= -1e-6
+
+
+# ---------------------------------------------------------------------------
+# Ablation bitmask (ablate) — diagnostic knob for scripts/ablation_real.py
+# ---------------------------------------------------------------------------
+
+class TestAblate:
+    """`ablate` toggles components off one bit at a time (see AblateFlag in
+    ga_common.hpp). ablate=0 (default) must reproduce omitting the arg, and
+    every flag combination must still return a valid, deterministic,
+    non-dominated feasible set."""
+
+    # subset of flags meaningful for the population EAs
+    _MO_FLAGS = [0, 1, 2, 4, 8, 16, 32, 1 | 32]
+    # weighted-sum also has the ILS/elitism/shortlist/free-pool bits
+    _WT_FLAGS = [0, 1, 2, 4, 32, 64, 128, 256, 512, 32 | 256]
+
+    @pytest.mark.parametrize("frontier_fn,kwargs", [
+        (nsga2_frontier, {"pop_size": 40, "n_gen": 60, "seed": 42}),
+        (nsga3_frontier, {"pop_size": 40, "n_divisions": 39, "n_gen": 60, "seed": 42}),
+        (moead_frontier, {"n_weights": 40, "n_gen": 60, "seed": 42}),
+    ], ids=["nsga2", "nsga3", "moead"])
+    @pytest.mark.parametrize("ablate", _MO_FLAGS)
+    def test_mo_valid_and_deterministic(self, frontier_fn, kwargs, ablate, known_pareto_inst):
+        inst = known_pareto_inst
+        a = frontier_fn(inst, ablate=ablate, **kwargs)
+        b = frontier_fn(inst, ablate=ablate, **kwargs)
+        assert unique_front_points(a) == unique_front_points(b)
+        assert len(a) > 0
+        assert is_non_dominated_set(a)
+        for s in a:
+            assert s.f2 <= inst.budget + 1e-6
+            assert capacity_violations(inst, s) == []
+            assert recompute_f1(inst, s) == pytest.approx(s.f1, abs=1e-6)
+            assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
+
+    @pytest.mark.parametrize("frontier_fn,kwargs", [
+        (nsga2_frontier, {"pop_size": 40, "n_gen": 60, "seed": 42}),
+        (moead_frontier, {"n_weights": 40, "n_gen": 60, "seed": 42}),
+    ], ids=["nsga2", "moead"])
+    def test_mo_ablate_zero_matches_omitted(self, frontier_fn, kwargs, known_pareto_inst):
+        explicit = frontier_fn(known_pareto_inst, ablate=0, **kwargs)
+        default = frontier_fn(known_pareto_inst, **kwargs)
+        assert unique_front_points(explicit) == unique_front_points(default)
+
+    @pytest.mark.parametrize("ablate", _WT_FLAGS)
+    def test_weighted_valid_and_deterministic(self, ablate, known_pareto_inst):
+        inst = known_pareto_inst
+        a = weighted_solve(inst, 0.5, pop_size=12, n_gen=15, ablate=ablate)
+        b = weighted_solve(inst, 0.5, pop_size=12, n_gen=15, ablate=ablate)
+        assert (a.f1, a.f2) == (b.f1, b.f2)
+        assert capacity_violations(inst, a) == []
+        assert a.f2 <= inst.budget + 1e-6
+        assert recompute_f1(inst, a) == pytest.approx(a.f1, abs=1e-6)
+
+    def test_weighted_ablate_zero_matches_omitted(self, known_pareto_inst):
+        a = weighted_solve(known_pareto_inst, 0.5, pop_size=12, n_gen=15, ablate=0)
+        b = weighted_solve(known_pareto_inst, 0.5, pop_size=12, n_gen=15)
+        assert (a.f1, a.f2) == (b.f1, b.f2)

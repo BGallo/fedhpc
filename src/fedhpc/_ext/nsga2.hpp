@@ -117,11 +117,25 @@ inline const Individual& tournament_k(const std::vector<Individual>& pop, int k,
 inline std::pair<ResultList, Profile>
 run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed, int n_threads,
           double p_mut_start = -1.0, double p_mut_end = -1.0, int crossover_kind = 0,
-          int tourn_k = 2, int local_search_interval = -1, int sched_repair = 0) {
+          int tourn_k = 2, int local_search_interval = -1, int sched_repair = 0,
+          int ablate = 0) {
     py::gil_scoped_release release;
     set_num_threads(n_threads);
 
     const auto t_total = Clock::now();
+
+    const bool abl_ls   = ablate & ABL_NO_LOCAL_SEARCH;
+    const bool abl_sr    = ablate & ABL_NO_SCHED_REPAIR;
+    const bool abl_seeds = ablate & ABL_NO_HEURISTIC_SEEDS;
+    const bool abl_unif  = ablate & ABL_UNIFORM_RANDOM;
+    const bool abl_xover = ablate & ABL_NO_CROSSOVER;
+    const int  sr_fpb    = sched_repair >= 2 ? 1 : 0;
+    auto do_ls = [&](Individual& x, const Problem& p, EvalWorkspace& w, int mp = 3) {
+        if (!abl_ls) local_search(x, p, w, mp);
+    };
+    auto do_sr = [&](Individual& x, const Problem& p, EvalWorkspace& w) {
+        if (sched_repair && !abl_sr) schedule_repair(x, p, w, 2, sr_fpb);
+    };
 
     std::mt19937 rng(seed);
     const auto mut_sched = make_mutation_schedule(p_mut_start, p_mut_end, 2.0 / prob.n_jobs);
@@ -139,7 +153,7 @@ run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed, int n_threads,
     std::vector<uint32_t> init_seeds(pop_size);
     for (auto& s : init_seeds) s = rng();
 
-    auto h_seeds   = make_heuristic_seeds(prob);
+    auto h_seeds   = abl_seeds ? std::vector<Individual>{} : make_heuristic_seeds(prob);
     const int n_hs = static_cast<int>(h_seeds.size());
 
     // Repair the seeds before they enter the population: make_greedy() in
@@ -152,8 +166,8 @@ run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed, int n_threads,
         EvalWorkspace ws_seed;
         ws_seed.reset(prob.n_types, prob.max_slot);
         for (auto& s : h_seeds) {
-            local_search(s, prob, ws_seed);
-            if (sched_repair) schedule_repair(s, prob, ws_seed, 2, sched_repair >= 2 ? 1 : 0);
+            do_ls(s, prob, ws_seed);
+            do_sr(s, prob, ws_seed);
             evaluate(s, prob, ws_seed);
         }
     }
@@ -171,7 +185,7 @@ run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed, int n_threads,
         for (int k = 0; k < pop_size; k++) {
             if (k >= n_hs) {
                 std::mt19937 lrng(init_seeds[k]);
-                pop[k] = make_random(prob, lrng);
+                pop[k] = make_random(prob, lrng, abl_unif);
             }
             evaluate(pop[k], prob, ws);
         }
@@ -183,7 +197,7 @@ run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed, int n_threads,
         for (int k = 0; k < pop_size; k++) {
             if (k >= n_hs) {
                 std::mt19937 lrng(init_seeds[k]);
-                pop[k] = make_random(prob, lrng);
+                pop[k] = make_random(prob, lrng, abl_unif);
             }
             evaluate(pop[k], prob, ws);
         }
@@ -235,7 +249,7 @@ run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed, int n_threads,
                 const Individual& p2 = (tourn_k == 2)
                     ? tournament(pop[ri(lrng)], pop[ri(lrng)])
                     : tournament_k(pop, tourn_k, lrng);
-                offspring[k] = crossover(p1, p2, lrng, crossover_kind);
+                offspring[k] = abl_xover ? p1 : crossover(p1, p2, lrng, crossover_kind);
                 mutate(offspring[k], prob, p_mut_gen, lrng);
                 evaluate(offspring[k], prob, ws);
             }
@@ -253,7 +267,7 @@ run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed, int n_threads,
                 const Individual& p2 = (tourn_k == 2)
                     ? tournament(pop[ri(lrng)], pop[ri(lrng)])
                     : tournament_k(pop, tourn_k, lrng);
-                offspring[k] = crossover(p1, p2, lrng, crossover_kind);
+                offspring[k] = abl_xover ? p1 : crossover(p1, p2, lrng, crossover_kind);
                 mutate(offspring[k], prob, p_mut_gen, lrng);
                 evaluate(offspring[k], prob, ws);
             }
@@ -308,7 +322,7 @@ run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed, int n_threads,
                 ws.reset(prob.n_types, prob.max_slot);
                 #pragma omp for schedule(static)
                 for (int k = 0; k < (int)pop.size(); k++) {
-                    local_search(pop[k], prob, ws, /*max_passes=*/1);
+                    if (!abl_ls) local_search(pop[k], prob, ws, /*max_passes=*/1);
                     evaluate(pop[k], prob, ws);
                 }
             }
@@ -317,7 +331,7 @@ run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed, int n_threads,
                 EvalWorkspace ws;
                 ws.reset(prob.n_types, prob.max_slot);
                 for (auto& ind : pop) {
-                    local_search(ind, prob, ws, 1);
+                    if (!abl_ls) local_search(ind, prob, ws, 1);
                     evaluate(ind, prob, ws);
                 }
             }
@@ -337,8 +351,8 @@ run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed, int n_threads,
         EvalWorkspace ws_polish;
         ws_polish.reset(prob.n_types, prob.max_slot);
         for (auto& ind : pop) {
-            local_search(ind, prob, ws_polish);
-            if (sched_repair) schedule_repair(ind, prob, ws_polish, 2, sched_repair >= 2 ? 1 : 0);
+            do_ls(ind, prob, ws_polish);
+            do_sr(ind, prob, ws_polish);
             evaluate(ind, prob, ws_polish);
         }
     }

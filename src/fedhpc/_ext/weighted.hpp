@@ -47,10 +47,13 @@ struct WeightedScalar {
 // to `max_moves` times. Leaves ind holding a decoded, evaluated solution.
 inline bool weighted_local_search(Individual& ind, const Problem& prob,
                                   EvalWorkspace& ws, const WeightedScalar& G,
-                                  int max_moves, int shortlist) {
-    schedule_repair(ind, prob, ws, /*max_passes=*/2, /*free_pool_balance=*/1);
-    local_search(ind, prob, ws);
-    schedule_repair(ind, prob, ws, /*max_passes=*/2, /*free_pool_balance=*/1);
+                                  int max_moves, int shortlist, int ablate = 0) {
+    const int  fpb    = (ablate & ABL_NO_FREE_POOL) ? 0 : 1;
+    const bool no_ls   = ablate & ABL_NO_LOCAL_SEARCH;
+    const bool no_rank = ablate & ABL_NO_EST_SHORTLIST;
+    schedule_repair(ind, prob, ws, 2, fpb);
+    if (!no_ls) local_search(ind, prob, ws);
+    schedule_repair(ind, prob, ws, 2, fpb);
     evaluate(ind, prob, ws);
     double g = G(ind);
     bool improved = false;
@@ -72,8 +75,9 @@ inline bool weighted_local_search(Individual& ind, const Problem& prob,
         }
         if (cand.empty()) break;
         const int K = std::min<int>((int)cand.size(), shortlist);
-        std::partial_sort(cand.begin(), cand.begin() + K, cand.end(),
-                          [](const Cand& a, const Cand& b) { return a.est < b.est; });
+        if (!no_rank)
+            std::partial_sort(cand.begin(), cand.begin() + K, cand.end(),
+                              [](const Cand& a, const Cand& b) { return a.est < b.est; });
 
         double best_g = g;
         Individual best;
@@ -81,8 +85,8 @@ inline bool weighted_local_search(Individual& ind, const Problem& prob,
         for (int c = 0; c < K; c++) {
             Individual w = ind;
             w.genes[cand[c].j] = cand[c].k;
-            schedule_repair(w, prob, ws, /*max_passes=*/2, /*free_pool_balance=*/1);
-            local_search(w, prob, ws);
+            schedule_repair(w, prob, ws, 2, fpb);
+            if (!no_ls) local_search(w, prob, ws);
             evaluate(w, prob, ws);
             const double gw = G(w);
             if (gw < best_g - 1e-12) { best_g = gw; best = std::move(w); found = true; }
@@ -101,9 +105,15 @@ using WeightedResult = std::tuple<std::vector<std::tuple<int,int>>, double, doub
 inline WeightedResult
 run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
              int pop_size, int n_gen, int seed, int n_threads,
-             int ls_moves, int restart_patience, int shortlist) {
+             int ls_moves, int restart_patience, int shortlist, int ablate = 0) {
     py::gil_scoped_release release;
     set_num_threads(n_threads);
+
+    const bool abl_seeds = ablate & ABL_NO_HEURISTIC_SEEDS;
+    const bool abl_unif  = ablate & ABL_UNIFORM_RANDOM;
+    const bool abl_xover = ablate & ABL_NO_CROSSOVER;
+    const bool abl_kick  = ablate & ABL_NO_ILS_KICK;
+    const bool abl_elit  = ablate & ABL_NO_ELITISM;
 
     std::mt19937 rng(seed);
     WeightedScalar G{w1, w2, f1_cap,
@@ -116,7 +126,7 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
     std::vector<uint32_t> init_seeds(pop_size);
     for (auto& s : init_seeds) s = rng();
 
-    auto h_seeds = make_heuristic_seeds(prob);
+    auto h_seeds = abl_seeds ? std::vector<Individual>{} : make_heuristic_seeds(prob);
     const int n_hs = std::min<int>((int)h_seeds.size(), pop_size);
 
     std::vector<Individual> pop(pop_size);
@@ -131,9 +141,9 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
         for (int k = 0; k < pop_size; k++) {
             if (k >= n_hs) {
                 std::mt19937 lrng(init_seeds[k]);
-                pop[k] = make_random(prob, lrng);
+                pop[k] = make_random(prob, lrng, abl_unif);
             }
-            weighted_local_search(pop[k], prob, ws, G, ls_moves, shortlist);
+            weighted_local_search(pop[k], prob, ws, G, ls_moves, shortlist, ablate);
             local_calls++;
         }
         #pragma omp atomic
@@ -145,9 +155,9 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
         for (int k = 0; k < pop_size; k++) {
             if (k >= n_hs) {
                 std::mt19937 lrng(init_seeds[k]);
-                pop[k] = make_random(prob, lrng);
+                pop[k] = make_random(prob, lrng, abl_unif);
             }
-            weighted_local_search(pop[k], prob, ws, G, ls_moves, shortlist);
+            weighted_local_search(pop[k], prob, ws, G, ls_moves, shortlist, ablate);
             ls_calls++;
         }
     }
@@ -168,7 +178,8 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
     for (int gen = 0; gen < n_gen; gen++) {
         for (auto& s : child_seeds) s = rng();
 
-        offspring[0] = incumbent;   // elitism
+        const int k0 = abl_elit ? 0 : 1;
+        if (!abl_elit) offspring[0] = incumbent;   // elitism
 
 #ifdef _OPENMP
         #pragma omp parallel
@@ -176,16 +187,16 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
             EvalWorkspace ws; ws.reset(prob.n_types, prob.max_slot);
             int local_calls = 0;
             #pragma omp for schedule(dynamic, 1)
-            for (int k = 1; k < pop_size; k++) {
+            for (int k = k0; k < pop_size; k++) {
                 std::mt19937 lrng(child_seeds[k]);
                 std::uniform_int_distribution<int> ri(0, pop_size - 1);
                 auto pick = [&]() {
                     const int a = ri(lrng), b = ri(lrng);
                     return (G(pop[a]) <= G(pop[b])) ? a : b;
                 };
-                Individual c = crossover(pop[pick()], pop[pick()], lrng, 0);
+                Individual c = abl_xover ? pop[pick()] : crossover(pop[pick()], pop[pick()], lrng, 0);
                 mutate(c, prob, p_mut, lrng);
-                weighted_local_search(c, prob, ws, G, gen_moves, shortlist);
+                weighted_local_search(c, prob, ws, G, gen_moves, shortlist, ablate);
                 local_calls++;
                 offspring[k] = std::move(c);
             }
@@ -195,16 +206,16 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
 #else
         {
             EvalWorkspace ws; ws.reset(prob.n_types, prob.max_slot);
-            for (int k = 1; k < pop_size; k++) {
+            for (int k = k0; k < pop_size; k++) {
                 std::mt19937 lrng(child_seeds[k]);
                 std::uniform_int_distribution<int> ri(0, pop_size - 1);
                 auto pick = [&]() {
                     const int a = ri(lrng), b = ri(lrng);
                     return (G(pop[a]) <= G(pop[b])) ? a : b;
                 };
-                Individual c = crossover(pop[pick()], pop[pick()], lrng, 0);
+                Individual c = abl_xover ? pop[pick()] : crossover(pop[pick()], pop[pick()], lrng, 0);
                 mutate(c, prob, p_mut, lrng);
-                weighted_local_search(c, prob, ws, G, gen_moves, shortlist);
+                weighted_local_search(c, prob, ws, G, gen_moves, shortlist, ablate);
                 ls_calls++;
                 offspring[k] = std::move(c);
             }
@@ -221,7 +232,7 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
         stagnation = advanced ? 0 : stagnation + 1;
 
         // ── ILS kick on stagnation ──────────────────────────────────────────
-        if (restart_patience > 0 && stagnation >= restart_patience) {
+        if (!abl_kick && restart_patience > 0 && stagnation >= restart_patience) {
             EvalWorkspace ws; ws.reset(prob.n_types, prob.max_slot);
             Individual kick = incumbent;
             const int nflips = std::max(3, prob.n_jobs / 40);
@@ -230,7 +241,7 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
                 const auto& span = prob.job_type_span[j];
                 kick.genes[j] = span[rng() % span.size()][1];
             }
-            weighted_local_search(kick, prob, ws, G, ls_moves, shortlist);
+            weighted_local_search(kick, prob, ws, G, ls_moves, shortlist, ablate);
             ls_calls++;
             pop[pop_size - 1] = kick;
             const double g = G(kick);
@@ -242,7 +253,7 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
     // Final intensive polish on the incumbent.
     {
         EvalWorkspace ws; ws.reset(prob.n_types, prob.max_slot);
-        weighted_local_search(incumbent, prob, ws, G, ls_moves * 3, shortlist);
+        weighted_local_search(incumbent, prob, ws, G, ls_moves * 3, shortlist, ablate);
         ls_calls++;
         evaluate(incumbent, prob, ws);
     }

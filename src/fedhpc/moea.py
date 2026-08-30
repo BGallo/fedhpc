@@ -254,6 +254,7 @@ def nsga2_frontier(
     tourn_k: int = 2,
     local_search_interval: int = -1,
     sched_repair: int = 1,
+    ablate: int = 0,
     profile: bool = False,
 ) -> list[Solution]:
     """Approximate the Pareto frontier via NSGA-II.
@@ -296,6 +297,9 @@ def nsga2_frontier(
                      equal-price type (e.g. multiple free on-prem pools),
                      which further improves NSGA-II / NSGA-III at the
                      cost-minimal end but regresses MOEA/D — opt-in only.
+    ablate         : diagnostic bitmask (AblateFlag in ga_common.hpp) that
+                     removes one component at a time for the ablation study
+                     (scripts/ablation_real.py). 0 (default) = full algorithm.
     profile        : if True, print a per-phase timing breakdown to stderr.
 
     Returns
@@ -321,6 +325,7 @@ def nsga2_frontier(
         tourn_k        = tourn_k,
         local_search_interval = local_search_interval,
         sched_repair    = sched_repair,
+        ablate          = ablate,
     )
     if profile:
         _print_profile(prof, algorithm="nsga2",
@@ -342,6 +347,7 @@ def nsga3_frontier(
     tourn_k: int = 2,
     local_search_interval: int = -1,
     sched_repair: int = 1,
+    ablate: int = 0,
     profile: bool = False,
 ) -> list[Solution]:
     """Approximate the Pareto frontier via NSGA-III (Deb & Jain 2014).
@@ -378,6 +384,7 @@ def nsga3_frontier(
     sched_repair : ``1`` (default) SPT list-scheduling repair on seeds + final
                   population; ``0`` = pre-change; ``2`` adds equal-price pool balancing.
                   See ``nsga2_frontier``.
+    ablate      : diagnostic component-removal bitmask; 0 (default) = full run.
     profile     : if True, print a per-phase timing breakdown to stderr.
 
     Returns
@@ -404,6 +411,7 @@ def nsga3_frontier(
         tourn_k        = tourn_k,
         local_search_interval = local_search_interval,
         sched_repair    = sched_repair,
+        ablate          = ablate,
     )
     if profile:
         _print_profile(prof, algorithm="nsga3",
@@ -426,6 +434,7 @@ def moead_frontier(
     archive_size: int = 20,
     local_search_interval: int = -1,
     sched_repair: int = 1,
+    ablate: int = 0,
     profile: bool = False,
 ) -> list[Solution]:
     """Approximate the Pareto frontier via MOEA/D (Tchebycheff decomposition).
@@ -464,6 +473,7 @@ def moead_frontier(
     sched_repair : ``1`` (default) SPT list-scheduling repair on seeds + final
                         population; ``0`` = pre-change; ``2`` adds equal-price pool balancing.
                         See ``nsga2_frontier``.
+    ablate            : diagnostic component-removal bitmask; 0 (default) = full run.
     profile           : if True, print a per-phase timing breakdown to stderr.
 
     Returns
@@ -491,6 +501,7 @@ def moead_frontier(
         archive_size      = archive_size,
         local_search_interval = local_search_interval,
         sched_repair    = sched_repair,
+        ablate          = ablate,
     )
     if profile:
         _print_profile(prof, algorithm="moead",
@@ -501,7 +512,7 @@ def moead_frontier(
 def _weighted_raw(
     inst: Instance, w1: float, w2: float, f1_cap: float, *,
     pop_size: int, n_gen: int, seed: int, n_threads: int,
-    ls_moves: int, restart_patience: int, shortlist: int,
+    ls_moves: int, restart_patience: int, shortlist: int, ablate: int = 0,
 ) -> tuple[list[tuple[int, int]], float, float, float, int]:
     _require_ext()
     return _ext.weighted(
@@ -521,6 +532,7 @@ def _weighted_raw(
         ls_moves        = ls_moves,
         restart_patience= restart_patience,
         shortlist       = shortlist,
+        ablate          = ablate,
     )
 
 
@@ -564,6 +576,7 @@ def weighted_solve(
     ls_moves: int = 6,
     restart_patience: int = 6,
     shortlist: int = 24,
+    ablate: int = 0,
 ) -> Solution:
     """Heuristically minimise ``lam·f̂1 + (1−lam)·f̂2`` (the single-objective
     weighted-sum scalarisation), returning one feasible ``Solution``.
@@ -617,7 +630,7 @@ def weighted_solve(
     asgn, f1, f2, _g, _ls = _weighted_raw(
         inst, w1, w2, f1_cap, pop_size=pop_size, n_gen=n_gen, seed=seed,
         n_threads=n_threads, ls_moves=ls_moves, restart_patience=restart_patience,
-        shortlist=shortlist,
+        shortlist=shortlist, ablate=ablate,
     )
     return _to_solutions(inst, [(asgn, f1, f2)])[0]
 

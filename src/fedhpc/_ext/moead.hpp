@@ -73,9 +73,23 @@ inline std::pair<ResultList, Profile>
 run_moead(const Problem& prob, int n_weights, int n_gen,
           int T_size, int seed, int n_threads, int max_replace = -1,
           double p_mut_start = -1.0, double p_mut_end = -1.0, int crossover_kind = 0,
-          int archive_size = 0, int local_search_interval = -1, int sched_repair = 0) {
+          int archive_size = 0, int local_search_interval = -1, int sched_repair = 0,
+          int ablate = 0) {
     py::gil_scoped_release release;
     set_num_threads(n_threads);
+
+    const bool abl_ls    = ablate & ABL_NO_LOCAL_SEARCH;
+    const bool abl_sr     = ablate & ABL_NO_SCHED_REPAIR;
+    const bool abl_seeds  = ablate & ABL_NO_HEURISTIC_SEEDS;
+    const bool abl_unif   = ablate & ABL_UNIFORM_RANDOM;
+    const bool abl_xover  = ablate & ABL_NO_CROSSOVER;
+    const int  sr_fpb     = sched_repair >= 2 ? 1 : 0;
+    auto do_ls = [&](Individual& x, const Problem& pp, EvalWorkspace& w, int mp = 3) {
+        if (!abl_ls) local_search(x, pp, w, mp);
+    };
+    auto do_sr = [&](Individual& x, const Problem& pp, EvalWorkspace& w) {
+        if (sched_repair && !abl_sr) schedule_repair(x, pp, w, 2, sr_fpb);
+    };
 
     const auto t_total = Clock::now();
 
@@ -117,7 +131,7 @@ run_moead(const Problem& prob, int n_weights, int n_gen,
     std::vector<uint32_t> init_seeds(n_weights);
     for (auto& s : init_seeds) s = rng();
 
-    auto h_seeds   = make_heuristic_seeds(prob);
+    auto h_seeds   = abl_seeds ? std::vector<Individual>{} : make_heuristic_seeds(prob);
     const int n_hs = static_cast<int>(h_seeds.size());
 
     // See nsga2.hpp for why the seeds need repairing before entering the
@@ -127,8 +141,8 @@ run_moead(const Problem& prob, int n_weights, int n_gen,
         EvalWorkspace ws_seed;
         ws_seed.reset(prob.n_types, prob.max_slot);
         for (auto& s : h_seeds) {
-            local_search(s, prob, ws_seed);
-            if (sched_repair) schedule_repair(s, prob, ws_seed, 2, sched_repair >= 2 ? 1 : 0);
+            do_ls(s, prob, ws_seed);
+            do_sr(s, prob, ws_seed);
             evaluate(s, prob, ws_seed);
         }
     }
@@ -151,7 +165,7 @@ run_moead(const Problem& prob, int n_weights, int n_gen,
         for (int i = 0; i < n_weights; i++) {
             if (i >= n_hs) {
                 std::mt19937 lrng(init_seeds[i]);
-                pop[i] = make_random(prob, lrng);
+                pop[i] = make_random(prob, lrng, abl_unif);
             }
             evaluate(pop[i], prob, ws);
             if (pop[i].cv == 0.0) {
@@ -169,7 +183,7 @@ run_moead(const Problem& prob, int n_weights, int n_gen,
         for (int i = 0; i < n_weights; i++) {
             if (i >= n_hs) {
                 std::mt19937 lrng(init_seeds[i]);
-                pop[i] = make_random(prob, lrng);
+                pop[i] = make_random(prob, lrng, abl_unif);
             }
             evaluate(pop[i], prob, ws);
             if (pop[i].cv == 0.0) {
@@ -230,7 +244,7 @@ run_moead(const Problem& prob, int n_weights, int n_gen,
                 std::uniform_int_distribution<int> rn(0, T - 1);
                 const int a = neigh[i][rn(lrng)];
                 const int b = neigh[i][rn(lrng)];
-                children[i] = crossover(pop[a], pop[b], lrng, crossover_kind);
+                children[i] = abl_xover ? pop[a] : crossover(pop[a], pop[b], lrng, crossover_kind);
                 mutate(children[i], prob, p_mut_gen, lrng);
                 evaluate(children[i], prob, ws);
                 if (children[i].cv == 0.0) {
@@ -250,7 +264,7 @@ run_moead(const Problem& prob, int n_weights, int n_gen,
                 std::uniform_int_distribution<int> rn(0, T - 1);
                 const int a = neigh[i][rn(lrng)];
                 const int b = neigh[i][rn(lrng)];
-                children[i] = crossover(pop[a], pop[b], lrng, crossover_kind);
+                children[i] = abl_xover ? pop[a] : crossover(pop[a], pop[b], lrng, crossover_kind);
                 mutate(children[i], prob, p_mut_gen, lrng);
                 evaluate(children[i], prob, ws);
                 if (children[i].cv == 0.0) {
@@ -315,7 +329,7 @@ run_moead(const Problem& prob, int n_weights, int n_gen,
                 ws.reset(prob.n_types, prob.max_slot);
                 #pragma omp for schedule(static)
                 for (int i = 0; i < n_weights; i++) {
-                    local_search(pop[i], prob, ws, /*max_passes=*/1);
+                    if (!abl_ls) local_search(pop[i], prob, ws, /*max_passes=*/1);
                     evaluate(pop[i], prob, ws);
                 }
             }
@@ -324,7 +338,7 @@ run_moead(const Problem& prob, int n_weights, int n_gen,
                 EvalWorkspace ws;
                 ws.reset(prob.n_types, prob.max_slot);
                 for (auto& ind : pop) {
-                    local_search(ind, prob, ws, 1);
+                    if (!abl_ls) local_search(ind, prob, ws, 1);
                     evaluate(ind, prob, ws);
                 }
             }
@@ -343,13 +357,13 @@ run_moead(const Problem& prob, int n_weights, int n_gen,
         EvalWorkspace ws_polish;
         ws_polish.reset(prob.n_types, prob.max_slot);
         for (auto& ind : pop) {
-            local_search(ind, prob, ws_polish);
-            if (sched_repair) schedule_repair(ind, prob, ws_polish, 2, sched_repair >= 2 ? 1 : 0);
+            do_ls(ind, prob, ws_polish);
+            do_sr(ind, prob, ws_polish);
             evaluate(ind, prob, ws_polish);
         }
         for (auto& ind : archive) {
-            local_search(ind, prob, ws_polish);
-            if (sched_repair) schedule_repair(ind, prob, ws_polish, 2, sched_repair >= 2 ? 1 : 0);
+            do_ls(ind, prob, ws_polish);
+            do_sr(ind, prob, ws_polish);
             evaluate(ind, prob, ws_polish);
         }
     }

@@ -57,6 +57,25 @@ inline double ms_since(TimePoint t0) noexcept {
     return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
 }
 
+// ── Ablation flags ───────────────────────────────────────────────────────────
+//
+// Bitmask passed to run_nsga2/3, run_moead and run_weighted for the ablation
+// study (scripts/ablation_real.py). Default 0 = the full algorithm; each bit
+// removes one component so its contribution can be measured in isolation.
+// Not part of any tuned default — purely diagnostic, like `profile`.
+enum AblateFlag {
+    ABL_NO_HEURISTIC_SEEDS = 1 << 0,  // random-init only (skip make_heuristic_seeds)
+    ABL_UNIFORM_RANDOM     = 1 << 1,  // make_random uniform, not cost/risk-weighted
+    ABL_NO_LOCAL_SEARCH    = 1 << 2,  // skip local_search() everywhere
+    ABL_NO_SCHED_REPAIR    = 1 << 3,  // skip schedule_repair() (overrides sched_repair)
+    ABL_NO_CANDIDATE_GEOM  = 1 << 4,  // job_candidates: earliest-K only, no geometric reach
+    ABL_NO_CROSSOVER       = 1 << 5,  // offspring from one parent (mutation only)
+    ABL_NO_ILS_KICK        = 1 << 6,  // weighted: no perturbation restart on stagnation
+    ABL_NO_ELITISM         = 1 << 7,  // weighted: do not carry the incumbent forward
+    ABL_NO_EST_SHORTLIST   = 1 << 8,  // weighted_local_search: unranked candidate scan
+    ABL_NO_FREE_POOL       = 1 << 9,  // weighted: schedule_repair without free_pool_balance
+};
+
 // ── Threading ─────────────────────────────────────────────────────────────────
 
 static inline void set_num_threads(int n) {
@@ -225,10 +244,16 @@ inline void compute_slot_weights(const std::vector<SlotInfo>& slots,
 // cost/risk-biased distribution (see compute_slot_weights) instead of
 // uniformly, so random-initialized individuals start out already leaning
 // toward cheaper, lower-revocation-risk assignments.
-inline Individual make_random(const Problem& prob, std::mt19937& rng) {
+inline Individual make_random(const Problem& prob, std::mt19937& rng,
+                              bool uniform = false) {
     Individual ind;
     ind.genes.resize(prob.n_jobs);
     for (int j = 0; j < prob.n_jobs; j++) {
+        const int n = static_cast<int>(prob.job_slots[j].size());
+        if (uniform) {
+            ind.genes[j] = std::uniform_int_distribution<int>(0, n - 1)(rng);
+            continue;
+        }
         const auto& cum = prob.slot_cum_weight[j];
         std::uniform_real_distribution<double> u(0.0, cum.back());
         const double r = u(rng);
@@ -894,7 +919,8 @@ inline Problem build_problem(
     const std::vector<std::vector<std::tuple<int,int,int,double,double>>>& raw_slots,
     const std::vector<int>& type_cap,
     const std::vector<double>& type_risk,
-    const std::vector<std::tuple<int,int,int>>& raw_init_occ
+    const std::vector<std::tuple<int,int,int>>& raw_init_occ,
+    int ablate = 0
 ) {
     Problem prob;
     prob.n_jobs    = n_jobs;
@@ -961,9 +987,11 @@ inline Problem build_problem(
             // extra candidates) plus the very last slot as a guaranteed
             // last-resort, so local_search can reach across the whole
             // horizon without scanning it.
-            for (int pos = PER_TYPE_K * 2; pos < n; pos *= 2)
-                cand.push_back(idxs[pos]);
-            if (n > n_keep) cand.push_back(idxs[n - 1]);
+            if (!(ablate & ABL_NO_CANDIDATE_GEOM)) {
+                for (int pos = PER_TYPE_K * 2; pos < n; pos *= 2)
+                    cand.push_back(idxs[pos]);
+                if (n > n_keep) cand.push_back(idxs[n - 1]);
+            }
         }
     }
     prob.max_slot = max_slot;
