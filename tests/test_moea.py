@@ -912,3 +912,164 @@ class TestMoeadArchiveSize:
         for s in sols:
             assert s.f2 <= inst.budget + 1e-6
             assert capacity_violations(inst, s) == []
+
+
+# ---------------------------------------------------------------------------
+# Earliest-feasible list-scheduling repair (sched_repair)
+# ---------------------------------------------------------------------------
+
+_SCHED_ALL = pytest.mark.parametrize(
+    "frontier_fn,kwargs",
+    [
+        (nsga2_frontier, {"pop_size": 50, "n_gen": 100, "seed": 42}),
+        (nsga3_frontier, {"pop_size": 50, "n_divisions": 49, "n_gen": 100, "seed": 42}),
+        (moead_frontier, {"n_weights": 50, "n_gen": 100, "seed": 42}),
+    ],
+    ids=["nsga2", "nsga3", "moead"],
+)
+
+
+class TestSchedRepair:
+    """Correctness invariants must hold with the list-scheduling repair on or
+    off. sched_repair=1 (default) applies schedule_repair() to the heuristic
+    seeds and the final population; sched_repair=0 must reproduce omitting the
+    arg's pre-change behaviour exactly (the repair code path is skipped)."""
+
+    @_SCHED_ALL
+    @pytest.mark.parametrize("sched_repair", [0, 1])
+    def test_valid_and_non_dominated_on_known_instance(self, frontier_fn, kwargs,
+                                                       sched_repair, known_pareto_inst):
+        inst = known_pareto_inst
+        sols = frontier_fn(inst, sched_repair=sched_repair, **kwargs)
+        assert len(sols) > 0
+        assert is_non_dominated_set(sols)
+        for s in sols:
+            assert set(s.assignment.keys()) == {j.id for j in inst.jobs}
+            assert s.f2 <= inst.budget + 1e-6
+            assert capacity_violations(inst, s) == []
+            assert recompute_f1(inst, s) == pytest.approx(s.f1, abs=1e-6)
+            assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
+
+    @_SCHED_ALL
+    def test_default_matches_explicit_sched_repair_1(self, frontier_fn, kwargs,
+                                                     known_pareto_inst):
+        """The frontier defaults (sched_repair=1) must be bit-for-bit identical
+        to passing sched_repair=1 explicitly — promoted to default via A/B
+        benchmark; 0 (disabled) remains available explicitly."""
+        explicit = frontier_fn(known_pareto_inst, sched_repair=1, **kwargs)
+        default = frontier_fn(known_pareto_inst, **kwargs)
+        assert unique_front_points(explicit) == unique_front_points(default)
+
+    @_SCHED_ALL
+    @pytest.mark.parametrize("sched_repair", [0, 1])
+    def test_same_seed_gives_identical_front(self, frontier_fn, kwargs,
+                                             sched_repair, known_pareto_inst):
+        r1 = frontier_fn(known_pareto_inst, sched_repair=sched_repair, **kwargs)
+        r2 = frontier_fn(known_pareto_inst, sched_repair=sched_repair, **kwargs)
+        assert unique_front_points(r1) == unique_front_points(r2)
+
+    @_SCHED_ALL
+    @pytest.mark.parametrize("sched_repair", [0, 1])
+    def test_no_solution_dominated_by_known_optimal(self, frontier_fn, kwargs,
+                                                    sched_repair, known_pareto_inst,
+                                                    known_pareto_front):
+        sols = frontier_fn(known_pareto_inst, sched_repair=sched_repair, **kwargs)
+        for s in sols:
+            for (kf1, kf2) in known_pareto_front:
+                dominated = kf1 <= s.f1 and kf2 <= s.f2 and (kf1 < s.f1 or kf2 < s.f2)
+                assert not dominated, (
+                    f"sched_repair={sched_repair}: solution ({s.f1},{s.f2}) "
+                    f"dominated by known point ({kf1},{kf2})"
+                )
+
+    def test_valid_on_small_json(self):
+        inst = Instance.from_file("data/small.json")
+        for fn, kw in [
+            (nsga2_frontier, {"pop_size": 100, "n_gen": 200, "seed": 42}),
+            (nsga3_frontier, {"pop_size": 100, "n_divisions": 99, "n_gen": 200, "seed": 42}),
+            (moead_frontier, {"n_weights": 100, "n_gen": 200, "seed": 42}),
+        ]:
+            sols = fn(inst, sched_repair=1, **kw)
+            assert len(sols) > 0
+            assert is_non_dominated_set(sols)
+            for s in sols:
+                assert s.f2 <= inst.budget + 1e-6
+                assert capacity_violations(inst, s) == []
+
+
+# ---------------------------------------------------------------------------
+# Single-objective weighted-sum metaheuristic (weighted_solve)
+# ---------------------------------------------------------------------------
+
+from fedhpc.moea import heuristic_weighted_reference_points, weighted_solve  # noqa: E402
+from fedhpc.model import solve_weighted_sum  # noqa: E402
+from fedhpc.pareto import _reference_points  # noqa: E402
+
+
+class TestWeightedSolve:
+    """The memetic weighted-sum solver must return one feasible Solution whose
+    scalarised objective is no worse (up to a small heuristic slack) than the
+    exact MIP optimum on the small instances, and must be deterministic."""
+
+    _LAMS = [0.0, 0.25, 0.5, 0.75, 1.0]
+
+    @pytest.mark.parametrize("lam", _LAMS)
+    def test_valid_feasible_solution(self, lam, known_pareto_inst):
+        inst = known_pareto_inst
+        s = weighted_solve(inst, lam, pop_size=12, n_gen=15)
+        assert s.status == "heuristic"
+        assert set(s.assignment.keys()) == {j.id for j in inst.jobs}
+        assert s.f2 <= inst.budget + 1e-6
+        assert capacity_violations(inst, s) == []
+        assert recompute_f1(inst, s) == pytest.approx(s.f1, abs=1e-6)
+        assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
+
+    @pytest.mark.parametrize("lam", _LAMS)
+    def test_same_seed_deterministic(self, lam, known_pareto_inst):
+        a = weighted_solve(known_pareto_inst, lam, pop_size=12, n_gen=15, seed=7)
+        b = weighted_solve(known_pareto_inst, lam, pop_size=12, n_gen=15, seed=7)
+        assert (a.f1, a.f2) == (b.f1, b.f2)
+        assert a.assignment == b.assignment
+
+    def test_lam_extremes_recover_single_objective_optima(self, known_pareto_inst):
+        inst = known_pareto_inst
+        turn = weighted_solve(inst, 1.0, pop_size=16, n_gen=25)
+        cost = weighted_solve(inst, 0.0, pop_size=16, n_gen=25)
+        # known_pareto_inst: min turnaround = 10, min cost = 0
+        assert turn.f1 == pytest.approx(10.0, abs=1e-6)
+        assert cost.f2 == pytest.approx(0.0, abs=1e-6)
+
+    @pytest.mark.parametrize("path", ["data/small.json", "data/large.json"])
+    @pytest.mark.parametrize("lam", [0.25, 0.5, 0.75])
+    def test_matches_exact_mip_scalar_on_bundled_instances(self, path, lam):
+        inst = Instance.from_file(path)
+        f1_T, f2_T, f1_0 = _reference_points(inst, OutputFlag=0)
+        ex = solve_weighted_sum(inst, lam, f1_T=f1_T, f2_T=f2_T, f1_0=f1_0, OutputFlag=0)
+        he = weighted_solve(inst, lam, f1_T=f1_T, f2_T=f2_T, f1_0=f1_0)
+
+        assert capacity_violations(inst, he) == []
+        assert he.f2 <= inst.budget + 1e-6
+
+        if f1_0 > f1_T + 1e-8 and f2_T > 1e-8:
+            def g(s):
+                return lam / (f1_0 - f1_T) * s.f1 + (1 - lam) / f2_T * s.f2
+        else:
+            def g(s):
+                return s.f2
+        # heuristic must be within 3% of the exact scalar optimum
+        assert g(he) <= g(ex) * 1.03 + 1e-6
+
+    def test_no_solution_dominated_by_known_optimal(self, known_pareto_inst, known_pareto_front):
+        for lam in (0.0, 0.3, 0.6, 1.0):
+            s = weighted_solve(known_pareto_inst, lam, pop_size=16, n_gen=20)
+            for (kf1, kf2) in known_pareto_front:
+                dominated = kf1 <= s.f1 and kf2 <= s.f2 and (kf1 < s.f1 or kf2 < s.f2)
+                assert not dominated, (
+                    f"lam={lam}: ({s.f1},{s.f2}) dominated by known ({kf1},{kf2})"
+                )
+
+    def test_heuristic_reference_points_bracket_the_front(self, known_pareto_inst):
+        f1_T, f2_T, f1_0 = heuristic_weighted_reference_points(
+            known_pareto_inst, pop_size=16, n_gen=20)
+        assert f1_T <= f1_0 + 1e-6
+        assert f2_T >= -1e-6

@@ -27,6 +27,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -105,6 +106,14 @@ struct Problem {
     // nearby times, never a fallback type — so it's built per-type instead,
     // capped at PER_TYPE_K slots each, to keep every feasible type reachable
     // for congestion-relief moves while staying cheap enough to scan.
+
+    std::vector<std::vector<std::array<int, 3>>> job_type_span;
+    // [j] = list of {type_id, begin, end} — one entry per contiguous block of
+    // job_slots[j] that shares a type_id. job_slots[j] is built type-by-type
+    // (see moea._job_slots), each block ascending in start time, so a block is
+    // exactly the feasible (start-sorted) slot range for one (job, type) pair.
+    // Used by schedule_repair() to walk a job's slots on a single type in
+    // earliest-start order without rescanning / re-grouping.
 };
 
 // Per-thread occupancy workspace — no heap allocation inside evaluate().
@@ -661,6 +670,121 @@ inline bool local_search(Individual& ind, const Problem& prob, EvalWorkspace& ws
     return any_improved;
 }
 
+// ── Earliest-feasible list-scheduling repair ─────────────────────────────────
+//
+// Problem-specific decoder. Cost (f2) depends *only* on which type each job
+// runs on — it is completely independent of the start time. So for any fixed
+// type assignment, f1 (total turnaround) is minimised by scheduling every job
+// as early as capacity allows: a classic capacity-constrained list-scheduling
+// problem the generic operators have no gradient toward.
+//
+// schedule_repair() keeps every gene's *type* and only rewrites its *start*:
+// jobs are processed shortest-processing-time-first (SPT — the classic rule
+// for minimising total completion time on parallel machines) and each is
+// moved to the earliest capacity-feasible slot on its own type. Because
+// job_slots[j] is start-sorted within a type (job_type_span), the first
+// feasible slot found is the earliest one, so f1 is non-increasing per job
+// and capacity violations only ever shrink. Cost never changes.
+//
+// This is where local_search() (bounded per-type shortlist, coordinate
+// descent) structurally can't reach: relocating the whole population of jobs
+// congesting a cheap type's early window out across the horizon in one
+// coherent sweep — exactly the move the cost-minimal corner of the front
+// needs. Mutates ind.genes in place; does NOT refresh f1/f2/cv (call
+// evaluate() afterwards). Returns true if any gene moved.
+inline bool schedule_repair(Individual& ind, const Problem& prob, EvalWorkspace& ws,
+                            int max_passes = 2) {
+    const int stride = prob.max_slot + 1;
+    bool any_improved = false;
+
+    for (int pass = 0; pass < max_passes; pass++) {
+        // Rebuild finite-type occupancy from the individual's current genes.
+        for (int idx : ws.dirty) ws.occ[idx] = 0;
+        ws.dirty.clear();
+        for (int j = 0; j < prob.n_jobs; j++) {
+            const SlotInfo& s = prob.job_slots[j][ind.genes[j]];
+            if (prob.type_cap[s.type_id] < 0) continue;
+            const int base = s.type_id * stride;
+            for (int t = s.start; t < s.start + s.p_occ; t++) {
+                const int idx = base + t;
+                if (ws.occ[idx] == 0) ws.dirty.push_back(idx);
+                ws.occ[idx]++;
+            }
+        }
+
+        // Shortest-processing-time-first (SPT). Placing jobs in ascending
+        // p_occ order and giving each the earliest feasible slot is the
+        // classic list-scheduling rule that minimises total completion time
+        // (hence f1 = total turnaround) on parallel identical machines — an
+        // A/B on the 10min instance confirmed SPT beats both current-start
+        // order and release-date order at the cost-minimal corner (f1 gap to
+        // the proven optimum roughly halved). Ties broken by current start.
+        std::vector<int> order(prob.n_jobs);
+        std::iota(order.begin(), order.end(), 0);
+        std::sort(order.begin(), order.end(), [&](int a, int b) {
+            const SlotInfo& sa = prob.job_slots[a][ind.genes[a]];
+            const SlotInfo& sb = prob.job_slots[b][ind.genes[b]];
+            if (sa.p_occ != sb.p_occ) return sa.p_occ < sb.p_occ;
+            return sa.start < sb.start;
+        });
+
+        bool pass_improved = false;
+
+        for (int j : order) {
+            const int cur_k = ind.genes[j];
+            const SlotInfo& cur = prob.job_slots[j][cur_k];
+            const int tid = cur.type_id;
+            const int cap = prob.type_cap[tid];
+
+            // Locate this job's slot block for its current type.
+            int begin = -1, end = -1;
+            for (const auto& sp : prob.job_type_span[j])
+                if (sp[0] == tid) { begin = sp[1]; end = sp[2]; break; }
+            if (begin < 0) continue;
+
+            if (cap < 0) {
+                // Unlimited capacity: earliest slot on this type is the block
+                // start (blocks are start-ascending).
+                if (begin != cur_k) {
+                    ind.genes[j] = begin;
+                    pass_improved = true;
+                }
+                continue;
+            }
+
+            const int base = tid * stride;
+            // Drop this job's own contribution so the scan sees "everyone else".
+            for (int t = cur.start; t < cur.start + cur.p_occ; t++)
+                ws.occ[base + t]--;
+
+            int chosen = cur_k;
+            for (int k = begin; k < end; k++) {
+                const SlotInfo& s = prob.job_slots[j][k];
+                bool fits = true;
+                for (int t = s.start; t < s.start + s.p_occ; t++)
+                    if (ws.occ[base + t] + prob.init_occ_flat[base + t] >= cap) {
+                        fits = false; break;
+                    }
+                if (fits) { chosen = k; break; }
+                if (k == cur_k) break;  // never worth going later than current
+            }
+
+            if (chosen != cur_k) { ind.genes[j] = chosen; pass_improved = true; }
+
+            const SlotInfo& applied = prob.job_slots[j][ind.genes[j]];
+            for (int t = applied.start; t < applied.start + applied.p_occ; t++) {
+                const int idx = base + t;
+                if (ws.occ[idx] == 0) ws.dirty.push_back(idx);
+                ws.occ[idx]++;
+            }
+        }
+
+        any_improved = any_improved || pass_improved;
+        if (!pass_improved) break;
+    }
+    return any_improved;
+}
+
 // ── Mutation-rate annealing ───────────────────────────────────────────────────
 //
 // p_mut_start < 0  ⇒ resolve to the caller's formula default (e.g. 2/n_jobs).
@@ -749,6 +873,7 @@ inline Problem build_problem(
     prob.job_slots.resize(n_jobs);
     prob.slot_cum_weight.resize(n_jobs);
     prob.job_candidates.resize(n_jobs);
+    prob.job_type_span.resize(n_jobs);
     constexpr int PER_TYPE_K = 4;
     int max_slot = 0;
     for (int j = 0; j < n_jobs; j++) {
@@ -758,6 +883,19 @@ inline Problem build_problem(
             max_slot = std::max(max_slot, start + pocc);
         }
         compute_slot_weights(prob.job_slots[j], prob.type_risk, prob.slot_cum_weight[j]);
+
+        // Contiguous same-type blocks of job_slots[j] (see job_type_span doc).
+        {
+            const auto& sl = prob.job_slots[j];
+            int b = 0;
+            const int m = static_cast<int>(sl.size());
+            while (b < m) {
+                int e = b + 1;
+                while (e < m && sl[e].type_id == sl[b].type_id) e++;
+                prob.job_type_span[j].push_back({sl[b].type_id, b, e});
+                b = e;
+            }
+        }
 
         // Build the per-type candidate shortlist for local_search(): group
         // this job's slot indices by type, sort each group by (f1_contrib,

@@ -73,7 +73,7 @@ inline std::pair<ResultList, Profile>
 run_moead(const Problem& prob, int n_weights, int n_gen,
           int T_size, int seed, int n_threads, int max_replace = -1,
           double p_mut_start = -1.0, double p_mut_end = -1.0, int crossover_kind = 0,
-          int archive_size = 0, int local_search_interval = -1) {
+          int archive_size = 0, int local_search_interval = -1, int sched_repair = 0) {
     py::gil_scoped_release release;
     set_num_threads(n_threads);
 
@@ -128,6 +128,7 @@ run_moead(const Problem& prob, int n_weights, int n_gen,
         ws_seed.reset(prob.n_types, prob.max_slot);
         for (auto& s : h_seeds) {
             local_search(s, prob, ws_seed);
+            if (sched_repair) schedule_repair(s, prob, ws_seed);
             evaluate(s, prob, ws_seed);
         }
     }
@@ -343,10 +344,12 @@ run_moead(const Problem& prob, int n_weights, int n_gen,
         ws_polish.reset(prob.n_types, prob.max_slot);
         for (auto& ind : pop) {
             local_search(ind, prob, ws_polish);
+            if (sched_repair) schedule_repair(ind, prob, ws_polish);
             evaluate(ind, prob, ws_polish);
         }
         for (auto& ind : archive) {
             local_search(ind, prob, ws_polish);
+            if (sched_repair) schedule_repair(ind, prob, ws_polish);
             evaluate(ind, prob, ws_polish);
         }
     }

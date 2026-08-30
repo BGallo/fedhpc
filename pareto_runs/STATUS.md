@@ -29,16 +29,48 @@ Safe to run repeatedly — each call resumes exactly where the last one left
 off and re-saves the checkpoint after every box resolution. If interrupted
 (Ctrl-C, kill, crash), nothing is lost beyond the box currently mid-solve.
 
-## Current state (as of 2026-08-28, after a further ~1h + ~1h resume session)
+## Current state (as of 2026-08-29, after 5 back-to-back 1h rounds + 3 GAP-focused rounds — session paused here for user review)
 
 History: 2026-08-15 checkpoint 9 pts / 5 boxes / 29 solves → 2026-08-27
-+17 interior pts (63 solves, 3771s) → 2026-08-28 session below. Backup of the
-pre-2026-08-27 MAIN checkpoint: `fedhpc_10min_map_checkpoint.json.bak-20260827`.
++17 interior pts (63 solves, 3771s) → 2026-08-28 session (+19 pts, see below)
+→ 2026-08-28/29 five `resume_true_frontier.sh 3600` rounds (1:1 MAIN/GAP)
+interleaved with three GAP-only rounds, run back-to-back (unattended, ~12h
+wall total). Backup of the pre-2026-08-27 MAIN checkpoint:
+`fedhpc_10min_map_checkpoint.json.bak-20260827`.
 
-**Combined exact-point count across both checkpoints: 52** (up from 33).
+**Combined exact-point count across both checkpoints: 169** (108 MAIN + 63
+GAP, 2 shared anchors → 169 unique), up from 52 at the start of this session.
 Every point is individually proven optimal (MIPGap 1e-9); the front is still
-incomplete (47 open boxes total + 5 boxes dropped as inconclusive over the
-whole history).
+incomplete — **159 open boxes total** (102 MAIN + 57 GAP) + boxes dropped as
+inconclusive along the way (see per-checkpoint logs). Stopped here on user
+request ("let this be the last round before I re-evaluate the frontier") —
+**no resume process is running**; the next session should start by reading
+this file, not by assuming anything is still in progress.
+
+**Density, both regions cover the same f1 width (2713 units):**
+- MAIN (f1 11151–13864): 108 pts, 102 boxes, widths 2–31 (median 15) — very
+  close to continuous.
+- GAP (f1 13864–16577): 63 pts, 57 boxes, widths 19–84 (median 42) — still
+  ~2.8x sparser per unit than MAIN. Three GAP-only rounds (2026-08-29, per
+  user request "work on the areas that have less points") brought it from
+  31 pts/median-width-85 to 63 pts/median-width-42 — real progress, but
+  MAIN also grew in the interleaved rounds, so the *relative* gap didn't
+  close much. If resuming with the same goal, GAP still needs
+  disproportionately more time than MAIN.
+
+A live snapshot chart of both regions (points + open-box hatching) was
+published as an Artifact mid-session — ask the user for the link if you need
+it again, it isn't saved here since artifact URLs aren't guaranteed stable
+across sessions.
+
+**How each round was run** (for resuming): detached (`nohup ... &`) with a
+separate PID-wait tracker so the harness gets a completion notification per
+round — `scripts/resume_true_frontier.sh 3600` for a 1:1 MAIN+GAP round, or
+`uv run python pareto_runs/resume_map.py data/fedhpc_known_runtime_offline_10min.json
+pareto_runs/fedhpc_10min_gap_checkpoint.json 3600 600 3` directly for a
+GAP-only round (swap in the MAIN checkpoint + `200` per-solve limit for a
+MAIN-only round). Check `resume_main_*.log` / `resume_gap_*.log` timestamps
+for the most recent activity.
 
 ### 2026-08-28 session — `scripts/resume_true_frontier.sh 3600`
 

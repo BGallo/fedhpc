@@ -253,6 +253,7 @@ def nsga2_frontier(
     crossover_kind: int = 0,
     tourn_k: int = 2,
     local_search_interval: int = -1,
+    sched_repair: int = 1,
     profile: bool = False,
 ) -> list[Solution]:
     """Approximate the Pareto frontier via NSGA-II.
@@ -280,6 +281,17 @@ def nsga2_frontier(
                      ``0`` disables it, restoring seeds+final-polish-only
                      behaviour. Always applied to the heuristic seeds and the
                      final population regardless of this setting.
+    sched_repair    : ``1`` (default) runs the earliest-feasible SPT
+                     list-scheduling repair (``schedule_repair`` in
+                     ga_common.hpp) on the heuristic seeds and the final
+                     population, right after ``local_search``: it keeps each
+                     job's type (cost is start-independent) and left-shifts
+                     starts to the earliest capacity-feasible slot, jobs taken
+                     shortest-processing-time-first. Closes the scheduling-
+                     subproblem gap coordinate descent can't, especially at the
+                     low-cost / high-turnaround corner. Chosen as the default
+                     via A/B benchmark (see scripts/ab_sched_repair.py);
+                     ``0`` = pre-change behaviour, byte-for-byte.
     profile        : if True, print a per-phase timing breakdown to stderr.
 
     Returns
@@ -304,6 +316,7 @@ def nsga2_frontier(
         crossover_kind = crossover_kind,
         tourn_k        = tourn_k,
         local_search_interval = local_search_interval,
+        sched_repair    = sched_repair,
     )
     if profile:
         _print_profile(prof, algorithm="nsga2",
@@ -324,6 +337,7 @@ def nsga3_frontier(
     crossover_kind: int = 0,
     tourn_k: int = 2,
     local_search_interval: int = -1,
+    sched_repair: int = 1,
     profile: bool = False,
 ) -> list[Solution]:
     """Approximate the Pareto frontier via NSGA-III (Deb & Jain 2014).
@@ -357,6 +371,8 @@ def nsga3_frontier(
     local_search_interval : generations between periodic capacity-repair /
                   cost-descent local search on the population; see
                   nsga2_frontier for the convention.
+    sched_repair : ``1`` (default) SPT list-scheduling repair on seeds + final
+                  population; ``0`` = pre-change behaviour. See ``nsga2_frontier``.
     profile     : if True, print a per-phase timing breakdown to stderr.
 
     Returns
@@ -382,6 +398,7 @@ def nsga3_frontier(
         crossover_kind = crossover_kind,
         tourn_k        = tourn_k,
         local_search_interval = local_search_interval,
+        sched_repair    = sched_repair,
     )
     if profile:
         _print_profile(prof, algorithm="nsga3",
@@ -403,6 +420,7 @@ def moead_frontier(
     crossover_kind: int = 0,
     archive_size: int = 20,
     local_search_interval: int = -1,
+    sched_repair: int = 1,
     profile: bool = False,
 ) -> list[Solution]:
     """Approximate the Pareto frontier via MOEA/D (Tchebycheff decomposition).
@@ -438,6 +456,8 @@ def moead_frontier(
     local_search_interval : generations between periodic capacity-repair /
                         cost-descent local search on the population; see
                         nsga2_frontier for the convention.
+    sched_repair : ``1`` (default) SPT list-scheduling repair on seeds + final
+                        population; ``0`` = pre-change behaviour. See ``nsga2_frontier``.
     profile           : if True, print a per-phase timing breakdown to stderr.
 
     Returns
@@ -464,11 +484,136 @@ def moead_frontier(
         crossover_kind    = crossover_kind,
         archive_size      = archive_size,
         local_search_interval = local_search_interval,
+        sched_repair    = sched_repair,
     )
     if profile:
         _print_profile(prof, algorithm="moead",
                        label=f"weights={n_weights}  T={neighborhood_size}  threads={n_threads or 'all'}")
     return _to_solutions(inst, raw)
+
+
+def _weighted_raw(
+    inst: Instance, w1: float, w2: float, f1_cap: float, *,
+    pop_size: int, n_gen: int, seed: int, n_threads: int,
+    ls_moves: int, restart_patience: int, shortlist: int,
+) -> tuple[list[tuple[int, int]], float, float, float, int]:
+    _require_ext()
+    return _ext.weighted(
+        n_jobs          = len(inst.jobs),
+        budget          = inst.budget,
+        job_slots       = _job_slots(inst),
+        type_cap        = _type_cap(inst),
+        type_risk       = _type_risk(inst),
+        init_occ        = _init_occ(inst),
+        w1              = w1,
+        w2              = w2,
+        f1_cap          = f1_cap,
+        pop_size        = pop_size,
+        n_gen           = n_gen,
+        seed            = seed,
+        n_threads       = n_threads,
+        ls_moves        = ls_moves,
+        restart_patience= restart_patience,
+        shortlist       = shortlist,
+    )
+
+
+def heuristic_weighted_reference_points(
+    inst: Instance, *, seed: int = 42, n_threads: int = 0,
+    pop_size: int = 24, n_gen: int = 40, ls_moves: int = 6,
+    restart_patience: int = 6, shortlist: int = 24,
+) -> tuple[float, float, float]:
+    """Heuristic estimates of the three weighted-sum reference points.
+
+    Mirrors ``pareto._reference_points`` (which solves them exactly with
+    Gurobi) using the memetic metaheuristic instead:
+
+    - ``f1_T``  ≈ minimum total turnaround        (weights w1=1, w2=0)
+    - ``f2_T``  ≈ minimum cost at that turnaround  (w1 huge, w2=1, f1 capped at f1_T)
+    - ``f1_0``  ≈ minimum turnaround at zero cost  (w1=1, w2 huge)
+
+    These are upper bounds on / close approximations of the true reference
+    points — good enough to scale the weighted-sum objective for
+    :func:`weighted_solve`, not a replacement for the exact values.
+    """
+    kw = dict(pop_size=pop_size, n_gen=n_gen, seed=seed, n_threads=n_threads,
+              ls_moves=ls_moves, restart_patience=restart_patience, shortlist=shortlist)
+    _, f1_T, _, _, _ = _weighted_raw(inst, 1.0, 0.0, 1e18, **kw)
+    _, f1_at_cap, f2_T, _, _ = _weighted_raw(inst, 1e6, 1.0, f1_T + 0.5, **kw)
+    _, f1_0, _, _, _ = _weighted_raw(inst, 1.0, 1e6, 1e18, **kw)
+    return float(f1_T), float(f2_T), float(f1_0)
+
+
+def weighted_solve(
+    inst: Instance,
+    lam: float,
+    *,
+    f1_T: float | None = None,
+    f2_T: float | None = None,
+    f1_0: float | None = None,
+    pop_size: int = 24,
+    n_gen: int = 40,
+    seed: int = 42,
+    n_threads: int = 0,
+    ls_moves: int = 6,
+    restart_patience: int = 6,
+    shortlist: int = 24,
+) -> Solution:
+    """Heuristically minimise ``lam·f̂1 + (1−lam)·f̂2`` (the single-objective
+    weighted-sum scalarisation), returning one feasible ``Solution``.
+
+    Solves the *same* normalised objective as :func:`model.solve_weighted_sum`
+    — ``(lam/(f1_0−f1_T))·f1 + ((1−lam)/f2_T)·f2`` subject to ``f1 ≤ f1_0`` —
+    but with a memetic metaheuristic (see ``_ext/weighted.hpp``): a small
+    population of per-job type-assignment vectors, each decoded to a schedule
+    by the SPT list-scheduling repair, refined by a greedy scalar type-flip
+    local search, with two-point crossover for recombination and ILS
+    perturbation kicks to escape local optima.
+
+    Parameters
+    ----------
+    lam              : trade-off weight in ``[0, 1]`` (1 → pure turnaround).
+    f1_T, f2_T, f1_0 : weighted-sum reference points (see
+                       ``pareto._reference_points``). If any is ``None`` all
+                       three are estimated via
+                       :func:`heuristic_weighted_reference_points`.
+    pop_size, n_gen  : memetic-GA population and generation count.
+    ls_moves         : max improving type-flips per local-search call
+                       (``·3`` for the final polish).
+    restart_patience : generations without improvement before an ILS kick
+                       (``0`` disables kicks).
+    shortlist        : type-flip candidates decoded exactly per local-search
+                       step (ranked first by an O(1) Δobjective estimate).
+    seed, n_threads  : determinism / OpenMP controls (bit-for-bit stable for a
+                       fixed ``(seed, n_threads)``).
+
+    Returns
+    -------
+    A single feasible ``Solution`` with ``status="heuristic"``.
+    """
+    if not 0.0 <= lam <= 1.0:
+        raise ValueError("lam must be in [0, 1]")
+
+    if f1_T is None or f2_T is None or f1_0 is None:
+        f1_T, f2_T, f1_0 = heuristic_weighted_reference_points(
+            inst, seed=seed, n_threads=n_threads, pop_size=pop_size, n_gen=n_gen,
+            ls_moves=ls_moves, restart_patience=restart_patience, shortlist=shortlist,
+        )
+
+    degenerate = f1_0 <= f1_T + 1e-8 or f2_T <= 1e-8
+    if degenerate:
+        w1, w2, f1_cap = 1e-6, 1.0, f1_0
+    else:
+        w1 = lam / (f1_0 - f1_T)
+        w2 = (1.0 - lam) / f2_T
+        f1_cap = f1_0
+
+    asgn, f1, f2, _g, _ls = _weighted_raw(
+        inst, w1, w2, f1_cap, pop_size=pop_size, n_gen=n_gen, seed=seed,
+        n_threads=n_threads, ls_moves=ls_moves, restart_patience=restart_patience,
+        shortlist=shortlist,
+    )
+    return _to_solutions(inst, [(asgn, f1, f2)])[0]
 
 
 def time_seeds(inst: Instance) -> list[dict]:
