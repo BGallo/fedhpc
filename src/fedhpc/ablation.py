@@ -382,7 +382,7 @@ def report(
         print(row)
 
     print(thin)
-    print(f"\nNote: Rank/gen = {{'nsga2': nds+crowding/gen, 'nsga3': rank_nds/gen, 'moead': 0}}")
+    print("\nNote: Rank/gen = {'nsga2': nds+crowding/gen, 'nsga3': rank_nds/gen, 'moead': 0}")
     print(sep)
 
     # ── CSV / JSON file output ────────────────────────────────────────────────

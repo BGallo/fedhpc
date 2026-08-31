@@ -9,15 +9,14 @@ Consistency        Both methods find the same extreme points; neither front
                    dominates the other.
 """
 import pytest
+from conftest import is_non_dominated_set, unique_front_points
 
-from fedhpc.data import Instance, InstanceType, Job
+from fedhpc.data import Instance
 from fedhpc.pareto import (
     _reference_points,
     epsilon_constraint_frontier,
     weighted_sum_frontier,
 )
-
-from conftest import is_non_dominated_set, unique_front_points
 
 _GUROBI = {"OutputFlag": 0}
 

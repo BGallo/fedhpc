@@ -1,9 +1,9 @@
 """Shared pytest fixtures for the FED-HPC test suite."""
 import os
-import math
+
 import pytest
 
-from fedhpc.data import Instance, InstanceType, Job, RunningJob
+from fedhpc.data import Instance, InstanceType, Job
 
 
 @pytest.fixture(autouse=True)

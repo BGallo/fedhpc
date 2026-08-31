@@ -889,8 +889,9 @@ def hybrid_frontier(
     Exact (status="optimal"/"feasible") non-dominated solutions.
     """
     from gurobipy import GRB
-    from .moea import moead_frontier, nsga2_frontier
+
     from .formulations import configure_env
+    from .moea import moead_frontier, nsga2_frontier
 
     # ── Phase 1: EA exploration ───────────────────────────────────────────────
 

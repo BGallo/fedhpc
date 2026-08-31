@@ -682,7 +682,7 @@ def heuristic_weighted_reference_points(
               ls_moves=ls_moves, restart_patience=restart_patience, shortlist=shortlist,
               xover_mode=2)
     _, f1_T, _, _, _ = _weighted_raw(inst, 1.0, 0.0, 1e18, **kw)
-    _, f1_at_cap, f2_T, _, _ = _weighted_raw(inst, 1e6, 1.0, f1_T + 0.5, **kw)
+    _, _, f2_T, _, _ = _weighted_raw(inst, 1e6, 1.0, f1_T + 0.5, **kw)
     _, f1_0, _, _, _ = _weighted_raw(inst, 1.0, 1e6, 1e18, **kw)
     return float(f1_T), float(f2_T), float(f1_0)
 

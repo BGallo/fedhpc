@@ -12,8 +12,8 @@ Budget        Behaviour under tight or zero budget.
 Epsilon       ε-constraint versions at boundary values.
 WeightedSum   Additional parametric behaviour beyond α=0/1.
 """
-import math
 import pytest
+from conftest import capacity_violations, recompute_f1, recompute_f2
 
 from fedhpc.data import Instance, InstanceType, Job, RunningJob
 from fedhpc.formulations import OccupancyFormulation, SpaceTimeFormulation
@@ -24,8 +24,6 @@ from fedhpc.model import (
     solve_f2,
     solve_weighted_sum,
 )
-
-from conftest import capacity_violations, recompute_f1, recompute_f2
 
 # ---------------------------------------------------------------------------
 # Parametrize over both formulations
@@ -312,7 +310,7 @@ class TestWeightedSum:
 
     def test_f1_T_leq_f1_0(self, known_pareto_inst):
         """f1^T (minimum turnaround) ≤ f1^0 (minimum turnaround at zero cost)."""
-        f1_T, f2_T, f1_0 = self._ref(known_pareto_inst)
+        f1_T, _, f1_0 = self._ref(known_pareto_inst)
         assert f1_T <= f1_0 + 1e-6
 
     def test_f2_T_non_negative(self, known_pareto_inst):

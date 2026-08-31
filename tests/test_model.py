@@ -1,11 +1,11 @@
 """Tests for the FED-HPC MIP model (space-time network formulation)."""
 import math
+
 import pytest
 
 from fedhpc.data import Instance, InstanceType, Job, RunningJob
 from fedhpc.formulations import OccupancyFormulation, SpaceTimeFormulation
 from fedhpc.model import solve_epsilon_cost, solve_f1, solve_f2, solve_weighted_sum
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -191,7 +191,7 @@ class TestSolveF1:
 
     def test_completion_within_horizon(self, tiny_instance):
         sol = solve_f1(tiny_instance)
-        for jid, c in sol.completion.items():
+        for c in sol.completion.values():
             assert c <= tiny_instance.horizon
 
     def test_completion_equals_start_plus_p_occ(self, tiny_instance):

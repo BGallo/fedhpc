@@ -221,7 +221,7 @@ class Instance:
                 self.occupied[mid, t] = self.occupied.get((mid, t), 0) + 1
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Instance":
+    def from_dict(cls, data: dict) -> Instance:
         instance_types = [InstanceType(**td) for td in data["instance_types"]]
         jobs = [Job(**jd) for jd in data["jobs"]]
         running_jobs = [RunningJob(**rd) for rd in data.get("running_jobs", [])]
@@ -245,6 +245,6 @@ class Instance:
         return inst
 
     @classmethod
-    def from_file(cls, path: str | Path) -> "Instance":
+    def from_file(cls, path: str | Path) -> Instance:
         with open(path) as f:
             return cls.from_dict(json.load(f))

@@ -40,6 +40,7 @@ CHECKPOINTS = [
     "pareto_runs/fedhpc_10min_gap_checkpoint.json",
 ]
 import os
+
 POP = int(os.environ.get("POP", 400))
 NGEN = int(os.environ.get("NGEN", 2000))
 SEED = int(os.environ.get("SEED", 42))
@@ -49,7 +50,8 @@ HV_REF = np.array([1.1, 1.1])
 def load_known_front():
     sols = []
     for cp in CHECKPOINTS:
-        d = json.load(open(cp))
+        with open(cp) as f:
+            d = json.load(f)
         sols += [_solution_from_dict(s) for s in d["solutions"]]
     front = _filter_dominated(sols)
     # dedupe identical (f1, f2)

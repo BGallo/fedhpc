@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Build a fedhpc Instance JSON for the pos_congestion_20240130 case study.
 
 Standalone converter — reads window_jobs / initial_state_jobs directly from

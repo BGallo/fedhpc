@@ -10,12 +10,8 @@ EdgeCases   Infeasible instances, running jobs, tight budget.
 MipComparison  MOEA output not dominated by MIP optima; agrees on extreme points.
 """
 import math
-import pytest
 
-from fedhpc.data import Instance, InstanceType, Job, RunningJob
-from fedhpc.moea import (
-    _init_occ, _job_slots, _type_cap, moead_frontier, nsga2_frontier, nsga3_frontier,
-)
+import pytest
 
 # Pull shared helpers from conftest (importable because conftest is a plain module)
 from conftest import (
@@ -24,6 +20,16 @@ from conftest import (
     recompute_f1,
     recompute_f2,
     unique_front_points,
+)
+
+from fedhpc.data import Instance, InstanceType, Job, RunningJob
+from fedhpc.moea import (
+    _init_occ,
+    _job_slots,
+    _type_cap,
+    moead_frontier,
+    nsga2_frontier,
+    nsga3_frontier,
 )
 
 # ---------------------------------------------------------------------------
@@ -380,7 +386,7 @@ class TestKnownAnswer:
         zero_cost = [s for s in sols if s.f2 == pytest.approx(0.0, abs=1e-9)]
         assert len(zero_cost) > 0, "No zero-cost solution found"
         for s in zero_cost:
-            for jid, (mid, _) in s.assignment.items():
+            for mid, _ in s.assignment.values():
                 assert mid == 0, f"Expected on-prem (type 0), got type {mid}"
 
     @_BOTH
@@ -1001,9 +1007,12 @@ class TestSchedRepair:
 # Single-objective weighted-sum metaheuristic (weighted_solve)
 # ---------------------------------------------------------------------------
 
-from fedhpc.moea import heuristic_weighted_reference_points, weighted_solve  # noqa: E402
-from fedhpc.model import solve_weighted_sum  # noqa: E402
-from fedhpc.pareto import _reference_points  # noqa: E402
+from fedhpc.model import solve_weighted_sum
+from fedhpc.moea import (
+    heuristic_weighted_reference_points,
+    weighted_solve,
+)
+from fedhpc.pareto import _reference_points
 
 
 class TestWeightedSolve:
@@ -1180,10 +1189,10 @@ class TestExtraSeeds:
         from fedhpc.moea import _weighted_raw
         inst = known_pareto_inst
         g = [0 for _ in inst.jobs]
-        asgn, f1, f2, _g, _ls = _weighted_raw(
+        _, f1, f2, _g, _ls = _weighted_raw(
             inst, 0.5, 0.5, 1e18, pop_size=12, n_gen=15, seed=1, n_threads=0,
             ls_moves=4, restart_patience=0, shortlist=8, extra_seeds=[g])
-        asgn2, f1b, f2b, *_ = _weighted_raw(
+        _, f1b, f2b, *_ = _weighted_raw(
             inst, 0.5, 0.5, 1e18, pop_size=12, n_gen=15, seed=1, n_threads=0,
             ls_moves=4, restart_patience=0, shortlist=8, extra_seeds=[g])
         assert (f1, f2) == (f1b, f2b)

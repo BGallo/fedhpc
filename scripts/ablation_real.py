@@ -11,6 +11,7 @@ its contribution is visible in isolation.  A row that matches the baseline withi
 noise is dead weight on this instance.
 """
 from __future__ import annotations
+
 import json
 import sys
 import time
@@ -20,7 +21,10 @@ import numpy as np
 from fedhpc.data import Instance
 from fedhpc.formulations import configure_env
 from fedhpc.moea import (
-    moead_frontier, nsga2_frontier, nsga3_frontier, weighted_solve,
+    moead_frontier,
+    nsga2_frontier,
+    nsga3_frontier,
+    weighted_solve,
 )
 from fedhpc.pareto import _filter_dominated, _solution_from_dict
 
@@ -52,7 +56,8 @@ ABL = {
 def load_known():
     sols = []
     for cp in CHECKPOINTS:
-        sols += [_solution_from_dict(s) for s in json.load(open(cp))["solutions"]]
+        with open(cp) as f:
+            sols += [_solution_from_dict(s) for s in json.load(f)["solutions"]]
     front = _filter_dominated(sols)
     seen, uniq = set(), []
     for s in sorted(front, key=lambda s: s.f1):

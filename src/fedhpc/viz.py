@@ -5,6 +5,7 @@ import math
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")   # non-interactive backend — no X11 connection required
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
@@ -317,7 +318,7 @@ def _partition_lines(per_partition: list[dict], slot_secs: float = 1.0) -> list[
     return lines
 
 
-def format_pareto_metrics(metrics: dict, ranked: list, inst: "Instance") -> str:
+def format_pareto_metrics(metrics: dict, ranked: list, inst: Instance) -> str:
     """Format Pareto quality metrics as a human-readable block.
 
     *ranked* must be the same list passed to pareto_metrics, sorted by f1
@@ -384,9 +385,8 @@ def format_pareto_metrics(metrics: dict, ranked: list, inst: "Instance") -> str:
     return "\n".join(lines)
 
 
-def _timing_lines(sol: "Solution") -> list[str]:
+def _timing_lines(sol: Solution) -> list[str]:
     """Return solver timing lines, or an empty list if not available."""
-    from .model import Solution  # local import to avoid circular dependency
     lines = []
     if sol.build_time is not None or sol.solve_time is not None:
         bt = f"{sol.build_time:.2f} s" if sol.build_time is not None else "—"
@@ -821,7 +821,7 @@ def save_spacetime_graph(
                             jobs_at[tt] += 1
             for rj in inst.running_jobs:
                 if rj.type_id == mid:
-                    for tt in range(0, min(rj.end, H + 1)):
+                    for tt in range(min(rj.end, H + 1)):
                         jobs_at[tt] += 1
             idle_flow: list[int | None] = [max(0, cap_int - jobs_at[t]) for t in range(H + 1)]
         else:
@@ -1035,7 +1035,7 @@ def _save_spacetime_graph_gv(
                             jobs_at[tt] += 1
             for rj in inst.running_jobs:
                 if rj.type_id == mid:
-                    for tt in range(0, min(rj.end, H + 1)):
+                    for tt in range(min(rj.end, H + 1)):
                         jobs_at[tt] += 1
             idle_flow: list[int | None] = [max(0, cap_int - jobs_at[t]) for t in range(H + 1)]
         else:

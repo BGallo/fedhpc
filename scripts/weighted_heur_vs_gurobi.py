@@ -13,6 +13,7 @@ so the reported number is pure optimisation quality on one fixed objective.
              found a better incumbent than Gurobi did in the budget.
 """
 from __future__ import annotations
+
 import os
 import sys
 import time
@@ -119,10 +120,10 @@ def main():
                     else (lam / (f1_0 - f1_T)) * he.f1 + ((1 - lam) / f2_T) * he.f2)
 
             if gr is None:
-                print(f"  {lam:>5.2f} | {'no incumbent in %ds' % TL:>38} | "
+                print(f"  {lam:>5.2f} | {f'no incumbent in {TL}s':>38} | "
                       f"{he.f1:>9.1f} {he.f2:>9.2f} {g_he:>10.4f} {t_he:>6.1f} |")
                 continue
-            f1g, f2g, g_gur, obj, bound, mgap, wall = gr
+            f1g, f2g, g_gur, _obj, bound, mgap, wall = gr
             vs_gur = 100.0 * (g_he - g_gur) / abs(g_gur) if abs(g_gur) > 1e-12 else float("nan")
             vs_bnd = 100.0 * (g_he - bound) / abs(bound) if abs(bound) > 1e-12 else float("nan")
             og = f"{mgap*100:6.2f}%" if mgap == mgap else "   n/a"

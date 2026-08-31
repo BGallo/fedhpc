@@ -10,11 +10,23 @@ from pathlib import Path
 from .data import Instance
 from .formulations import OccupancyFormulation, SpaceTimeFormulation, configure_env
 from .metrics import metrics_to_serialisable, pareto_metrics
-from .model import Solution, solve_epsilon_cost, solve_epsilon_turnaround, solve_f1, solve_f2, solve_weighted_sum
+from .model import (
+    Solution,
+    solve_epsilon_cost,
+    solve_epsilon_turnaround,
+    solve_f1,
+    solve_f2,
+    solve_weighted_sum,
+)
 from .pareto import hybrid_frontier, true_pareto_frontier
 from .viz import (
-    compute_stats, format_pareto_metrics, format_summary,
-    save_feasibility_graph, save_gantt, save_machine_schedule, save_spacetime_graph,
+    compute_stats,
+    format_pareto_metrics,
+    format_summary,
+    save_feasibility_graph,
+    save_gantt,
+    save_machine_schedule,
+    save_spacetime_graph,
 )
 
 _FORMULATIONS = {

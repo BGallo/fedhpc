@@ -1,12 +1,16 @@
 """A/B: sched_repair on/off for all three EAs, scored vs the known proven front."""
 from __future__ import annotations
-import os, time
+
+import json
+import os
+import time
+
 import numpy as np
+
 from fedhpc.data import Instance
 from fedhpc.formulations import configure_env
 from fedhpc.moea import moead_frontier, nsga2_frontier, nsga3_frontier
 from fedhpc.pareto import _filter_dominated, _solution_from_dict
-import json
 
 INSTANCE = "data/fedhpc_known_runtime_offline_10min.json"
 CHECKPOINTS = ["pareto_runs/fedhpc_10min_map_checkpoint.json",
@@ -19,7 +23,8 @@ SEED = int(os.environ.get("SEED", 42))
 def load_known_front():
     sols = []
     for cp in CHECKPOINTS:
-        d = json.load(open(cp))
+        with open(cp) as f:
+            d = json.load(f)
         sols += [_solution_from_dict(s) for s in d["solutions"]]
     front = _filter_dominated(sols)
     seen, uniq = set(), []
