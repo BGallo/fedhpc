@@ -255,6 +255,9 @@ def nsga2_frontier(
     local_search_interval: int = -1,
     sched_repair: int = 1,
     ablate: int = 0,
+    extra_seeds: list[list[int]] | None = None,
+    lp_seeds: int = 0,
+    lp_ref: tuple | None = None,
     profile: bool = False,
 ) -> list[Solution]:
     """Approximate the Pareto frontier via NSGA-II.
@@ -300,6 +303,20 @@ def nsga2_frontier(
     ablate         : diagnostic bitmask (AblateFlag in ga_common.hpp) that
                      removes one component at a time for the ablation study
                      (scripts/ablation_real.py). 0 (default) = full algorithm.
+    extra_seeds    : caller-supplied warm-start genomes (list of slot-index
+                     vectors, one entry per job into ``_job_slots(inst)``);
+                     prepended to the heuristic seeds and repaired the same
+                     way. Out-of-range genes are clamped; wrong-length ones
+                     skipped.
+    lp_seeds       : if >0, additionally seed from the rounded LP relaxation
+                     of the weighted-sum MIP at that many λ values spread on
+                     [0, 1] (needs Gurobi; ~85 s–9 min per solve). A/B on the
+                     two 10-min instances: −21 %% IGD for NSGA-II/III on the
+                     *uncongested* 964-job instance, neutral-to-negative on
+                     the congested 3340-job one, and it hurts MOEA/D on
+                     both — opt-in, off by default.
+    lp_ref         : (f1_T, f2_T, f1_0) to normalise the LP λ sweep; a rough
+                     estimate from the repaired heuristic seeds is used if None.
     profile        : if True, print a per-phase timing breakdown to stderr.
 
     Returns
@@ -326,6 +343,7 @@ def nsga2_frontier(
         local_search_interval = local_search_interval,
         sched_repair    = sched_repair,
         ablate          = ablate,
+        extra_seeds     = list(extra_seeds or []) + _mo_lp_seeds(inst, lp_seeds, lp_ref),
     )
     if profile:
         _print_profile(prof, algorithm="nsga2",
@@ -348,6 +366,9 @@ def nsga3_frontier(
     local_search_interval: int = -1,
     sched_repair: int = 1,
     ablate: int = 0,
+    extra_seeds: list[list[int]] | None = None,
+    lp_seeds: int = 0,
+    lp_ref: tuple | None = None,
     profile: bool = False,
 ) -> list[Solution]:
     """Approximate the Pareto frontier via NSGA-III (Deb & Jain 2014).
@@ -412,6 +433,7 @@ def nsga3_frontier(
         local_search_interval = local_search_interval,
         sched_repair    = sched_repair,
         ablate          = ablate,
+        extra_seeds     = list(extra_seeds or []) + _mo_lp_seeds(inst, lp_seeds, lp_ref),
     )
     if profile:
         _print_profile(prof, algorithm="nsga3",
@@ -435,6 +457,9 @@ def moead_frontier(
     local_search_interval: int = -1,
     sched_repair: int = 1,
     ablate: int = 0,
+    extra_seeds: list[list[int]] | None = None,
+    lp_seeds: int = 0,
+    lp_ref: tuple | None = None,
     profile: bool = False,
 ) -> list[Solution]:
     """Approximate the Pareto frontier via MOEA/D (Tchebycheff decomposition).
@@ -502,6 +527,7 @@ def moead_frontier(
         local_search_interval = local_search_interval,
         sched_repair    = sched_repair,
         ablate          = ablate,
+        extra_seeds     = list(extra_seeds or []) + _mo_lp_seeds(inst, lp_seeds, lp_ref),
     )
     if profile:
         _print_profile(prof, algorithm="moead",
@@ -509,10 +535,105 @@ def moead_frontier(
     return _to_solutions(inst, raw)
 
 
+def _lp_relaxation_seeds(
+    inst: Instance,
+    lambdas,
+    *,
+    formulation=None,
+    f1_T: float | None = None,
+    f2_T: float | None = None,
+    f1_0: float | None = None,
+    **gurobi_params,
+) -> list[list[int]]:
+    """Round the LP relaxation of the weighted-sum MIP into EA seed genomes.
+
+    For each ``lam`` in ``lambdas`` the (already-built) space-time model's
+    objective is set to the normalised weighted sum
+    ``(lam/(f1_0-f1_T))·f1 + ((1-lam)/f2_T)·f2`` (falling back to unnormalised
+    ``lam·f1 + (1-lam)·f2`` when reference points are not given), integrality is
+    relaxed, the barrier LP is solved, and each job is assigned to the
+    ``(type, start)`` slot carrying the most LP mass. The result is a gene
+    vector (one slot index per job into ``_job_slots(inst)``) suitable for
+    ``extra_seeds=``.
+
+    Requires Gurobi. The LP is much cheaper than the MIP but still the
+    dominant cost for these instances (~1-10 min on the 10-min workloads) —
+    this is an opt-in seed source, not on by default. Deterministic for fixed
+    solver settings; one model is built and reused across all ``lambdas``.
+    """
+    import gurobipy as gp  # noqa: F401  (import here: EA has no hard Gurobi dep)
+    from gurobipy import GRB
+
+    from .formulations import SpaceTimeFormulation
+
+    fmt = formulation or SpaceTimeFormulation()
+    mdl, vars_ = fmt.build(inst)
+    x = vars_["x"]
+    f1e = fmt.f1_expr(inst, x)
+    f2e = fmt.f2_expr(inst, x)
+    for v in mdl.getVars():
+        v.vtype = GRB.CONTINUOUS
+    mdl.setParam("OutputFlag", 0)
+    mdl.setParam("Method", 2)      # barrier
+    mdl.setParam("Crossover", 0)
+    for k, val in gurobi_params.items():
+        mdl.setParam(k, val)
+
+    norm = f1_T is not None and f2_T is not None and f1_0 is not None \
+        and f1_0 > f1_T + 1e-8 and f2_T > 1e-8
+
+    slots = _job_slots(inst)   # pruned per-job slot tables — gene index domain
+    out: list[list[int]] = []
+    for lam in lambdas:
+        if norm:
+            obj = (lam / (f1_0 - f1_T)) * f1e + ((1.0 - lam) / f2_T) * f2e
+        else:
+            obj = lam * f1e + (1.0 - lam) * f2e
+        mdl.setObjective(obj, GRB.MINIMIZE)
+        mdl.optimize()
+        if mdl.SolCount == 0:
+            continue
+        xval = {key: v.X for key, v in x.items()}
+        genome: list[int] = []
+        for j in inst.jobs:
+            best_k, best_v = 0, -1.0
+            for k, (m, t, *_rest) in enumerate(slots[j.id]):
+                v = xval.get((j.id, m, t), 0.0)
+                if v > best_v:
+                    best_v, best_k = v, k
+            genome.append(best_k)
+        out.append(genome)
+    return out
+
+
+def _rough_ref_points(inst: Instance) -> tuple[float, float, float]:
+    """Cheap (f1_T, f2_T, f1_0) estimate from the post-repair heuristic seeds —
+    just enough to normalise the λ sweep for ``lp_seeds``. Not accurate."""
+    ts = time_seeds(inst)
+    f1s = [d["f1_after"] for d in ts]
+    f2s = [d["f2_after"] for d in ts]
+    f1_T = min(f1s)
+    f1_0 = max(f1s)
+    f2_T = max(f2s)
+    return float(f1_T), max(float(f2_T), 1.0), float(f1_0)
+
+
+def _mo_lp_seeds(inst: Instance, lp_seeds: int, lp_ref, **gp) -> list[list[int]]:
+    if lp_seeds <= 0:
+        return []
+    import numpy as _np
+    f1_T, f2_T, f1_0 = lp_ref if lp_ref else _rough_ref_points(inst)
+    lams = _np.linspace(0.0, 1.0, lp_seeds).tolist()
+    return _lp_relaxation_seeds(inst, lams, f1_T=f1_T, f2_T=f2_T, f1_0=f1_0, **gp)
+
+
 def _weighted_raw(
     inst: Instance, w1: float, w2: float, f1_cap: float, *,
     pop_size: int, n_gen: int, seed: int, n_threads: int,
     ls_moves: int, restart_patience: int, shortlist: int, ablate: int = 0,
+    extra_seeds: list[list[int]] | None = None,
+    xover_mode: int = 0,
+    mut_mode: int = 0,
 ) -> tuple[list[tuple[int, int]], float, float, float, int]:
     _require_ext()
     return _ext.weighted(
@@ -533,6 +654,9 @@ def _weighted_raw(
         restart_patience= restart_patience,
         shortlist       = shortlist,
         ablate          = ablate,
+        extra_seeds     = extra_seeds or [],
+        xover_mode      = xover_mode,
+        mut_mode        = mut_mode,
     )
 
 
@@ -555,7 +679,8 @@ def heuristic_weighted_reference_points(
     :func:`weighted_solve`, not a replacement for the exact values.
     """
     kw = dict(pop_size=pop_size, n_gen=n_gen, seed=seed, n_threads=n_threads,
-              ls_moves=ls_moves, restart_patience=restart_patience, shortlist=shortlist)
+              ls_moves=ls_moves, restart_patience=restart_patience, shortlist=shortlist,
+              xover_mode=2)
     _, f1_T, _, _, _ = _weighted_raw(inst, 1.0, 0.0, 1e18, **kw)
     _, f1_at_cap, f2_T, _, _ = _weighted_raw(inst, 1e6, 1.0, f1_T + 0.5, **kw)
     _, f1_0, _, _, _ = _weighted_raw(inst, 1.0, 1e6, 1e18, **kw)
@@ -569,25 +694,42 @@ def weighted_solve(
     f1_T: float | None = None,
     f2_T: float | None = None,
     f1_0: float | None = None,
-    pop_size: int = 24,
-    n_gen: int = 40,
+    pop_size: int = 32,
+    n_gen: int = 60,
     seed: int = 42,
     n_threads: int = 0,
-    ls_moves: int = 6,
+    ls_moves: int = 8,
     restart_patience: int = 6,
     shortlist: int = 24,
     ablate: int = 0,
+    lp_seed: bool = False,
+    xover_mode: int = 2,
+    mut_mode: int = 0,
 ) -> Solution:
     """Heuristically minimise ``lam·f̂1 + (1−lam)·f̂2`` (the single-objective
     weighted-sum scalarisation), returning one feasible ``Solution``.
+
+    ``lp_seed`` (default False): also seed the memetic GA from the rounded LP
+    relaxation of the weighted-sum MIP at this ``lam`` (needs Gurobi; adds the
+    LP solve time — ~85 s on the 964-job instance, ~9 min on the 3340-job one).
+    A/B: cuts the gap to the Gurobi optimum roughly in half at the knee on the
+    964-job instance, ~0.3 pp on the 3340-job one.
 
     Solves the *same* normalised objective as :func:`model.solve_weighted_sum`
     — ``(lam/(f1_0−f1_T))·f1 + ((1−lam)/f2_T)·f2`` subject to ``f1 ≤ f1_0`` —
     but with a memetic metaheuristic (see ``_ext/weighted.hpp``): a small
     population of per-job type-assignment vectors, each decoded to a schedule
     by the SPT list-scheduling repair, refined by a greedy scalar type-flip
-    local search, with two-point crossover for recombination and ILS
-    perturbation kicks to escape local optima.
+    local search, recombined by **Multi-Step Crossover Fusion** (``xover_mode``
+    2, the default — a short scalar-guided walk from one parent toward the
+    other; A/B on the two 10-min instances: gap to the Gurobi optimum
+    +2.0 %%→+0.3 %% / +3.9 %%→+3.5 %% vs plain two-point), with ILS
+    perturbation kicks to escape local optima. ``xover_mode`` 0 = two-point,
+    1 = none (pure multi-start ILS); the raw ``_ext`` binding still defaults
+    to 0. ``mut_mode`` 1 = scalar-directed reinsert mutation (Feltl & Raidl
+    style) — implemented, but ~neutral on the 10-min instances now that MSXF +
+    the local search carry the search, so the default stays 0 (uniform
+    resample).
 
     Parameters
     ----------
@@ -614,9 +756,9 @@ def weighted_solve(
         raise ValueError("lam must be in [0, 1]")
 
     if f1_T is None or f2_T is None or f1_0 is None:
+        # rough reference points only need light settings, not weighted_solve's
         f1_T, f2_T, f1_0 = heuristic_weighted_reference_points(
-            inst, seed=seed, n_threads=n_threads, pop_size=pop_size, n_gen=n_gen,
-            ls_moves=ls_moves, restart_patience=restart_patience, shortlist=shortlist,
+            inst, seed=seed, n_threads=n_threads,
         )
 
     degenerate = f1_0 <= f1_T + 1e-8 or f2_T <= 1e-8
@@ -627,10 +769,15 @@ def weighted_solve(
         w2 = (1.0 - lam) / f2_T
         f1_cap = f1_0
 
+    extra = None
+    if lp_seed:
+        extra = _lp_relaxation_seeds(inst, [lam], f1_T=f1_T, f2_T=f2_T, f1_0=f1_0)
+
     asgn, f1, f2, _g, _ls = _weighted_raw(
         inst, w1, w2, f1_cap, pop_size=pop_size, n_gen=n_gen, seed=seed,
         n_threads=n_threads, ls_moves=ls_moves, restart_patience=restart_patience,
-        shortlist=shortlist, ablate=ablate,
+        shortlist=shortlist, ablate=ablate, extra_seeds=extra, xover_mode=xover_mode,
+        mut_mode=mut_mode,
     )
     return _to_solutions(inst, [(asgn, f1, f2)])[0]
 

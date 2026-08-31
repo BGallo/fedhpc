@@ -44,11 +44,12 @@ PYBIND11_MODULE(_moea, m) {
            const std::vector<std::tuple<int,int,int>>& init_occ,
            int pop_size, int n_gen, int seed, int n_threads,
            double p_mut_start, double p_mut_end, int crossover_kind, int tourn_k,
-           int local_search_interval, int sched_repair, int ablate) {
+           int local_search_interval, int sched_repair, int ablate,
+           const std::vector<std::vector<int>>& extra_seeds) {
             auto [results, prof] = run_nsga2(
                 build_problem(n_jobs, budget, job_slots, type_cap, type_risk, init_occ, ablate),
                 pop_size, n_gen, seed, n_threads, p_mut_start, p_mut_end, crossover_kind,
-                tourn_k, local_search_interval, sched_repair, ablate);
+                tourn_k, local_search_interval, sched_repair, ablate, extra_seeds);
             return py::make_tuple(results, profile_to_dict(prof));
         },
         py::arg("n_jobs"),
@@ -68,6 +69,7 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("local_search_interval") = -1,
         py::arg("sched_repair")   = 0,
         py::arg("ablate")         = 0,
+        py::arg("extra_seeds")    = std::vector<std::vector<int>>{},
         "NSGA-II Pareto frontier approximation (parallel).\n\n"
         "p_mut_start/p_mut_end linearly anneal the mutation rate across\n"
         "generations; <0 (default) resolves to the fixed formula rate 2/n_jobs.\n"
@@ -88,11 +90,12 @@ PYBIND11_MODULE(_moea, m) {
            const std::vector<std::tuple<int,int,int>>& init_occ,
            int pop_size, int n_divisions, int n_gen, int seed, int n_threads,
            double p_mut_start, double p_mut_end, int crossover_kind, int tourn_k,
-           int local_search_interval, int sched_repair, int ablate) {
+           int local_search_interval, int sched_repair, int ablate,
+           const std::vector<std::vector<int>>& extra_seeds) {
             auto [results, prof] = run_nsga3(
                 build_problem(n_jobs, budget, job_slots, type_cap, type_risk, init_occ, ablate),
                 pop_size, n_divisions, n_gen, seed, n_threads, p_mut_start, p_mut_end,
-                crossover_kind, tourn_k, local_search_interval, sched_repair, ablate);
+                crossover_kind, tourn_k, local_search_interval, sched_repair, ablate, extra_seeds);
             return py::make_tuple(results, profile_to_dict(prof));
         },
         py::arg("n_jobs"),
@@ -113,6 +116,7 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("local_search_interval") = -1,
         py::arg("sched_repair")   = 0,
         py::arg("ablate")         = 0,
+        py::arg("extra_seeds")    = std::vector<std::vector<int>>{},
         "NSGA-III Pareto frontier approximation (parallel, reference-point selection).\n\n"
         "pop_size should equal n_divisions + 1 for best reference-point coverage.\n"
         "p_mut_start/p_mut_end linearly anneal the mutation rate across\n"
@@ -135,12 +139,13 @@ PYBIND11_MODULE(_moea, m) {
            int n_weights, int n_gen, int neighborhood_size,
            int seed, int n_threads, int max_replace,
            double p_mut_start, double p_mut_end, int crossover_kind, int archive_size,
-           int local_search_interval, int sched_repair, int ablate) {
+           int local_search_interval, int sched_repair, int ablate,
+           const std::vector<std::vector<int>>& extra_seeds) {
             auto [results, prof] = run_moead(
                 build_problem(n_jobs, budget, job_slots, type_cap, type_risk, init_occ, ablate),
                 n_weights, n_gen, neighborhood_size, seed, n_threads, max_replace,
                 p_mut_start, p_mut_end, crossover_kind, archive_size, local_search_interval,
-                sched_repair, ablate);
+                sched_repair, ablate, extra_seeds);
             return py::make_tuple(results, profile_to_dict(prof));
         },
         py::arg("n_jobs"),
@@ -162,6 +167,7 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("local_search_interval") = -1,
         py::arg("sched_repair")      = 0,
         py::arg("ablate")           = 0,
+        py::arg("extra_seeds")      = std::vector<std::vector<int>>{},
         "MOEA/D Pareto frontier approximation (parallel, Tchebycheff decomposition).\n\n"
         "max_replace caps how many neighbours a single child may overwrite per\n"
         "generation (Zhang & Li's nr); <=0 disables the cap (original behaviour).\n"
@@ -185,11 +191,12 @@ PYBIND11_MODULE(_moea, m) {
            const std::vector<std::tuple<int,int,int>>& init_occ,
            double w1, double w2, double f1_cap,
            int pop_size, int n_gen, int seed, int n_threads,
-           int ls_moves, int restart_patience, int shortlist, int ablate) {
+           int ls_moves, int restart_patience, int shortlist, int ablate,
+           const std::vector<std::vector<int>>& extra_seeds, int xover_mode, int mut_mode) {
             auto [asgn, f1, f2, g, ls_calls] = run_weighted(
                 build_problem(n_jobs, budget, job_slots, type_cap, type_risk, init_occ, ablate),
                 w1, w2, f1_cap, pop_size, n_gen, seed, n_threads,
-                ls_moves, restart_patience, shortlist, ablate);
+                ls_moves, restart_patience, shortlist, ablate, extra_seeds, xover_mode, mut_mode);
             return py::make_tuple(asgn, f1, f2, g, ls_calls);
         },
         py::arg("n_jobs"),
@@ -209,11 +216,17 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("restart_patience") = 6,
         py::arg("shortlist")        = 24,
         py::arg("ablate")           = 0,
+        py::arg("extra_seeds")      = std::vector<std::vector<int>>{},
+        py::arg("xover_mode")       = 0,
+        py::arg("mut_mode")        = 0,
         "Single-objective memetic metaheuristic: minimise w1*f1 + w2*f2 with a\n"
         "soft cap f1 <= f1_cap. Memetic GA over per-job type assignments with an\n"
         "SPT list-scheduling decoder + greedy scalar type-flip local search and\n"
-        "ILS perturbation kicks on stagnation. Deterministic for fixed\n"
-        "(seed, n_threads). Returns (assignment, f1, f2, g, n_local_search_calls)."
+        "ILS perturbation kicks on stagnation. xover_mode: 0 = two-point,\n"
+        "1 = none (pure ILS), 2 = Multi-Step Crossover Fusion (scalar-guided walk\n"
+        "from one parent toward the other; best on both 10-min instances). Raw\n"
+        "binding default 0; moea.weighted_solve defaults to 2. Deterministic for\n"
+        "fixed (seed, n_threads). Returns (assignment, f1, f2, g, n_ls_calls)."
     );
 
     m.def("time_seeds",

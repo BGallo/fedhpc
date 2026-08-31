@@ -99,13 +99,100 @@ inline bool weighted_local_search(Individual& ind, const Problem& prob,
     return improved;
 }
 
+// Scalar-directed "release and reinsert" mutation (Feltl & Raidl style, keyed
+// to the weighted-sum direction). For each gene the plain operator would
+// resample uniformly, instead: with probability ∝ the cost weight reinsert the
+// job on a random *cheaper* feasible type, with probability ∝ the turnaround
+// weight on a random *faster* (lower p_occ) type, otherwise uniform — always
+// at that type's earliest slot. Biases exploration toward the objective the
+// current subproblem cares about and, like the reference operator, is less
+// likely to worsen capacity feasibility than a blind resample.
+inline void mutate_scalar(Individual& ind, const Problem& prob, double p_mut,
+                          std::mt19937& rng, double w1, double w2) {
+    std::uniform_real_distribution<double> u(0.0, 1.0);
+    const double s = w1 + w2;
+    const double p_cost = (s > 0.0) ? w2 / s : 0.5;   // reinsert-cheaper prob
+    const double p_fast = (s > 0.0) ? w1 / s : 0.5;   // reinsert-faster prob
+    for (int j = 0; j < prob.n_jobs; j++) {
+        if (u(rng) >= p_mut) continue;
+        const auto& sl = prob.job_slots[j];
+        const int n = static_cast<int>(sl.size());
+        const SlotInfo& cur = sl[ind.genes[j]];
+        const double r = u(rng);
+        int pick = -1;
+        if (r < p_cost || r < p_cost + p_fast) {
+            const bool cheaper = r < p_cost;
+            // collect the qualifying type block starts
+            int cand[64]; int nc = 0;
+            for (const auto& sp : prob.job_type_span[j]) {
+                const SlotInfo& a0 = sl[sp[1]];
+                const bool ok = cheaper ? (a0.cost < cur.cost - 1e-9)
+                                        : (a0.p_occ < cur.p_occ);
+                if (ok && nc < 64) cand[nc++] = sp[1];
+            }
+            if (nc > 0) pick = cand[std::uniform_int_distribution<int>(0, nc - 1)(rng)];
+        }
+        if (pick < 0) pick = std::uniform_int_distribution<int>(0, n - 1)(rng);
+        ind.genes[j] = pick;
+    }
+}
+
+// Multi-Step Crossover Fusion (Yamada & Nakano) for the scalar objective.
+// Instead of an index-level recombination, walk from parent `b` toward parent
+// `a` through the type-assignment space: at each of `steps` iterations adopt
+// the single gene of `a` (among those still differing) whose adoption most
+// reduces g after an SPT decode, keeping the best point met on the path.
+// This does a short guided local search in the region *between* the parents —
+// it never shreds a building block the way index crossover can.
+inline Individual msxf(const Individual& a, const Individual& b, const Problem& prob,
+                       EvalWorkspace& ws, const WeightedScalar& G,
+                       int steps, int fpb, std::mt19937& rng) {
+    Individual cur = b;
+    schedule_repair(cur, prob, ws, 2, fpb);
+    evaluate(cur, prob, ws);
+    Individual best = cur;
+    double best_g = G(cur);
+
+    std::vector<int> diff;
+    for (int s = 0; s < steps; s++) {
+        diff.clear();
+        for (int j = 0; j < prob.n_jobs; j++)
+            if (prob.job_slots[j][cur.genes[j]].type_id
+                != prob.job_slots[j][a.genes[j]].type_id)
+                diff.push_back(j);
+        if (diff.empty()) break;
+        // sample up to 12 differing genes, decode each adoption, take the best
+        const int K = std::min<int>((int)diff.size(), 12);
+        for (int i = 0; i < K; i++) {
+            std::uniform_int_distribution<int> di(i, (int)diff.size() - 1);
+            std::swap(diff[i], diff[di(rng)]);
+        }
+        double step_g = 1e300; int step_j = -1; Individual step_ind;
+        for (int i = 0; i < K; i++) {
+            const int j = diff[i];
+            Individual w = cur;
+            w.genes[j] = a.genes[j];
+            schedule_repair(w, prob, ws, 2, fpb);
+            evaluate(w, prob, ws);
+            const double gw = G(w);
+            if (gw < step_g) { step_g = gw; step_j = j; step_ind = std::move(w); }
+        }
+        if (step_j < 0) break;
+        cur = std::move(step_ind);
+        if (step_g < best_g) { best_g = step_g; best = cur; }
+    }
+    return best;
+}
+
 // Result: (assignment, f1, f2, g, n_local_search_calls).
 using WeightedResult = std::tuple<std::vector<std::tuple<int,int>>, double, double, double, int>;
 
 inline WeightedResult
 run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
              int pop_size, int n_gen, int seed, int n_threads,
-             int ls_moves, int restart_patience, int shortlist, int ablate = 0) {
+             int ls_moves, int restart_patience, int shortlist, int ablate = 0,
+             const std::vector<std::vector<int>>& extra_seeds = {}, int xover_mode = 0,
+             int mut_mode = 0) {
     py::gil_scoped_release release;
     set_num_threads(n_threads);
 
@@ -114,6 +201,7 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
     const bool abl_xover = ablate & ABL_NO_CROSSOVER;
     const bool abl_kick  = ablate & ABL_NO_ILS_KICK;
     const bool abl_elit  = ablate & ABL_NO_ELITISM;
+    const bool abl_mut   = ablate & ABL_NO_MUTATION;
 
     std::mt19937 rng(seed);
     WeightedScalar G{w1, w2, f1_cap,
@@ -126,7 +214,7 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
     std::vector<uint32_t> init_seeds(pop_size);
     for (auto& s : init_seeds) s = rng();
 
-    auto h_seeds = abl_seeds ? std::vector<Individual>{} : make_heuristic_seeds(prob);
+    auto h_seeds = make_seeds(prob, extra_seeds, abl_seeds);
     const int n_hs = std::min<int>((int)h_seeds.size(), pop_size);
 
     std::vector<Individual> pop(pop_size);
@@ -194,8 +282,18 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
                     const int a = ri(lrng), b = ri(lrng);
                     return (G(pop[a]) <= G(pop[b])) ? a : b;
                 };
-                Individual c = abl_xover ? pop[pick()] : crossover(pop[pick()], pop[pick()], lrng, 0);
-                mutate(c, prob, p_mut, lrng);
+                Individual c;
+                if (abl_xover || xover_mode == 1) { c = pop[pick()]; }
+                else if (xover_mode == 2) {
+                    EvalWorkspace& wsx = ws;
+                    c = msxf(pop[pick()], pop[pick()], prob, wsx, G,
+                             std::max(1, gen_moves), (ablate & ABL_NO_FREE_POOL) ? 0 : 1, lrng);
+                }
+                else { c = crossover(pop[pick()], pop[pick()], lrng, 0); }
+                if (!abl_mut) {
+                    if (mut_mode == 1) mutate_scalar(c, prob, p_mut, lrng, w1, w2);
+                    else mutate(c, prob, p_mut, lrng);
+                }
                 weighted_local_search(c, prob, ws, G, gen_moves, shortlist, ablate);
                 local_calls++;
                 offspring[k] = std::move(c);
@@ -213,8 +311,18 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
                     const int a = ri(lrng), b = ri(lrng);
                     return (G(pop[a]) <= G(pop[b])) ? a : b;
                 };
-                Individual c = abl_xover ? pop[pick()] : crossover(pop[pick()], pop[pick()], lrng, 0);
-                mutate(c, prob, p_mut, lrng);
+                Individual c;
+                if (abl_xover || xover_mode == 1) { c = pop[pick()]; }
+                else if (xover_mode == 2) {
+                    EvalWorkspace& wsx = ws;
+                    c = msxf(pop[pick()], pop[pick()], prob, wsx, G,
+                             std::max(1, gen_moves), (ablate & ABL_NO_FREE_POOL) ? 0 : 1, lrng);
+                }
+                else { c = crossover(pop[pick()], pop[pick()], lrng, 0); }
+                if (!abl_mut) {
+                    if (mut_mode == 1) mutate_scalar(c, prob, p_mut, lrng, w1, w2);
+                    else mutate(c, prob, p_mut, lrng);
+                }
                 weighted_local_search(c, prob, ws, G, gen_moves, shortlist, ablate);
                 ls_calls++;
                 offspring[k] = std::move(c);

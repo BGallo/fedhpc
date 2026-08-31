@@ -1132,3 +1132,100 @@ class TestAblate:
         a = weighted_solve(known_pareto_inst, 0.5, pop_size=12, n_gen=15, ablate=0)
         b = weighted_solve(known_pareto_inst, 0.5, pop_size=12, n_gen=15)
         assert (a.f1, a.f2) == (b.f1, b.f2)
+
+
+# ---------------------------------------------------------------------------
+# extra_seeds — caller-supplied warm-start genomes (LP relaxation etc.)
+# ---------------------------------------------------------------------------
+
+class TestExtraSeeds:
+    """A caller-supplied genome is validated (clamped into range), repaired
+    like a heuristic seed, and cannot break determinism, feasibility, or the
+    non-dominance of the returned set. An empty list == omitting the arg."""
+
+    def _genomes(self, inst, n):
+        slots = _job_slots(inst)
+        # a few deterministic in-range genomes + one deliberately out-of-range
+        g0 = [0 for _ in inst.jobs]
+        g1 = [len(slots[j.id]) - 1 for j in inst.jobs]
+        g_bad = [9999 for _ in inst.jobs]           # must be clamped, not crash
+        g_short = [0]                                # wrong length, must be skipped
+        return [g0, g1, g_bad, g_short][:n]
+
+    @pytest.mark.parametrize("frontier_fn,kwargs", [
+        (nsga2_frontier, {"pop_size": 40, "n_gen": 60, "seed": 42}),
+        (nsga3_frontier, {"pop_size": 40, "n_divisions": 39, "n_gen": 60, "seed": 42}),
+        (moead_frontier, {"n_weights": 40, "n_gen": 60, "seed": 42}),
+    ], ids=["nsga2", "nsga3", "moead"])
+    def test_valid_deterministic_with_extra_seeds(self, frontier_fn, kwargs, known_pareto_inst):
+        inst = known_pareto_inst
+        ex = self._genomes(inst, 4)
+        a = frontier_fn(inst, extra_seeds=ex, **kwargs)
+        b = frontier_fn(inst, extra_seeds=ex, **kwargs)
+        assert unique_front_points(a) == unique_front_points(b)
+        assert len(a) > 0 and is_non_dominated_set(a)
+        for s in a:
+            assert s.f2 <= inst.budget + 1e-6
+            assert capacity_violations(inst, s) == []
+            assert recompute_f1(inst, s) == pytest.approx(s.f1, abs=1e-6)
+
+    def test_empty_extra_seeds_matches_omitted(self, known_pareto_inst):
+        a = nsga2_frontier(known_pareto_inst, pop_size=40, n_gen=60, seed=42, extra_seeds=[])
+        b = nsga2_frontier(known_pareto_inst, pop_size=40, n_gen=60, seed=42)
+        assert unique_front_points(a) == unique_front_points(b)
+
+    def test_weighted_solve_accepts_extra_seeds_indirectly(self, known_pareto_inst):
+        # weighted_solve exposes lp_seed (needs Gurobi); the raw path takes
+        # extra_seeds. Exercise the raw path with a hand genome.
+        from fedhpc.moea import _weighted_raw
+        inst = known_pareto_inst
+        g = [0 for _ in inst.jobs]
+        asgn, f1, f2, _g, _ls = _weighted_raw(
+            inst, 0.5, 0.5, 1e18, pop_size=12, n_gen=15, seed=1, n_threads=0,
+            ls_moves=4, restart_patience=0, shortlist=8, extra_seeds=[g])
+        asgn2, f1b, f2b, *_ = _weighted_raw(
+            inst, 0.5, 0.5, 1e18, pop_size=12, n_gen=15, seed=1, n_threads=0,
+            ls_moves=4, restart_patience=0, shortlist=8, extra_seeds=[g])
+        assert (f1, f2) == (f1b, f2b)
+
+
+class TestWeightedXoverMode:
+    """weighted_solve xover_mode: 0 = two-point, 1 = none (pure ILS),
+    2 = MSXF (default). All must stay valid + deterministic; the raw binding
+    still defaults to 0."""
+
+    @pytest.mark.parametrize("xm", [0, 1, 2])
+    @pytest.mark.parametrize("lam", [0.0, 0.5, 1.0])
+    def test_valid_deterministic(self, xm, lam, known_pareto_inst):
+        inst = known_pareto_inst
+        a = weighted_solve(inst, lam, pop_size=12, n_gen=15, xover_mode=xm)
+        b = weighted_solve(inst, lam, pop_size=12, n_gen=15, xover_mode=xm)
+        assert (a.f1, a.f2) == (b.f1, b.f2)
+        assert capacity_violations(inst, a) == []
+        assert a.f2 <= inst.budget + 1e-6
+        assert recompute_f1(inst, a) == pytest.approx(a.f1, abs=1e-6)
+
+    def test_default_is_msxf(self, known_pareto_inst):
+        default = weighted_solve(known_pareto_inst, 0.5, pop_size=12, n_gen=15)
+        msxf = weighted_solve(known_pareto_inst, 0.5, pop_size=12, n_gen=15, xover_mode=2)
+        assert (default.f1, default.f2) == (msxf.f1, msxf.f2)
+
+
+class TestWeightedMutMode:
+    """mut_mode 0 = uniform resample (default), 1 = scalar-directed reinsert.
+    Both must stay valid + deterministic."""
+
+    @pytest.mark.parametrize("mm", [0, 1])
+    @pytest.mark.parametrize("lam", [0.0, 0.5, 1.0])
+    def test_valid_deterministic(self, mm, lam, known_pareto_inst):
+        inst = known_pareto_inst
+        a = weighted_solve(inst, lam, pop_size=12, n_gen=15, mut_mode=mm)
+        b = weighted_solve(inst, lam, pop_size=12, n_gen=15, mut_mode=mm)
+        assert (a.f1, a.f2) == (b.f1, b.f2)
+        assert capacity_violations(inst, a) == []
+        assert recompute_f1(inst, a) == pytest.approx(a.f1, abs=1e-6)
+
+    def test_default_is_uniform(self, known_pareto_inst):
+        d = weighted_solve(known_pareto_inst, 0.5, pop_size=12, n_gen=15)
+        u = weighted_solve(known_pareto_inst, 0.5, pop_size=12, n_gen=15, mut_mode=0)
+        assert (d.f1, d.f2) == (u.f1, u.f2)

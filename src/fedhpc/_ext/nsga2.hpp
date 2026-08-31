@@ -118,7 +118,8 @@ inline std::pair<ResultList, Profile>
 run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed, int n_threads,
           double p_mut_start = -1.0, double p_mut_end = -1.0, int crossover_kind = 0,
           int tourn_k = 2, int local_search_interval = -1, int sched_repair = 0,
-          int ablate = 0) {
+          int ablate = 0,
+          const std::vector<std::vector<int>>& extra_seeds = {}) {
     py::gil_scoped_release release;
     set_num_threads(n_threads);
 
@@ -153,7 +154,7 @@ run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed, int n_threads,
     std::vector<uint32_t> init_seeds(pop_size);
     for (auto& s : init_seeds) s = rng();
 
-    auto h_seeds   = abl_seeds ? std::vector<Individual>{} : make_heuristic_seeds(prob);
+    auto h_seeds   = make_seeds(prob, extra_seeds, abl_seeds);
     const int n_hs = static_cast<int>(h_seeds.size());
 
     // Repair the seeds before they enter the population: make_greedy() in
@@ -249,7 +250,7 @@ run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed, int n_threads,
                 const Individual& p2 = (tourn_k == 2)
                     ? tournament(pop[ri(lrng)], pop[ri(lrng)])
                     : tournament_k(pop, tourn_k, lrng);
-                offspring[k] = abl_xover ? p1 : crossover(p1, p2, lrng, crossover_kind);
+                offspring[k] = abl_xover ? p1 : crossover(p1, p2, lrng, crossover_kind, &prob);
                 mutate(offspring[k], prob, p_mut_gen, lrng);
                 evaluate(offspring[k], prob, ws);
             }
@@ -267,7 +268,7 @@ run_nsga2(const Problem& prob, int pop_size, int n_gen, int seed, int n_threads,
                 const Individual& p2 = (tourn_k == 2)
                     ? tournament(pop[ri(lrng)], pop[ri(lrng)])
                     : tournament_k(pop, tourn_k, lrng);
-                offspring[k] = abl_xover ? p1 : crossover(p1, p2, lrng, crossover_kind);
+                offspring[k] = abl_xover ? p1 : crossover(p1, p2, lrng, crossover_kind, &prob);
                 mutate(offspring[k], prob, p_mut_gen, lrng);
                 evaluate(offspring[k], prob, ws);
             }

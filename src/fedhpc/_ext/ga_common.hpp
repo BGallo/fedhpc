@@ -74,6 +74,7 @@ enum AblateFlag {
     ABL_NO_ELITISM         = 1 << 7,  // weighted: do not carry the incumbent forward
     ABL_NO_EST_SHORTLIST   = 1 << 8,  // weighted_local_search: unranked candidate scan
     ABL_NO_FREE_POOL       = 1 << 9,  // weighted: schedule_repair without free_pool_balance
+    ABL_NO_MUTATION        = 1 << 10, // skip the mutation operator
 };
 
 // ── Threading ─────────────────────────────────────────────────────────────────
@@ -297,9 +298,32 @@ inline Individual crossover_uniform(const Individual& p1, const Individual& p2,
     return child;
 }
 
-// CrossoverKind: 0 = two-point (default, original behaviour), 1 = uniform.
+// Type-group (pool-transfer) crossover — problem-specific. Cost (f2) is a
+// function of the type vector alone, and the free on-prem pools + each cloud
+// type are the natural "groups" (cf. Falkenauer's grouping GA). The child is
+// p2 everywhere, then every job that p1 places on one randomly chosen type is
+// overwritten with p1's gene — transplanting a coherent pool-packing (the same
+// cost block *and* its schedule) from p1 into p2 in a single step, which
+// neither two-point nor uniform can do without shredding it.
+inline Individual crossover_type_group(const Individual& p1, const Individual& p2,
+                                       std::mt19937& rng, const Problem& prob) {
+    Individual child = p2;
+    const int n = prob.n_jobs;
+    if (n == 0) return child;
+    const int pivot = std::uniform_int_distribution<int>(0, n - 1)(rng);
+    const int m = prob.job_slots[pivot][p1.genes[pivot]].type_id;
+    for (int j = 0; j < n; j++)
+        if (prob.job_slots[j][p1.genes[j]].type_id == m)
+            child.genes[j] = p1.genes[j];
+    return child;
+}
+
+// CrossoverKind: 0 = two-point (default), 1 = uniform, 2 = type-group.
+// prob is required for kind 2; the caller passes it from the offspring loop.
 inline Individual crossover(const Individual& p1, const Individual& p2,
-                             std::mt19937& rng, int kind = 0) {
+                             std::mt19937& rng, int kind = 0,
+                             const Problem* prob = nullptr) {
+    if (kind == 2 && prob) return crossover_type_group(p1, p2, rng, *prob);
     return (kind == 1) ? crossover_uniform(p1, p2, rng)
                         : crossover_two_point(p1, p2, rng);
 }
@@ -566,6 +590,34 @@ inline std::vector<Individual> make_heuristic_seeds(const Problem& prob) {
         make_star_wait(prob),         // 6: staggered by job index
         make_list_schedule(prob),     // 7: capacity-aware list scheduling
     };
+}
+
+// Full seed set for a run: any caller-supplied genomes first (e.g. rounded
+// LP-relaxation solutions from moea._lp_relaxation_seeds), then the
+// deterministic heuristic constructors. Supplied genomes must have exactly
+// n_jobs entries; each gene is clamped into its job's valid slot range.
+// skip_heuristic drops the constructors (ABL_NO_HEURISTIC_SEEDS) but keeps
+// the supplied genomes.
+inline std::vector<Individual> make_seeds(
+    const Problem& prob,
+    const std::vector<std::vector<int>>& extra,
+    bool skip_heuristic = false) {
+    std::vector<Individual> out;
+    out.reserve(extra.size() + 8);
+    for (const auto& g : extra) {
+        if (static_cast<int>(g.size()) != prob.n_jobs) continue;
+        Individual ind;
+        ind.genes.resize(prob.n_jobs);
+        for (int j = 0; j < prob.n_jobs; j++) {
+            const int n = static_cast<int>(prob.job_slots[j].size());
+            const int k = g[j];
+            ind.genes[j] = (k < 0) ? 0 : (k >= n ? n - 1 : k);
+        }
+        out.push_back(std::move(ind));
+    }
+    if (!skip_heuristic)
+        for (auto& s : make_heuristic_seeds(prob)) out.push_back(std::move(s));
+    return out;
 }
 
 inline void mutate(Individual& ind, const Problem& prob, double p_mut,
