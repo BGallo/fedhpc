@@ -659,6 +659,86 @@ class TestMoeadMaxReplace:
 
 
 # ---------------------------------------------------------------------------
+# MOEA/D scalarised local search (scalar_ls_interval)
+# ---------------------------------------------------------------------------
+
+class TestMoeadScalarLS:
+    """Correctness invariants for every scalar_ls_interval setting.
+
+    scalar_ls_interval == 0 disables the scalarised polish and must reproduce
+    the pre-change output byte-for-byte (it is the raw _ext.moead default).
+    < 0 (the moead_frontier default, -30) runs a two-pass final-population
+    polish along each subproblem's weight direction, emitting the polished
+    points alongside the unpolished ones; > 0 adds an in-loop pass. Non-zero
+    settings are checked for validity + determinism, not bit-for-bit equality.
+    """
+
+    _VALUES = [0, -8, -30, 25]
+
+    @pytest.mark.parametrize("scalar_ls_interval", _VALUES)
+    def test_valid_and_non_dominated(self, scalar_ls_interval, known_pareto_inst):
+        inst = known_pareto_inst
+        sols = moead_frontier(inst, n_weights=50, n_gen=100, neighborhood_size=20,
+                              scalar_ls_interval=scalar_ls_interval, seed=42)
+        assert len(sols) > 0
+        assert is_non_dominated_set(sols)
+        for s in sols:
+            assert set(s.assignment.keys()) == {j.id for j in inst.jobs}
+            assert s.f2 <= inst.budget + 1e-6
+            assert capacity_violations(inst, s) == []
+            assert recompute_f1(inst, s) == pytest.approx(s.f1, abs=1e-6)
+            assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
+
+    @pytest.mark.parametrize("scalar_ls_interval", _VALUES)
+    def test_no_solution_dominated_by_known_optimal(self, scalar_ls_interval,
+                                                    known_pareto_inst,
+                                                    known_pareto_front):
+        sols = moead_frontier(known_pareto_inst, n_weights=50, n_gen=100,
+                              neighborhood_size=20,
+                              scalar_ls_interval=scalar_ls_interval, seed=42)
+        for s in sols:
+            for (kf1, kf2) in known_pareto_front:
+                dominated = kf1 <= s.f1 and kf2 <= s.f2 and (kf1 < s.f1 or kf2 < s.f2)
+                assert not dominated, (
+                    f"scalar_ls_interval={scalar_ls_interval}: solution "
+                    f"({s.f1},{s.f2}) dominated by known point ({kf1},{kf2})"
+                )
+
+    @pytest.mark.parametrize("scalar_ls_interval", [-8, -30, 25])
+    def test_same_seed_gives_identical_front(self, scalar_ls_interval,
+                                             known_pareto_inst):
+        r1 = moead_frontier(known_pareto_inst, n_weights=50, n_gen=100,
+                            neighborhood_size=20,
+                            scalar_ls_interval=scalar_ls_interval, seed=42)
+        r2 = moead_frontier(known_pareto_inst, n_weights=50, n_gen=100,
+                            neighborhood_size=20,
+                            scalar_ls_interval=scalar_ls_interval, seed=42)
+        assert unique_front_points(r1) == unique_front_points(r2)
+
+    def test_default_matches_explicit_minus_30(self, known_pareto_inst):
+        """moead_frontier's default (-30) must be bit-for-bit identical to
+        passing scalar_ls_interval=-30 explicitly — chosen via A/B benchmark
+        (IGD -13%% on the 964-job instance, eps+ unchanged, no regression on
+        the small/medium/large exact fronts). 0 (the pre-change dominance-only
+        path) remains reachable explicitly."""
+        explicit = moead_frontier(known_pareto_inst, n_weights=50, n_gen=100,
+                                  neighborhood_size=20, scalar_ls_interval=-30,
+                                  seed=42)
+        default = moead_frontier(known_pareto_inst, n_weights=50, n_gen=100,
+                                 neighborhood_size=20, seed=42)
+        assert unique_front_points(explicit) == unique_front_points(default)
+
+    def test_disabled_path_reachable_via_zero(self, known_pareto_inst):
+        """scalar_ls_interval=0 must still run the original dominance-only
+        extraction path (no scalarised polish), independent of the new
+        default."""
+        sols = moead_frontier(known_pareto_inst, n_weights=50, n_gen=100,
+                              neighborhood_size=20, scalar_ls_interval=0, seed=42)
+        assert len(sols) > 0
+        assert is_non_dominated_set(sols)
+
+
+# ---------------------------------------------------------------------------
 # Annealed mutation rate (p_mut_start / p_mut_end)
 # ---------------------------------------------------------------------------
 

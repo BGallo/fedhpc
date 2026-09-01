@@ -139,13 +139,13 @@ PYBIND11_MODULE(_moea, m) {
            int n_weights, int n_gen, int neighborhood_size,
            int seed, int n_threads, int max_replace,
            double p_mut_start, double p_mut_end, int crossover_kind, int archive_size,
-           int local_search_interval, int sched_repair, int ablate,
+           int local_search_interval, int sched_repair, int scalar_ls_interval, int ablate,
            const std::vector<std::vector<int>>& extra_seeds) {
             auto [results, prof] = run_moead(
                 build_problem(n_jobs, budget, job_slots, type_cap, type_risk, init_occ, ablate),
                 n_weights, n_gen, neighborhood_size, seed, n_threads, max_replace,
                 p_mut_start, p_mut_end, crossover_kind, archive_size, local_search_interval,
-                sched_repair, ablate, extra_seeds);
+                sched_repair, scalar_ls_interval, ablate, extra_seeds);
             return py::make_tuple(results, profile_to_dict(prof));
         },
         py::arg("n_jobs"),
@@ -166,6 +166,7 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("archive_size")      = 0,
         py::arg("local_search_interval") = -1,
         py::arg("sched_repair")      = 0,
+        py::arg("scalar_ls_interval") = 0,
         py::arg("ablate")           = 0,
         py::arg("extra_seeds")      = std::vector<std::vector<int>>{},
         "MOEA/D Pareto frontier approximation (parallel, Tchebycheff decomposition).\n\n"
@@ -179,6 +180,14 @@ PYBIND11_MODULE(_moea, m) {
         "local_search_interval: generations between periodic congestion-repair /\n"
         "cost-descent local search on the population; <0 (default) resolves to\n"
         "~10 applications spread across the run, 0 disables (seeds+final only).\n"
+        "scalar_ls_interval: *scalarised* local search (weighted-sum type-flip\n"
+        "hill climb along each subproblem's own weight direction) — makes\n"
+        "trade-off moves the dominance-only local search cannot. 0 (raw-binding\n"
+        "default) disables it, output byte-for-byte unchanged. <0: strong\n"
+        "two-pass final-population polish only, budget |value|, polished points\n"
+        "emitted alongside the unpolished ones (pure upside). >0: in-loop pass\n"
+        "every N gens + the final polish. Deterministic for fixed\n"
+        "(seed, n_threads). moea.moead_frontier defaults to -30.\n"
         "Returns (solutions, profile_dict) where profile_dict maps phase names\n"
         "to wall-clock milliseconds.  n_threads=0 lets OpenMP choose."
     );

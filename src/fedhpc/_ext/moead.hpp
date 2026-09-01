@@ -37,6 +37,7 @@
 #pragma once
 
 #include "ga_common.hpp"
+#include "weighted.hpp"   // weighted_local_search / WeightedScalar (scalar_ls_interval)
 
 // Insert cand into a bounded non-dominated archive (no-op if cand is
 // infeasible or dominated by an existing member). Newly-dominated members
@@ -69,11 +70,54 @@ inline void archive_insert(std::vector<Individual>& archive, const Individual& c
     archive.erase(archive.begin() + worst);
 }
 
+// Scalarised local search over a whole MOEA/D population: hill-climb pop[i]
+// on the weighted sum (lam1/r1)*f1 + (lam2/r2)*f2 along its own subproblem's
+// normalised weight direction W[i]. weighted_local_search() carries no RNG so
+// this is bit-for-bit deterministic for a fixed (seed, n_threads), like the
+// dominance-only local_search() sweep. Mutates pop in place and re-evaluates.
+inline void scalar_polish_pop(std::vector<Individual>& pop,
+                              const std::vector<std::pair<double,double>>& W,
+                              const Problem& prob,
+                              double z1, double z2, double n1, double n2,
+                              int max_moves, int ablate, double& time_acc) {
+    const auto t0 = Clock::now();
+    const double r1 = std::max(n1 - z1, 1.0);
+    const double r2 = std::max(n2 - z2, 1.0);
+    const int n = static_cast<int>(pop.size());
+#ifdef _OPENMP
+    #pragma omp parallel
+    {
+        EvalWorkspace ws;
+        ws.reset(prob.n_types, prob.max_slot);
+        #pragma omp for schedule(dynamic, 8)
+        for (int i = 0; i < n; i++) {
+            const WeightedScalar G{W[i].first / r1, W[i].second / r2, 1e18,
+                                   (W[i].first / r1) * 1e3};
+            weighted_local_search(pop[i], prob, ws, G, max_moves, 12, ablate);
+            evaluate(pop[i], prob, ws);
+        }
+    }
+#else
+    {
+        EvalWorkspace ws;
+        ws.reset(prob.n_types, prob.max_slot);
+        for (int i = 0; i < n; i++) {
+            const WeightedScalar G{W[i].first / r1, W[i].second / r2, 1e18,
+                                   (W[i].first / r1) * 1e3};
+            weighted_local_search(pop[i], prob, ws, G, max_moves, 12, ablate);
+            evaluate(pop[i], prob, ws);
+        }
+    }
+#endif
+    time_acc += ms_since(t0);
+}
+
 inline std::pair<ResultList, Profile>
 run_moead(const Problem& prob, int n_weights, int n_gen,
           int T_size, int seed, int n_threads, int max_replace = -1,
           double p_mut_start = -1.0, double p_mut_end = -1.0, int crossover_kind = 0,
           int archive_size = 0, int local_search_interval = -1, int sched_repair = 0,
+          int scalar_ls_interval = 0,
           int ablate = 0,
           const std::vector<std::vector<int>>& extra_seeds = {}) {
     py::gil_scoped_release release;
@@ -346,7 +390,26 @@ run_moead(const Problem& prob, int n_weights, int n_gen,
 #endif
             local_search_ms += ms_since(t_ls);
         }
+
+        // ── Periodic scalarised local search (opt-in: scalar_ls_interval > 0) ──
+        // For a spread of subproblems, greedy descent on the weighted sum
+        //   (lam1/r1)*f1 + (lam2/r2)*f2
+        // in that subproblem's own normalised weight direction, using
+        // weighted_local_search() (SPT-decoded type-flip hill climb from
+        // weighted.hpp). Unlike the dominance-only local_search() above, this
+        // *can* make trade-off moves (worsen one objective to improve the
+        // weighted scalar) — the gradient the middle of the front needs, where
+        // the dominance operators stall. The improved genes flow back into the
+        // neighbourhood via the next generation's replacement step. Carries no
+        // RNG, so results stay bit-for-bit deterministic for a fixed
+        // (seed, n_threads). scalar_ls_interval == 0 (default) skips it.
+        if (scalar_ls_interval > 0 && (gen + 1) % scalar_ls_interval == 0)
+            scalar_polish_pop(pop, W, prob, z1, z2, n1, n2, 2, ablate,
+                              local_search_ms);
     }
+    // scalar_ls_interval < 0 requests the strong final polish only (no in-loop
+    // pass) — the in-loop pass perturbs MOEA/D's spread and can cost coverage
+    // at the extremes, while the dual-emitted final polish is pure upside.
 
     // ── Extract Pareto front ──────────────────────────────────────────────────
 
@@ -376,6 +439,45 @@ run_moead(const Problem& prob, int n_weights, int n_gen,
     if (archive_size > 0)
         for (auto& ind : archive)
             results.emplace_back(extract_assignment(ind, prob), ind.f1, ind.f2);
+
+    // ── Strong scalarised final polish (opt-in: scalar_ls_interval != 0) ──────
+    // Hill-climb a COPY of each subproblem's solution on the weighted sum along
+    // its own weight direction, with a much larger move budget than the in-loop
+    // pass, over two passes (the ideal/nadir box shifts after the first), and
+    // emit the polished points *in addition to* the unpolished ones.
+    // pareto_filter() below then keeps whichever dominates — so this can only
+    // add non-dominated points, never remove coverage the population already
+    // had. This is where the dominance-only extraction polish above
+    // structurally can't go: trading turnaround for cost (or vice versa)
+    // toward each direction's true scalar optimum.
+    //
+    // scalar_ls_interval > 0 : in-loop pass every N gens + this final polish
+    //                          (budget 12).
+    // scalar_ls_interval < 0 : this final polish only (budget |N|, min 8) —
+    //                          the in-loop pass perturbs MOEA/D's spread and
+    //                          can cost extreme-point coverage, whereas the
+    //                          dual-emitted final polish is pure upside.
+    if (scalar_ls_interval != 0) {
+        const int budget = (scalar_ls_interval < 0)
+            ? std::max(8, -scalar_ls_interval) : 12;
+        std::vector<Individual> polished(pop.begin(), pop.end());
+        double sink = 0.0;
+        for (int pass = 0; pass < 2; pass++) {
+            double q1 = z1, q2 = z2, m1 = n1, m2 = n2;
+            for (const auto& ind : polished)
+                if (ind.cv == 0.0) {
+                    q1 = std::min(q1, ind.f1); q2 = std::min(q2, ind.f2);
+                    m1 = std::max(m1, ind.f1); m2 = std::max(m2, ind.f2);
+                }
+            scalar_polish_pop(polished, W, prob, q1, q2, m1, m2,
+                              pass == 0 ? budget : std::max(4, budget / 2),
+                              ablate, sink);
+        }
+        local_search_ms += sink;
+        for (auto& ind : polished)
+            if (ind.cv == 0.0)
+                results.emplace_back(extract_assignment(ind, prob), ind.f1, ind.f2);
+    }
     auto filtered = pareto_filter(std::move(results));
 
     const double extract_ms = ms_since(t_extract);
