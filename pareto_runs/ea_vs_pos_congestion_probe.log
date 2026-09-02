@@ -1,0 +1,20 @@
+/home/bernardo/Documentos/programs/fedhpc/src/fedhpc/data.py:244: UserWarning: Running jobs for type 2 exceed capacity 512; excess entries are ignored.
+  inst.build()
+/home/bernardo/Documentos/programs/fedhpc/src/fedhpc/data.py:244: UserWarning: Running jobs for type 1 exceed capacity 406; excess entries are ignored.
+  inst.build()
+/home/bernardo/Documentos/programs/fedhpc/src/fedhpc/data.py:244: UserWarning: Running jobs for type 3 exceed capacity 448; excess entries are ignored.
+  inst.build()
+data/pos_congestion_known_runtime_offline_10min.json
+  3340 jobs, 28 types, H=288, B=1000000000
+  known exact front: 5 proven-optimal points (PARTIAL — early-stage map)
+    f1 in [44163.67, 51251.67]   f2 in [0.00, 648.53]
+
+  EA params: pop=200, n_gen=300, seed=42
+  algo      card  exact  dom_by_known  ea_dom       IGD      eps+     t(s)
+  ------------------------------------------------------------------------
+  NSGA-II    110      0           109       0   0.63052   0.91218      3.2
+  NSGA-III    65      0            64       0   0.71254   1.00288      3.1
+  MOEA/D      46      0            46       0   1.58090   2.02441     15.3
+
+  dom_by_known = EA points strictly dominated by a proven point (should be 0..few).
+  ea_dominates must be 0 (else a bug: an EA point beat a proven global optimum).

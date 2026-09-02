@@ -1,0 +1,95 @@
+
+Gurobi 13.0.1 (linux64) logging started Tue Sep  1 19:57:27 2026
+
+Set parameter LogFile to value "results/lambda_eval/ablation/fedhpc_known_runtime_offline_10min_lam0.5_crossover_off.gurobi.log"
+Set parameter TimeLimit to value 1500
+Set parameter MIPGap to value 0.0001
+Set parameter Crossover to value 0
+Gurobi Optimizer version 13.0.1 build v13.0.1rc0 (linux64 - "CachyOS")
+
+CPU model: Intel(R) Core(TM) i7-14700KF, instruction set [SSE2|AVX|AVX2]
+Thread count: 28 physical cores, 28 logical processors, using up to 28 threads
+
+Non-default parameters:
+TimeLimit  1500
+Crossover  0
+LogToConsole  0
+
+Academic license 2669763 - for non-commercial use only - registered to bg___@id.uff.br
+Optimize a model with 9376 rows, 7653711 columns and 36925802 nonzeros (Min)
+Model fingerprint: 0x33898f67
+Model has 7645330 linear objective coefficients
+Variable types: 0 continuous, 7653711 integer (7645330 binary)
+Coefficient statistics:
+  Matrix range     [1e-02, 3e+02]
+  Objective range  [9e-05, 2e-01]
+  Bounds range     [1e+00, 1e+00]
+  RHS range        [1e+00, 1e+09]
+
+Presolve removed 52 rows and 20758 columns (presolve time = 5s)...
+Presolve removed 137 rows and 20843 columns (presolve time = 10s)...
+Presolve removed 137 rows and 29743 columns (presolve time = 15s)...
+Presolve removed 137 rows and 29743 columns (presolve time = 20s)...
+Presolve removed 137 rows and 29743 columns (presolve time = 25s)...
+Presolve removed 137 rows and 29743 columns (presolve time = 31s)...
+Presolve removed 137 rows and 29743 columns
+Presolve time: 32.70s
+Presolved: 9239 rows, 7623968 columns, 30456351 nonzeros
+Variable types: 0 continuous, 7623968 integer (7615725 binary)
+Deterministic concurrent LP optimizer: primal simplex, dual simplex, and barrier
+Showing barrier log only...
+
+Warning: Concurrent optimizer requires crossover - forcing it on
+Root barrier log...
+
+Ordering time: 0.47s
+
+Barrier statistics:
+ AA' NZ     : 8.221e+06
+ Factor NZ  : 4.087e+07 (roughly 3.4 GB of memory)
+ Factor Ops : 2.440e+11 (less than 1 second per iteration)
+ Threads    : 26
+
+                  Objective                Residual
+Iter       Primal          Dual         Primal    Dual     Compl     Time
+   0   2.53228148e+08 -6.18554369e+06  6.95e+10 6.94e-18  3.11e+02    68s
+   1   1.00906187e+08 -4.73331480e+06  2.77e+10 1.96e-02  1.23e+02    70s
+   2   6.10695820e+07 -3.14135979e+06  1.68e+10 7.48e-03  7.54e+01    73s
+
+Barrier performed 2 iterations in 72.58 seconds (179.69 work units)
+Barrier solve interrupted - model solved by another algorithm
+
+Concurrent spin time: 3.33s (can be avoided by choosing Method=3)
+
+Solved with dual simplex
+
+Root simplex log...
+
+Iteration    Objective       Primal Inf.    Dual Inf.      Time
+   14025    1.3788592e+00   0.000000e+00   0.000000e+00     74s
+
+Root relaxation: objective 1.378859e+00, 14025 iterations, 17.44 seconds (26.00 work units)
+
+    Nodes    |    Current Node    |     Objective Bounds      |     Work
+ Expl Unexpl |  Obj  Depth IntInf | Incumbent    BestBd   Gap | It/Node Time
+
+*    0     0               0       1.3788592    1.37886  0.00%     -   73s
+
+Explored 1 nodes (14025 simplex iterations) in 73.86 seconds (182.14 work units)
+Thread count was 28 (of 28 available processors)
+
+Solution count 1: 1.37886 
+
+Optimal solution found (tolerance 1.00e-04)
+Best objective 1.378859157955e+00, best bound 1.378859157955e+00, gap 0.0000%
+Discarded solution information including additional information
+Set parameter Method to value -1
+Set parameter Crossover to value -1
+Set parameter Presolve to value -1
+Set parameter Cuts to value -1
+Set parameter MIPFocus to value 0
+Set parameter NumericFocus to value 0
+Set parameter Heuristics to value 0.05
+Set parameter Threads to value 0
+Set parameter OutputFlag to value 1
+Set parameter LogToConsole to value 0

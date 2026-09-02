@@ -1,0 +1,21 @@
+/home/bernardo/Documentos/programs/fedhpc/src/fedhpc/data.py:244: UserWarning: Running jobs for type 2 exceed capacity 512; excess entries are ignored.
+  inst.build()
+/home/bernardo/Documentos/programs/fedhpc/src/fedhpc/data.py:244: UserWarning: Running jobs for type 1 exceed capacity 406; excess entries are ignored.
+  inst.build()
+/home/bernardo/Documentos/programs/fedhpc/src/fedhpc/data.py:244: UserWarning: Running jobs for type 3 exceed capacity 448; excess entries are ignored.
+  inst.build()
+pos_congestion_known_runtime_offline_10min — 3340 jobs, 28 types, H=288
+reference points: f1_T=44163.67 f2_T=648.526 f1_0=51251.67
+extra Gurobi params: (defaults)
+time limit: 3600s   NO warm start
+
+=== lambda = 0.5 ===
+Set parameter OutputFlag to value 1
+Set parameter LogFile to value "results/lambda_eval/coldstart/pos_congestion_known_runtime_offline_10min_lam0.5_coldstart.gurobi.log"
+Set parameter LogToConsole to value 0
+  build 91s  solve 425s  (24,752,128 binaries, 11,434 constrs)
+  first incumbent: t=335s  obj=42.66  gap=91.8%
+  final: f1=46869.7 f2=241.24  obj=3.49226  bound=3.49226  gap=0.00%
+  log: results/lambda_eval/coldstart/pos_congestion_known_runtime_offline_10min_lam0.5_coldstart.gurobi.log
+
+→ results/lambda_eval/coldstart/pos_congestion_known_runtime_offline_10min_coldstart_summary.json

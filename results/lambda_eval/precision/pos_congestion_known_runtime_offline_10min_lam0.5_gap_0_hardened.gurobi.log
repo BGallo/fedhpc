@@ -1,0 +1,73 @@
+
+Gurobi 13.0.1 (linux64) logging started Tue Sep  1 23:49:21 2026
+
+Set parameter LogFile to value "results/lambda_eval/precision/pos_congestion_known_runtime_offline_10min_lam0.5_gap_0_hardened.gurobi.log"
+Gurobi Optimizer version 13.0.1 build v13.0.1rc0 (linux64 - "CachyOS")
+
+CPU model: Intel(R) Core(TM) i7-14700KF, instruction set [SSE2|AVX|AVX2]
+Thread count: 28 physical cores, 28 logical processors, using up to 28 threads
+
+Non-default parameters:
+TimeLimit  1200
+FeasibilityTol  1e-09
+IntFeasTol  1e-09
+MIPGap  0
+MIPGapAbs  0
+OptimalityTol  1e-09
+Method  1
+LogToConsole  0
+NumericFocus  3
+Presolve  0
+
+Academic license 2669763 - for non-commercial use only - registered to bg___@id.uff.br
+Optimize a model with 11434 rows, 24760192 columns and 120245560 nonzeros (Min)
+Model fingerprint: 0x4de5a3a0
+Model has 24752128 linear objective coefficients
+Variable types: 0 continuous, 24760192 integer (24752128 binary)
+Coefficient statistics:
+  Matrix range     [6e-04, 4e+02]
+  Objective range  [7e-05, 4e-01]
+  Bounds range     [1e+00, 1e+00]
+  RHS range        [1e+00, 1e+09]
+
+Variable types: 0 continuous, 24760192 integer (24752128 binary)
+
+Root simplex log...
+
+Iteration    Objective       Primal Inf.    Dual Inf.      Time
+       0    0.0000000e+00   5.729888e+04   0.000000e+00     78s
+
+Starting sifting (using dual simplex for sub-problems)...
+
+    Iter     Pivots    Primal Obj      Dual Obj        Time
+       0          0     infinity      0.0000000e+00     80s
+       1      27074   2.7124400e+06   1.2293282e-01     86s
+       2      42608   7.0563030e+05   1.4464044e-01     89s
+       3      66152   3.5877337e+00   2.1781772e+00     94s
+       4      85119   3.4922550e+00   3.4922550e+00     99s
+
+Sifting complete
+
+   85119    3.4922550e+00   0.000000e+00   0.000000e+00    100s
+
+Root relaxation: objective 3.492255e+00, 85119 iterations, 25.18 seconds (44.45 work units)
+Total elapsed time = 102.99s (DegenMoves)
+Total elapsed time = 112.94s (DegenMoves)
+
+    Nodes    |    Current Node    |     Objective Bounds      |     Work
+ Expl Unexpl |  Obj  Depth IntInf | Incumbent    BestBd   Gap | It/Node Time
+
+     0     0    3.49225    0  252          -    3.49225      -     -  118s
+     0     0    3.49225    0   20          -    3.49225      -     -  305s
+H    0     0                       3.4922906    3.49225  0.00%     -  350s
+H    0     0                       3.4922567    3.49225  0.00%     -  388s
+H    0     0                       3.4922558    3.49226  0.00%     -  411s
+     0     2    3.49226    0   20    3.49226    3.49226  0.00%     -  479s
+     1     4    3.49226    1  340    3.49226    3.49226  0.00% 116443  503s
+     3     8    3.49226    2   35    3.49226    3.49226  0.00% 38903  527s
+     7    14    3.49226    3   35    3.49226    3.49226  0.00% 16695  571s
+*   14     9               3       3.4922552    3.49226  0.00%  8385  572s
+    15    13    3.49226    4   43    3.49226    3.49226  0.00%  7827  613s
+    24    17    3.49226    5   43    3.49226    3.49226  0.00%  4919  671s
+    34    23    3.49226    6   70    3.49226    3.49226  0.00%  3488  744s
+    40    23    3.49226    6   54    3.49226    3.49226  0.00%  2969  745s

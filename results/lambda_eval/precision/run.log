@@ -1,0 +1,33 @@
+
+================================================================================================
+fedhpc_known_runtime_offline_10min  λ=0.5   base config {'Presolve': 0, 'Method': 1}
+================================================================================================
+  build 26s  (7,653,711 vars, 7,645,330 binaries)
+Set parameter OutputFlag to value 1
+Set parameter LogToConsole to value 0
+  gap_0.0001                 27s  nodes    1  gap→0.00e+00  f1=12600.04 f2=165.5606  [OPT]
+  gap_1e-06                  27s  nodes    1  gap→0.00e+00  f1=12600.04 f2=165.5606  [OPT]
+  gap_1e-08                  28s  nodes    1  gap→0.00e+00  f1=12600.04 f2=165.5606  [OPT]
+  gap_1e-09                  28s  nodes    1  gap→0.00e+00  f1=12600.04 f2=165.5606  [OPT]
+  gap_0                      28s  nodes    1  gap→0.00e+00  f1=12600.04 f2=165.5606  [OPT]
+  gap_0_hardened             28s  nodes    1  gap→0.00e+00  f1=12599.04 f2=165.6301  [OPT]
+  distinct (f1,f2) across precision levels: 2  (f1 spread 1.00, f2 spread 0.0695)
+  → results/lambda_eval/precision/fedhpc_known_runtime_offline_10min_lam0.5_precision.json
+/home/bernardo/Documentos/programs/fedhpc/src/fedhpc/data.py:244: UserWarning: Running jobs for type 2 exceed capacity 512; excess entries are ignored.
+  inst.build()
+/home/bernardo/Documentos/programs/fedhpc/src/fedhpc/data.py:244: UserWarning: Running jobs for type 1 exceed capacity 406; excess entries are ignored.
+  inst.build()
+/home/bernardo/Documentos/programs/fedhpc/src/fedhpc/data.py:244: UserWarning: Running jobs for type 3 exceed capacity 448; excess entries are ignored.
+  inst.build()
+
+================================================================================================
+pos_congestion_known_runtime_offline_10min  λ=0.5   base config {'Presolve': 0, 'Method': 1}
+================================================================================================
+  build 88s  (24,760,192 vars, 24,752,128 binaries)
+Set parameter OutputFlag to value 1
+Set parameter LogToConsole to value 0
+  gap_0.0001                156s  nodes    1  gap→0.00e+00  f1=46871.67 f2=241.0743  [OPT]
+  gap_1e-06                 153s  nodes    1  gap→0.00e+00  f1=46871.67 f2=241.0743  [OPT]
+  gap_1e-08                 155s  nodes    1  gap→0.00e+00  f1=46871.67 f2=241.0743  [OPT]
+  gap_1e-09                 154s  nodes    1  gap→0.00e+00  f1=46871.67 f2=241.0743  [OPT]
+  gap_0                     153s  nodes    1  gap→0.00e+00  f1=46871.67 f2=241.0743  [OPT]

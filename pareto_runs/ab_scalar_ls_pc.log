@@ -1,0 +1,20 @@
+/home/bernardo/Documentos/programs/fedhpc/src/fedhpc/data.py:244: UserWarning: Running jobs for type 2 exceed capacity 512; excess entries are ignored.
+  inst.build()
+/home/bernardo/Documentos/programs/fedhpc/src/fedhpc/data.py:244: UserWarning: Running jobs for type 1 exceed capacity 406; excess entries are ignored.
+  inst.build()
+/home/bernardo/Documentos/programs/fedhpc/src/fedhpc/data.py:244: UserWarning: Running jobs for type 3 exceed capacity 448; excess entries are ignored.
+  inst.build()
+data/pos_congestion_known_runtime_offline_10min.json  |  known front: 5 proven pts  f1∈[44164,51252] f2∈[0.0,648.5]
+pop=200 n_gen=300 seeds=[42, 1, 7]
+
+  cfg                    seed  card exact dom_by_known   dom% ea_dom      IGD     eps+    t(s)
+  --------------------------------------------------------------------------------------------
+  OFF (pre-83d1561)        42    41     0           41 100.0%      0   1.7162   2.1545     3.0
+  OFF (pre-83d1561)         1    45     0           45 100.0%      0   1.6822   2.1271     2.9
+  OFF (pre-83d1561)         7    31     0           31 100.0%      0   1.6798   2.1266     3.0
+  ON  (scalar_ls=-30)      42    46     0           46 100.0%      0   1.5809   2.0244    14.8
+  ON  (scalar_ls=-30)       1    45     0           45 100.0%      0   1.5561   2.0000    14.9
+  ON  (scalar_ls=-30)       7    36     0           36 100.0%      0   1.5793   2.0203    11.4
+
+  OFF (pre-83d1561)       mean  card=39.0  dom%=100.0  IGD=1.6927  eps+=2.1361  t=3.0s
+  ON  (scalar_ls=-30)     mean  card=42.3  dom%=100.0  IGD=1.5721  eps+=2.0149  t=13.7s

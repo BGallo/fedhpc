@@ -1,0 +1,600 @@
+<title>Cloud-Bursting Trade-off Study</title>
+<meta name="description" content="Gurobi weighted-sum optima at three cost/turnaround weights versus offline bursting baselines, on two HPC scheduling instances.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Serif:ital,wght@0,400;0,500;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  :root {
+    --ground:      #f3f5f7;
+    --surface:     #fbfcfd;
+    --surface-2:   #eceef1;
+    --ink:         #171c20;
+    --ink-soft:    #444d55;
+    --ink-faint:   #737d86;
+    --rule:        #d3d9df;
+    --rule-soft:   #e4e8eb;
+    --accent:      #c0362d;   /* exact optimum (Gurobi) */
+    --onprem:      #1f6feb;   /* on-prem partition */
+    --cloud:       #c9761c;   /* cloud partition */
+    --good:        #2f7d4f;
+    --warn:        #b06a00;
+    --shadow:      0 1px 2px rgba(20,26,31,.06), 0 2px 8px rgba(20,26,31,.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:    #10151a;
+      --surface:   #161c22;
+      --surface-2: #1e262e;
+      --ink:       #e7ebee;
+      --ink-soft:  #b0b9c1;
+      --ink-faint: #7c868f;
+      --rule:      #2b343d;
+      --rule-soft: #212930;
+      --accent:    #ec6a5f;
+      --onprem:    #5b9bff;
+      --cloud:     #e0954a;
+      --good:      #5cc98a;
+      --warn:      #d9a441;
+      --shadow:    0 1px 2px rgba(0,0,0,.4), 0 2px 10px rgba(0,0,0,.3);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:    #10151a;
+    --surface:   #161c22;
+    --surface-2: #1e262e;
+    --ink:       #e7ebee;
+    --ink-soft:  #b0b9c1;
+    --ink-faint: #7c868f;
+    --rule:      #2b343d;
+    --rule-soft: #212930;
+    --accent:    #ec6a5f;
+    --onprem:    #5b9bff;
+    --cloud:     #e0954a;
+    --good:      #5cc98a;
+    --warn:      #d9a441;
+    --shadow:    0 1px 2px rgba(0,0,0,.4), 0 2px 10px rgba(0,0,0,.3);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "IBM Plex Serif", Georgia, serif;
+    font-size: 17px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 0 28px 96px; }
+  .measure { max-width: 660px; }
+
+  h1, h2, h3, .ui {
+    font-family: "IBM Plex Sans", system-ui, sans-serif;
+    text-wrap: balance;
+  }
+  h1 { font-size: 2.05rem; line-height: 1.16; font-weight: 600; margin: 0 0 .5rem; letter-spacing: -.015em; }
+  h2 {
+    font-size: 1.3rem; font-weight: 600; margin: 3.4rem 0 1rem;
+    padding-bottom: .45rem; border-bottom: 2px solid var(--ink);
+    letter-spacing: -.01em;
+  }
+  h3 { font-size: 1.02rem; font-weight: 600; margin: 2rem 0 .5rem; color: var(--ink-soft); }
+  p { margin: 0 0 1rem; }
+  a { color: var(--accent); text-underline-offset: 2px; }
+  strong { font-weight: 600; }
+  code, .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: .88em; }
+
+  .eyebrow {
+    font-family: "IBM Plex Mono", monospace; font-size: .72rem; font-weight: 500;
+    letter-spacing: .16em; text-transform: uppercase; color: var(--ink-faint);
+    margin: 0 0 1.4rem;
+  }
+
+  header.masthead { padding: 64px 0 8px; }
+  .lede { font-size: 1.16rem; color: var(--ink-soft); max-width: 680px; }
+
+  .meta-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 1px; background: var(--rule); border: 1px solid var(--rule);
+    margin: 2.2rem 0 1rem; border-radius: 7px; overflow: hidden;
+  }
+  .meta-grid div { background: var(--surface); padding: .7rem .9rem; }
+  .meta-grid dt {
+    font-family: "IBM Plex Mono", monospace; font-size: .66rem; letter-spacing: .11em;
+    text-transform: uppercase; color: var(--ink-faint); margin: 0 0 .25rem;
+  }
+  .meta-grid dd { margin: 0; font-family: "IBM Plex Sans", sans-serif; font-weight: 500; font-size: .95rem; }
+
+  .fig {
+    background: var(--surface); border: 1px solid var(--rule); border-radius: 10px;
+    padding: 20px 20px 14px; margin: 1.8rem 0; box-shadow: var(--shadow);
+  }
+  .fig figcaption {
+    font-family: "IBM Plex Sans", sans-serif; font-size: .82rem; color: var(--ink-faint);
+    margin-top: .7rem; line-height: 1.5;
+  }
+  .fig .fig-title {
+    font-family: "IBM Plex Sans", sans-serif; font-weight: 600; font-size: .95rem;
+    margin-bottom: .1rem;
+  }
+  svg { display: block; width: 100%; height: auto; overflow: visible; }
+  svg text { font-family: "IBM Plex Mono", monospace; }
+
+  .tbl-scroll { overflow-x: auto; margin: 1.4rem 0; border: 1px solid var(--rule); border-radius: 10px; }
+  table { border-collapse: collapse; width: 100%; font-family: "IBM Plex Mono", monospace; font-size: .8rem; }
+  caption {
+    text-align: left; font-family: "IBM Plex Sans", sans-serif; font-size: .82rem;
+    color: var(--ink-faint); padding: .6rem .9rem; border-bottom: 1px solid var(--rule-soft);
+  }
+  th, td { padding: .42rem .8rem; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; white-space: nowrap; }
+  thead th {
+    position: sticky; top: 0; background: var(--surface-2); color: var(--ink-soft);
+    font-weight: 600; font-size: .72rem; letter-spacing: .03em;
+    border-bottom: 1px solid var(--rule);
+  }
+  tbody tr { border-top: 1px solid var(--rule-soft); }
+  tbody tr:nth-child(even) { background: color-mix(in srgb, var(--surface-2) 45%, transparent); }
+  tr.is-exact td { background: color-mix(in srgb, var(--accent) 12%, transparent); font-weight: 500; }
+  tr.is-anchor td { color: var(--ink-soft); }
+  .tag {
+    display: inline-block; font-family: "IBM Plex Mono", monospace; font-size: .68rem;
+    padding: .05rem .4rem; border-radius: 4px; border: 1px solid currentColor; line-height: 1.4;
+  }
+  .tag.exact { color: var(--accent); }
+  .tag.onprem { color: var(--onprem); }
+  .tag.cloud { color: var(--cloud); }
+
+  .callout {
+    border-left: 3px solid var(--accent); background: var(--surface);
+    padding: .9rem 1.1rem; margin: 1.6rem 0; border-radius: 0 8px 8px 0;
+    font-size: .98rem;
+  }
+  .callout.neutral { border-left-color: var(--ink-faint); }
+
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin: 1.6rem 0; }
+  @media (max-width: 720px) { .two-col { grid-template-columns: 1fr; } h1 { font-size: 1.7rem; } body { font-size: 16px; } }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 14px 20px; font-family: "IBM Plex Sans", sans-serif; font-size: .8rem; margin: .2rem 0 1rem; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-soft); }
+  .swatch { width: 12px; height: 12px; border-radius: 3px; border: 1px solid rgba(0,0,0,.15); }
+  .swatch.line { height: 3px; border-radius: 2px; }
+
+  ul.tight { margin: .4rem 0 1.2rem; padding-left: 1.2rem; }
+  ul.tight li { margin: .3rem 0; }
+  hr.end { border: 0; border-top: 1px solid var(--rule); margin: 3rem 0 1.5rem; }
+  .footnote { font-size: .82rem; color: var(--ink-faint); font-family: "IBM Plex Sans", sans-serif; }
+</style>
+
+<div class="wrap" id="app">
+  <p style="padding:120px 0;text-align:center;color:var(--ink-faint);font-family:'IBM Plex Sans',sans-serif">
+    Rendering report…
+  </p>
+</div>
+
+<script>
+/* DATA_PLACEHOLDER */
+const DATA = null;
+</script>
+<script>
+"use strict";
+/* ---------- helpers ---------- */
+const $ = (t, a = {}, kids = []) => {
+  const e = document.createElementNS(a.ns || "http://www.w3.org/1999/xhtml", t);
+  for (const [k, v] of Object.entries(a)) {
+    if (k === "ns") continue;
+    if (k === "text") e.textContent = v;
+    else if (k === "html") e.innerHTML = v;
+    else e.setAttribute(k, v);
+  }
+  for (const kid of [].concat(kids)) e.append(kid);
+  return e;
+};
+const SVGNS = "http://www.w3.org/2000/svg";
+const s = (t, a = {}, kids = []) => $(t, { ...a, ns: SVGNS }, kids);
+const fmt = (x, d = 0) => x == null ? "—" : x.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+const K = 1000;   // f1 is displayed in thousands of slot-units
+
+/* ---------- frontier chart ---------- */
+function frontierChart(inst) {
+  const W = 920, H = 460, m = { t: 20, r: 96, b: 58, l: 74 };
+  const iw = W - m.l - m.r, ih = H - m.t - m.b;
+
+  const thr = inst.threshold.map(p => ({ x: p.f1 / K, y: p.f2, k: p.theta }));
+  const gur = inst.gurobi.map(p => ({ x: p.f1 / K, y: p.f2, k: p.lam, gap: p.mip_gap_pct, ws: p.heur_gap_pct }));
+  const anchors = [
+    inst.greedy && { x: inst.greedy.f1 / K, y: inst.greedy.f2, sym: "sq", col: "var(--cloud)" },
+    inst.onprem && { x: inst.onprem.f1 / K, y: inst.onprem.f2, sym: "di", col: "var(--onprem)" },
+  ].filter(Boolean);
+
+  const xs = [...thr, ...gur, ...anchors].map(d => d.x);
+  const ys = [...thr, ...gur, ...anchors].map(d => d.y);
+  let x0 = Math.min(...xs), x1 = Math.max(...xs);
+  if (x1 - x0 < 1e-6) { x0 -= 1; x1 += 1; }
+  const pad = (x1 - x0) * 0.04; x0 -= pad; x1 += pad;
+  const y0 = 0, y1 = Math.max(...ys) * 1.1 || 1;
+  const px = v => m.l + (v - x0) / (x1 - x0) * iw;
+  const py = v => m.t + ih - (v - y0) / (y1 - y0) * ih;
+
+  const g = s("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "cost versus turnaround frontier" });
+
+  // grid + axes
+  for (let i = 0; i <= 5; i++) {
+    const v = y1 * i / 5, yy = py(v);
+    g.append(s("line", { x1: m.l, x2: m.l + iw, y1: yy, y2: yy, stroke: "var(--rule-soft)", "stroke-width": 1 }));
+    g.append(s("text", { x: m.l - 10, y: yy + 4, "text-anchor": "end", fill: "var(--ink-faint)", "font-size": 11 },
+      [document.createTextNode("$" + fmt(v))]));
+  }
+  for (let i = 0; i <= 6; i++) {
+    const v = x0 + (x1 - x0) * i / 6, xx = px(v);
+    g.append(s("line", { x1: xx, x2: xx, y1: m.t, y2: m.t + ih, stroke: "var(--rule-soft)", "stroke-width": 1 }));
+    g.append(s("text", { x: xx, y: m.t + ih + 20, "text-anchor": "middle", fill: "var(--ink-faint)", "font-size": 11 },
+      [document.createTextNode(fmt(v, 1))]));
+  }
+  g.append(s("text", { x: m.l + iw / 2, y: H - 10, "text-anchor": "middle", fill: "var(--ink-soft)", "font-size": 12.5 },
+    [document.createTextNode(`f1  —  total turnaround  ( ×10³ slot-units,  1 slot = ${DATA.slot_seconds} s )`)]));
+  g.append(s("text", { x: 18, y: m.t + ih / 2, "text-anchor": "middle", fill: "var(--ink-soft)", "font-size": 12.5,
+    transform: `rotate(-90 18 ${m.t + ih / 2})` }, [document.createTextNode("f2  —  total cost  ($)")]));
+
+  // threshold sweep polyline + points
+  const sorted = [...thr].sort((a, b) => a.x - b.x);
+  g.append(s("polyline", { points: sorted.map(d => `${px(d.x)},${py(d.y)}`).join(" "),
+    fill: "none", stroke: "var(--ink-faint)", "stroke-width": 1.5 }));
+  sorted.forEach(d => g.append(s("circle", { cx: px(d.x), cy: py(d.y), r: 3.4,
+    fill: "var(--surface)", stroke: "var(--ink-faint)", "stroke-width": 1.4 })));
+  sorted.forEach((d, idx) => {
+    if ([0, 1, 2, 4, 8].includes(d.k) || idx === sorted.length - 1) {
+      g.append(s("text", { x: px(d.x) + 6, y: py(d.y) - 6, fill: "var(--ink-faint)", "font-size": 10 },
+        [document.createTextNode("θ=" + d.k)]));
+    }
+  });
+
+  // anchors
+  anchors.forEach(a => {
+    const cx = px(a.x), cy = py(a.y);
+    if (a.sym === "sq") g.append(s("rect", { x: cx - 6, y: cy - 6, width: 12, height: 12, fill: a.col, stroke: "var(--ink)", "stroke-width": 1.2 }));
+    else g.append(s("path", { d: `M${cx} ${cy - 8}L${cx + 8} ${cy}L${cx} ${cy + 8}L${cx - 8} ${cy}Z`, fill: a.col, stroke: "var(--ink)", "stroke-width": 1.2 }));
+  });
+
+  // gurobi stars
+  gur.forEach(d => {
+    const cx = px(d.x), cy = py(d.y);
+    g.append(star(cx, cy, 9.5, "var(--accent)"));
+    const noBound = d.gap != null && d.gap > 5;
+    const lbl = `λ=${d.k}` + (noBound ? "*" : (d.gap > 0.05 ? ` (${d.gap.toFixed(1)}% gap)` : ""));
+    const right = cx > m.l + iw * 0.66;
+    g.append(s("text", {
+      x: right ? cx - 13 : cx + 13, y: cy + 4,
+      "text-anchor": right ? "end" : "start",
+      fill: "var(--accent)", "font-size": 11.5, "font-weight": 600,
+    }, [document.createTextNode(lbl)]));
+  });
+
+  return g;
+}
+function star(cx, cy, r, fill) {
+  let p = "";
+  for (let i = 0; i < 10; i++) {
+    const ang = Math.PI / 5 * i - Math.PI / 2;
+    const rad = i % 2 ? r * 0.42 : r;
+    p += (i ? "L" : "M") + (cx + Math.cos(ang) * rad) + " " + (cy + Math.sin(ang) * rad);
+  }
+  return s("path", { d: p + "Z", fill, stroke: "var(--ink)", "stroke-width": 1, "stroke-linejoin": "round" });
+}
+
+/* ---------- cold-start phase timeline ---------- */
+function coldstartChart(cs) {
+  const W = 920, H = 190, m = { t: 26, r: 20, b: 46, l: 20 };
+  const iw = W - m.l - m.r;
+  const T = cs.total_s;
+  const px = t => m.l + t / T * iw;
+  const g = s("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "cold solve phase timeline" });
+
+  const barY = m.t + 44, barH = 30;
+  cs.phases.forEach((ph, i) => {
+    const x = px(ph.a), w = px(ph.b) - px(ph.a);
+    g.append(s("rect", { x, y: barY, width: Math.max(w, 1), height: barH,
+      fill: ph.fill, stroke: "var(--surface)", "stroke-width": 1.5 }));
+    if (w > 46) {
+      g.append(s("text", { x: x + w / 2, y: barY + barH / 2 + 4, "text-anchor": "middle",
+        fill: ph.ink || "var(--surface)", "font-size": 10.5, "font-weight": 600 },
+        [document.createTextNode(ph.label)]));
+    }
+    g.append(s("text", { x: x + w / 2, y: barY + barH + 15, "text-anchor": "middle",
+      fill: "var(--ink-faint)", "font-size": 10 },
+      [document.createTextNode(`${Math.round(ph.b - ph.a)} s`)]));
+  });
+
+  // event markers above the bar
+  cs.marks.forEach(mk => {
+    const x = px(mk.t);
+    g.append(s("line", { x1: x, x2: x, y1: barY - 14, y2: barY, stroke: "var(--ink-soft)", "stroke-width": 1 }));
+    g.append(s("circle", { cx: x, cy: barY - 14, r: 3, fill: "var(--accent)" }));
+    g.append(s("text", { x: Math.min(x, W - m.r - 4), y: barY - 20, "text-anchor": x > W - 120 ? "end" : "middle",
+      fill: "var(--ink-soft)", "font-size": 10 }, [document.createTextNode(mk.label)]));
+  });
+
+  g.append(s("text", { x: m.l, y: H - 10, fill: "var(--ink-faint)", "font-size": 10.5 },
+    [document.createTextNode(`0 s`)]));
+  g.append(s("text", { x: m.l + iw, y: H - 10, "text-anchor": "end", fill: "var(--ink-faint)", "font-size": 10.5 },
+    [document.createTextNode(`${Math.round(T)} s  total`)]));
+  return g;
+}
+
+/* ---------- ablation bar chart ---------- */
+function ablationChart(inst) {
+  const rows = [...inst.configs].sort((a, b) => a.solve_s - b.solve_s);
+  const n = rows.length;
+  const rowH = 26, m = { t: 14, r: 120, b: 34, l: 168 };
+  const W = 920, H = m.t + m.b + n * rowH;
+  const iw = W - m.l - m.r;
+  const maxT = Math.max(...rows.map(r => r.solve_s)) * 1.02;
+  const px = t => m.l + t / maxT * iw;
+  const def = inst.configs.find(r => r.config === "default");
+  const defT = def ? def.solve_s : null;
+
+  const g = s("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "solve time by Gurobi configuration" });
+
+  // vertical gridlines + default marker
+  for (let i = 0; i <= 4; i++) {
+    const v = maxT * i / 4, x = px(v);
+    g.append(s("line", { x1: x, x2: x, y1: m.t, y2: m.t + n * rowH, stroke: "var(--rule-soft)", "stroke-width": 1 }));
+    g.append(s("text", { x, y: H - 12, "text-anchor": "middle", fill: "var(--ink-faint)", "font-size": 10 },
+      [document.createTextNode(Math.round(v) + "s")]));
+  }
+  if (defT != null) {
+    g.append(s("line", { x1: px(defT), x2: px(defT), y1: m.t - 4, y2: m.t + n * rowH,
+      stroke: "var(--accent)", "stroke-width": 1.4, "stroke-dasharray": "4 3" }));
+  }
+
+  rows.forEach((r, i) => {
+    const y = m.t + i * rowH + 4, bh = rowH - 10;
+    const isDef = r.config === "default";
+    const faster = defT != null && r.solve_s < defT - 1;
+    const unproven = r.proved === false;
+    const col = isDef ? "var(--accent)" : faster ? "var(--good)" : "var(--ink-faint)";
+    // full bar (outline only if optimality not proven)
+    g.append(s("rect", { x: m.l, y, width: Math.max(px(r.solve_s) - m.l, 1), height: bh,
+      fill: unproven ? "none" : col, opacity: isDef ? 1 : 0.55, rx: 2,
+      stroke: unproven ? col : "none", "stroke-width": unproven ? 1.3 : 0,
+      "stroke-dasharray": unproven ? "3 2" : "0" }));
+    // root-LP portion (darker overlay)
+    if (r.root_lp_s != null && !unproven) {
+      g.append(s("rect", { x: m.l, y, width: Math.max(px(r.root_lp_s) - m.l, 1), height: bh,
+        fill: col, opacity: isDef ? 1 : 0.9, rx: 2 }));
+    }
+    // label
+    g.append(s("text", { x: m.l - 10, y: y + bh / 2 + 4, "text-anchor": "end",
+      fill: isDef ? "var(--accent)" : "var(--ink-soft)", "font-size": 11,
+      "font-weight": isDef ? 700 : 400 }, [document.createTextNode(r.config)]));
+    // value
+    const dv = defT != null && !isDef
+      ? `  (${r.solve_s < defT ? "" : "+"}${((r.solve_s - defT) / defT * 100).toFixed(0)}%)` : "";
+    g.append(s("text", { x: px(r.solve_s) + 8, y: y + bh / 2 + 4, fill: "var(--ink-soft)", "font-size": 10.5 },
+      [document.createTextNode(`${Math.round(r.solve_s)}s${dv}${r.n_nodes != null ? `  ·  ${r.n_nodes} node${r.n_nodes === 1 ? "" : "s"}` : ""}`)]));
+  });
+  return g;
+}
+
+/* ---------- precision table ---------- */
+function precisionTable(inst) {
+  const tbl = $("table");
+  tbl.append($("caption", { text: `${inst.name} — MIPGap sweep (tuned base config, cold)` }));
+  const head = ["precision level", "solve", "B&B nodes", "gap achieved", "proved", "f1 (slots)", "f2 ($)"];
+  const thead = $("thead"); const htr = $("tr");
+  head.forEach(h => htr.append($("th", { text: h })));
+  thead.append(htr); tbl.append(thead);
+  const tb = $("tbody");
+  inst.rows.forEach(r => {
+    const tr = $("tr");
+    const cells = [
+      r.label,
+      r.oom ? "OOM-killed" : r.solve_s == null ? "—" : Math.round(r.solve_s) + " s",
+      r.n_nodes == null ? "—" : (r.oom ? r.n_nodes + "+ (aborted)" : String(r.n_nodes)),
+      r.oom ? "—" : r.gap_achieved == null ? "—" : r.gap_achieved.toExponential(1),
+      r.oom ? "no — ran out of RAM" : r.proved ? "yes" : "no",
+      r.f1 == null ? "—" : r.f1.toFixed(1),
+      r.f2 == null ? "—" : r.f2.toFixed(4),
+    ];
+    cells.forEach((c, i) => {
+      const td = $("td", { text: c });
+      if ((i >= 1 && r.oom) || (i === 4 && !r.proved) || r.numerical) td.style.color = "var(--warn)";
+      tr.append(td);
+    });
+    tb.append(tr);
+  });
+  tbl.append(tb);
+  const wrap = $("div", { class: "tbl-scroll" });
+  wrap.append(tbl);
+  const fc = $("p", { class: "footnote", html: inst.figcaption });
+  const box = $("div", {});
+  box.append(wrap); box.append(fc);
+  return box;
+}
+
+/* ---------- KPI table ---------- */
+const COLS = [
+  ["method", "method", r => r.label, "s"],
+  ["f1", "f1 (turn., slots)", r => fmt(r.f1, 0), "n"],
+  ["f2", "f2 cost ($)", r => fmt(r.f2, 2), "n"],
+  ["avg_ta", "avg turnaround", r => fmt(r.avg_turnaround_s / 60, 0) + " min", "n"],
+  ["avg_wait", "avg wait", r => fmt(r.avg_wait_s / 60, 0) + " min", "n"],
+  ["max_wait", "max wait", r => fmt(r.max_wait_s / 3600, 1) + " h", "n"],
+  ["avg_bsd", "avg b.slowdown", r => fmt(r.avg_bounded_slowdown, 2), "n"],
+  ["p95_bsd", "p95 b.slowdown", r => fmt(r.p95_bounded_slowdown, 1), "n"],
+  ["cloud", "cloud jobs", r => fmt(r.cloud_jobs, 0), "n"],
+  ["util", "on-prem util", r => r.onprem_util_pct == null ? "—" : fmt(r.onprem_util_pct, 0) + "%", "n"],
+  ["unsched", "unsched.", r => r.n_unscheduled == null ? "—" : fmt(r.n_unscheduled, 0), "n"],
+  ["gap", "MIP gap", r => r.mip_gap_pct == null ? "—" : (r.mip_gap_pct < 0.05 ? "proven" : r.mip_gap_pct > 5 ? "no bound" : r.mip_gap_pct.toFixed(1) + "%"), "n"],
+  ["wsdelta", "warm-start Δ", r => r.heur_gap_pct == null ? "—" : (r.heur_gap_pct >= 0 ? "+" : "") + r.heur_gap_pct.toFixed(2) + "%", "n"],
+];
+function kpiTable(inst) {
+  const rows = [
+    ...inst.gurobi.map(r => ({ ...r, label: `Gurobi  λ=${r.lam}`, cls: "is-exact" })),
+    inst.greedy && { ...inst.greedy, label: "greedy earliest-completion", cls: "is-anchor" },
+    inst.onprem && { ...inst.onprem, label: "on-prem only (SPT)", cls: "is-anchor" },
+    ...inst.threshold.filter(r => [0, 1, 2, 4, 8].includes(r.theta)).map(r => ({ ...r, label: `threshold  θ=${r.theta}`, cls: "" })),
+  ].filter(Boolean);
+
+  const tbl = $("table");
+  tbl.append($("caption", { text: `${inst.name} — headline KPIs (wall-clock; turnaround/wait per job)` }));
+  const thead = $("thead"); const htr = $("tr");
+  COLS.forEach(c => htr.append($("th", { text: c[1] })));
+  thead.append(htr); tbl.append(thead);
+  const tb = $("tbody");
+  rows.forEach(r => {
+    const tr = $("tr", { class: r.cls });
+    COLS.forEach(c => tr.append($("td", { text: c[2](r) })));
+    tb.append(tr);
+  });
+  tbl.append(tb);
+  const sc = $("div", { class: "tbl-scroll" }); sc.append(tbl);
+  return sc;
+}
+
+/* ---------- page assembly ---------- */
+function build() {
+  const app = document.getElementById("app");
+  app.innerHTML = "";
+  const D = DATA;
+
+  app.append($("header", { class: "masthead" }, [
+    $("p", { class: "eyebrow", text: "FED-HPC · offline scheduling · exact vs. heuristic" }),
+    $("h1", { text: "Cloud-Bursting Trade-off Study" }),
+    $("p", { class: "lede", html: `Where the <strong>exact weighted-sum optimum</strong> sits against simple offline bursting policies, at three cost/turnaround weights, on two HPC scheduling instances built from real cluster traces.` }),
+  ]));
+
+  const mg = $("dl", { class: "meta-grid" });
+  [
+    ["solver", "Gurobi 13 · space-time MILP"],
+    ["scalarisation", "λ·f̂1 + (1−λ)·f̂2,  f1 ≤ f1⁰"],
+    ["weights λ", D.lams.join("  /  ")],
+    ["heuristic warm start", "memetic GA (weighted_solve)"],
+    ["slot", `${D.slot_seconds}s  (${(D.slot_seconds/60)} min)`],
+    ["generated", D.generated],
+  ].forEach(([k, v]) => {
+    mg.append($("div", {}, [$("dt", { text: k }), $("dd", { text: v })]));
+  });
+  app.append(mg);
+
+  // ---- what we optimise ----
+  app.append($("h2", { text: "What is being optimised" }));
+  const intro = $("div", { class: "measure" });
+  intro.innerHTML = `
+    <p>Every job runs on either a finite <span class="tag onprem">on-prem</span> partition (free, capacity-bound,
+    already saturated at t=0 by ${fmt(D.fedhpc.n_running)}–${fmt(D.pos.n_running)} running jobs) or an unlimited
+    priced <span class="tag cloud">cloud</span> type. Because processing time is type-independent here, a job's
+    <em>completion</em> depends only on <em>when</em> it starts and its <em>cost</em> only on <em>where</em> it runs —
+    so the whole problem is "how much cloud spend buys enough capacity to start jobs on time".</p>
+    <p><strong>f1</strong> — total turnaround, Σ(completion − arrival) over all jobs, in ${D.slot_seconds/60}-minute slot units.
+    <strong>f2</strong> — total monetary cost in dollars; on-prem is $0.
+    The weighted-sum solve minimises the normalised scalar between the turnaround-optimal anchor
+    <span class="mono">f1ᵀ</span> and the zero-cost anchor <span class="mono">f1⁰</span>; λ=1 is pure turnaround, λ=0 pure cost.</p>`;
+  app.append(intro);
+
+  // ---- per instance ----
+  for (const key of ["fedhpc", "pos"]) {
+    const inst = D[key];
+    app.append($("h2", { text: inst.title }));
+    const sub = $("div", { class: "measure" });
+    sub.innerHTML = inst.blurb;
+    app.append(sub);
+
+    const fig = $("figure", { class: "fig" });
+    fig.append($("div", { class: "fig-title", text: "Cost vs. turnaround — Gurobi optima and the bursting frontier" }));
+    fig.append(frontierChart(inst));
+    const leg = $("div", { class: "legend" });
+    leg.innerHTML = `
+      <span><span class="swatch" style="background:var(--accent)"></span>Gurobi weighted-sum (★)</span>
+      <span><span class="swatch line" style="background:var(--ink-faint)"></span>threshold-bursting sweep (θ)</span>
+      <span><span class="swatch" style="background:var(--cloud)"></span>greedy earliest-completion</span>
+      <span><span class="swatch" style="background:var(--onprem)"></span>on-prem only (SPT)</span>`;
+    fig.append(leg);
+    fig.append($("figcaption", { html: inst.figcaption }));
+    app.append(fig);
+
+    app.append(kpiTable(inst));
+
+    if (inst.readout) {
+      const c = $("div", { class: "callout" });
+      c.innerHTML = inst.readout;
+      app.append(c);
+    }
+  }
+
+  // ---- cold-start section ----
+  if (D.coldstart) {
+    const cs = D.coldstart;
+    app.append($("h2", { text: "Is the MILP actually hard?" }));
+    const cd = $("div", { class: "measure" });
+    cd.innerHTML = cs.prose;
+    app.append(cd);
+
+    const fig = $("figure", { class: "fig" });
+    fig.append($("div", { class: "fig-title", text: `pos_congestion λ=${cs.lam} — cold solve, no warm start (bound vs. incumbent)` }));
+    fig.append(coldstartChart(cs));
+    fig.append($("figcaption", { html: cs.figcaption }));
+    app.append(fig);
+  }
+
+  // ---- ablation section ----
+  if (D.ablation) {
+    app.append($("h2", { text: "Gurobi hyperparameter ablation" }));
+    const ad = $("div", { class: "measure" });
+    ad.innerHTML = D.ablation.prose;
+    app.append(ad);
+    for (const inst of D.ablation.instances) {
+      const fig = $("figure", { class: "fig" });
+      fig.append($("div", { class: "fig-title", text: `${inst.name} λ=${D.ablation.lam} — wall-clock solve time by configuration (no warm start)` }));
+      fig.append(ablationChart(inst));
+      fig.append($("figcaption", { html: inst.figcaption }));
+      app.append(fig);
+    }
+  }
+
+  // ---- precision section ----
+  if (D.precision) {
+    app.append($("h2", { text: "Behaviour under stronger precision" }));
+    const pd = $("div", { class: "measure" });
+    pd.innerHTML = D.precision.prose;
+    app.append(pd);
+    for (const inst of D.precision.instances) {
+      app.append(precisionTable(inst));
+    }
+  }
+
+  // ---- baselines section ----
+  app.append($("h2", { text: "The offline baselines" }));
+  const b = $("div", { class: "measure" });
+  b.innerHTML = `
+    <p>All three are single-pass list schedulers over the same space-time capacity model the MILP uses
+    (running jobs pre-occupy on-prem slots; cloud is unlimited). They are <em>offline</em> — full known-runtime
+    information — so they represent the best a non-optimising policy can do, not an online lower bound.</p>
+    <h3>on-prem only · SPT</h3>
+    <p>Shortest-processing-time list scheduling on the on-prem pools, never bursting. Zero cost by construction;
+    the <strong>maximum-turnaround anchor</strong> and the status-quo "no bursting" reference. Jobs that cannot
+    fit the 48-hour horizon are reported unscheduled.</p>
+    <h3>greedy earliest-completion</h3>
+    <p>Each job (SPT order) is placed on the feasible type that finishes it soonest, ties broken toward the
+    cheaper type. Because cloud is unlimited it reaches the <strong>turnaround optimum f1ᵀ exactly</strong>, but
+    pays for every job that could not start immediately on-prem — the eager-bursting, high-cost anchor.</p>
+    <h3>threshold bursting · sweep over θ</h3>
+    <p>A job is kept on-prem while its achievable queue delay is ≤ θ slots, otherwise it bursts to its cheapest
+    feasible cloud type. Sweeping θ from 0 (burst almost everything) to the horizon (never burst) traces a
+    continuous cost/turnaround frontier — the natural heuristic curve to read the exact optima against.</p>`;
+  app.append(b);
+
+  // ---- method notes ----
+  app.append($("h2", { text: "Method notes & caveats" }));
+  const notes = $("ul", { class: "tight measure" });
+  notes.innerHTML = D.notes.map(n => `<li>${n}</li>`).join("");
+  app.append(notes);
+
+  app.append($("hr", { class: "end" }));
+  app.append($("p", { class: "footnote", html: D.footer }));
+}
+
+if (DATA) build();
+else document.getElementById("app").innerHTML =
+  '<p style="padding:120px 0;text-align:center;color:#b06">No data embedded.</p>';
+</script>

@@ -1,0 +1,105 @@
+
+Gurobi 13.0.1 (linux64) logging started Tue Sep  1 20:36:20 2026
+
+Set parameter LogFile to value "results/lambda_eval/ablation/pos_congestion_known_runtime_offline_10min_lam0.5_method_dual_simplex.gurobi.log"
+Set parameter TimeLimit to value 1500
+Set parameter MIPGap to value 0.0001
+Set parameter Method to value 1
+Gurobi Optimizer version 13.0.1 build v13.0.1rc0 (linux64 - "CachyOS")
+
+CPU model: Intel(R) Core(TM) i7-14700KF, instruction set [SSE2|AVX|AVX2]
+Thread count: 28 physical cores, 28 logical processors, using up to 28 threads
+
+Non-default parameters:
+TimeLimit  1500
+Method  1
+LogToConsole  0
+
+Academic license 2669763 - for non-commercial use only - registered to bg___@id.uff.br
+Optimize a model with 11434 rows, 24760192 columns and 120245560 nonzeros (Min)
+Model fingerprint: 0x4de5a3a0
+Model has 24752128 linear objective coefficients
+Variable types: 0 continuous, 24760192 integer (24752128 binary)
+Coefficient statistics:
+  Matrix range     [6e-04, 4e+02]
+  Objective range  [7e-05, 4e-01]
+  Bounds range     [1e+00, 1e+00]
+  RHS range        [1e+00, 1e+09]
+
+Presolve removed 29 rows and 28 columns (presolve time = 5s)...
+Presolve removed 29 rows and 28 columns (presolve time = 12s)...
+Presolve removed 29 rows and 28 columns (presolve time = 15s)...
+Presolve removed 185 rows and 184 columns (presolve time = 21s)...
+Presolve removed 185 rows and 184 columns (presolve time = 25s)...
+Presolve removed 185 rows and 184 columns (presolve time = 30s)...
+Presolve removed 185 rows and 184 columns (presolve time = 35s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 41s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 45s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 50s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 56s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 60s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 65s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 70s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 75s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 81s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 85s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 90s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 95s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 101s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 107s)...
+Presolve removed 185 rows and 36800 columns
+Presolve time: 108.78s
+Presolved: 11249 rows, 24723392 columns, 98788107 nonzeros
+Variable types: 0 continuous, 24723392 integer (24715512 binary)
+Found heuristic solution: objective 42.6587976
+
+Root simplex log...
+
+Iteration    Objective       Primal Inf.    Dual Inf.      Time
+       0    0.0000000e+00   2.677975e+04   0.000000e+00    183s
+
+Starting sifting (using dual simplex for sub-problems)...
+
+    Iter     Pivots    Primal Obj      Dual Obj        Time
+       0          0     infinity      0.0000000e+00    184s
+       1       9408   9.6512062e+08   5.6364304e-01    187s
+       2      21135   4.3532463e+00   1.5980328e+00    189s
+       3      40886   4.0653044e+00   1.8718884e+00    195s
+       4      61180   3.5321416e+00   2.6846829e+00    200s
+       5      80277   3.5098588e+00   3.1315520e+00    206s
+       6      94512   3.5024115e+00   3.3330800e+00    211s
+       7     109923   3.4950934e+00   3.4185318e+00    217s
+       8     123171   3.4925245e+00   3.4629434e+00    221s
+
+Sifting complete
+
+  135071    3.4922631e+00   0.000000e+00   0.000000e+00    225s
+
+Root relaxation: objective 3.492263e+00, 135071 iterations, 45.07 seconds (122.76 work units)
+Total elapsed time = 225.41s (DegenMoves)
+
+    Nodes    |    Current Node    |     Objective Bounds      |     Work
+ Expl Unexpl |  Obj  Depth IntInf | Incumbent    BestBd   Gap | It/Node Time
+
+     0     0    3.49226    0  182   42.65880    3.49226  91.8%     -  269s
+H    0     0                       3.4922631    3.49226  0.00%     -  296s
+     0     0    3.49226    0  182    3.49226    3.49226  0.00%     -  296s
+
+Explored 1 nodes (140570 simplex iterations) in 297.07 seconds (745.37 work units)
+Thread count was 28 (of 28 available processors)
+
+Solution count 2: 3.49226 42.6588 
+
+Optimal solution found (tolerance 1.00e-04)
+Best objective 3.492263072732e+00, best bound 3.492263072732e+00, gap 0.0000%
+Discarded solution information including additional information
+Set parameter Method to value -1
+Set parameter Crossover to value -1
+Set parameter Presolve to value -1
+Set parameter Cuts to value -1
+Set parameter MIPFocus to value 0
+Set parameter NumericFocus to value 0
+Set parameter Heuristics to value 0.05
+Set parameter Threads to value 0
+Set parameter OutputFlag to value 1
+Set parameter LogToConsole to value 0

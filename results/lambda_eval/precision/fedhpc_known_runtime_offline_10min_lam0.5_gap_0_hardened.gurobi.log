@@ -1,0 +1,66 @@
+
+Gurobi 13.0.1 (linux64) logging started Tue Sep  1 23:31:29 2026
+
+Set parameter LogFile to value "results/lambda_eval/precision/fedhpc_known_runtime_offline_10min_lam0.5_gap_0_hardened.gurobi.log"
+Gurobi Optimizer version 13.0.1 build v13.0.1rc0 (linux64 - "CachyOS")
+
+CPU model: Intel(R) Core(TM) i7-14700KF, instruction set [SSE2|AVX|AVX2]
+Thread count: 28 physical cores, 28 logical processors, using up to 28 threads
+
+Non-default parameters:
+TimeLimit  1200
+FeasibilityTol  1e-09
+IntFeasTol  1e-09
+MIPGap  0
+MIPGapAbs  0
+OptimalityTol  1e-09
+Method  1
+LogToConsole  0
+NumericFocus  3
+Presolve  0
+
+Academic license 2669763 - for non-commercial use only - registered to bg___@id.uff.br
+Optimize a model with 9376 rows, 7653711 columns and 36925802 nonzeros (Min)
+Model fingerprint: 0x33898f67
+Model has 7645330 linear objective coefficients
+Variable types: 0 continuous, 7653711 integer (7645330 binary)
+Coefficient statistics:
+  Matrix range     [1e-02, 3e+02]
+  Objective range  [9e-05, 2e-01]
+  Bounds range     [1e+00, 1e+00]
+  RHS range        [1e+00, 1e+09]
+
+Variable types: 0 continuous, 7653711 integer (7645330 binary)
+
+Root simplex log...
+
+Iteration    Objective       Primal Inf.    Dual Inf.      Time
+       0    0.0000000e+00   1.252388e+04   0.000000e+00     25s
+
+Starting sifting (using dual simplex for sub-problems)...
+
+    Iter     Pivots    Primal Obj      Dual Obj        Time
+       0          0     infinity      0.0000000e+00     25s
+       1       3625   1.9146919e+06   1.1145333e-01     26s
+       2       6952   1.4479229e+00   5.9275002e-01     27s
+       3       9399   1.3788592e+00   1.3298797e+00     27s
+
+Sifting complete
+
+   10772    1.3788592e+00   0.000000e+00   0.000000e+00     28s
+
+Root relaxation: objective 1.378859e+00, 10772 iterations, 4.46 seconds (7.29 work units)
+
+    Nodes    |    Current Node    |     Objective Bounds      |     Work
+ Expl Unexpl |  Obj  Depth IntInf | Incumbent    BestBd   Gap | It/Node Time
+
+*    0     0               0       1.3788592    1.37886  0.00%     -   28s
+     0     0          -    0         1.37886    1.37886  0.00%     -   28s
+
+Explored 1 nodes (10772 simplex iterations) in 28.20 seconds (28.06 work units)
+Thread count was 28 (of 28 available processors)
+
+Solution count 1: 1.37886 
+
+Optimal solution found (tolerance 0.00e+00)
+Best objective 1.378859157955e+00, best bound 1.378859157955e+00, gap 0.0000%

@@ -1,0 +1,99 @@
+
+====================================================================================================
+fedhpc_known_runtime_offline_10min  —  964 jobs, 1654 running, 29 types, H=289, slot=600s
+====================================================================================================
+  reference points [known-exact]: f1_T=11151.04  f2_T=380.11  f1_0=16577.04
+
+  --- lambda = 0.25 ---
+    metaheuristic warm start: f1=15457.0 f2=15.74  (7.6s)
+    Gurobi incumbent: f1=15233.0 f2=18.46  g=0.73828  MIPgap=0.00%  (84.9s)
+
+  --- lambda = 0.5 ---
+    metaheuristic warm start: f1=12573.0 f2=170.58  (10.0s)
+    Gurobi incumbent: f1=12599.0 f2=165.63  g=1.37886  MIPgap=0.00%  (81.6s)
+
+  --- lambda = 0.75 ---
+    metaheuristic warm start: f1=11407.0 f2=286.54  (5.3s)
+    Gurobi incumbent: f1=11390.0 f2=287.49  g=1.76346  MIPgap=0.00%  (80.9s)
+
+  --- baselines ---
+    baselines computed in 0.1s
+
+                    method       key  f1_turnaround_slots      f2_cost  avg_turnaround_s    avg_wait_s  avg_bounded_slowdown  p95_bounded_slowdown  cloud_jobs  n_unscheduled  mip_gap_pct    wall_s
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+           gurobi_weighted    λ=0.25         15233.0        18.46           9481.1        2858.7         2.284          4.15       167         0      0.00      84.9
+           gurobi_weighted     λ=0.5         12599.0       165.63           7841.7        1219.3         1.563          2.78       422         0      0.00      81.6
+           gurobi_weighted    λ=0.75         11390.0       287.49           7089.2         466.8         1.324          1.86       585         0      0.00      80.9
+           onprem_only_spt       θ=∞         16577.0         0.00          10317.7        3695.3         3.360          7.87         0         0         -         -
+greedy_earliest_completion    greedy         11151.0       406.50           6940.5         318.1         1.284          1.81       638         0         -         -
+        threshold_bursting       θ=0         11151.0       386.05           6940.5         318.1         1.284          1.81       653         0         -         -
+        threshold_bursting       θ=1         11222.0       356.77           6984.7         362.3         1.319          1.88       608         0         -         -
+        threshold_bursting       θ=2         11334.0       334.62           7054.4         432.0         1.375          1.98       568         0         -         -
+        threshold_bursting       θ=3         11510.0       314.97           7163.9         541.5         1.468          2.54       529         0         -         -
+        threshold_bursting       θ=4         11869.0       288.00           7387.4         765.0         1.710          5.38       465         0         -         -
+        threshold_bursting       θ=5         12244.0       264.49           7620.8         998.4         1.917          5.86       416         0         -         -
+        threshold_bursting       θ=6         13439.0       198.07           8364.5        1742.1         2.408          7.29       306         0         -         -
+        threshold_bursting       θ=8         16587.0        25.74          10323.9        3701.5         3.707          9.35        60         0         -         -
+        threshold_bursting      θ=10         17320.0         0.00          10780.1        4157.7         4.130          9.88         0         0         -         -
+        threshold_bursting      θ=12         17320.0         0.00          10780.1        4157.7         4.130          9.88         0         0         -         -
+        threshold_bursting      θ=16         17320.0         0.00          10780.1        4157.7         4.130          9.88         0         0         -         -
+        threshold_bursting      θ=24         17320.0         0.00          10780.1        4157.7         4.130          9.88         0         0         -         -
+        threshold_bursting      θ=48         17320.0         0.00          10780.1        4157.7         4.130          9.88         0         0         -         -
+        threshold_bursting     θ=289         17320.0         0.00          10780.1        4157.7         4.130          9.88         0         0         -         -
+
+  → results/lambda_eval/fedhpc_known_runtime_offline_10min_solutions.json
+  → results/lambda_eval/fedhpc_known_runtime_offline_10min_summary.csv
+/home/bernardo/Documentos/programs/fedhpc/src/fedhpc/data.py:244: UserWarning: Running jobs for type 2 exceed capacity 512; excess entries are ignored.
+  inst.build()
+/home/bernardo/Documentos/programs/fedhpc/src/fedhpc/data.py:244: UserWarning: Running jobs for type 1 exceed capacity 406; excess entries are ignored.
+  inst.build()
+/home/bernardo/Documentos/programs/fedhpc/src/fedhpc/data.py:244: UserWarning: Running jobs for type 3 exceed capacity 448; excess entries are ignored.
+  inst.build()
+
+====================================================================================================
+pos_congestion_known_runtime_offline_10min  —  3340 jobs, 2617 running, 28 types, H=288, slot=600s
+====================================================================================================
+  reference points [known-exact]: f1_T=44163.67  f2_T=648.53  f1_0=51251.67
+
+  --- lambda = 0.25 ---
+    metaheuristic warm start: f1=51029.7 f2=95.17  (35.0s)
+    Gurobi incumbent: f1=50977.7 f2=3.39  g=1.80194  MIPgap=0.00%  (461.0s)
+
+  --- lambda = 0.5 ---
+    metaheuristic warm start: f1=49289.7 f2=223.38  (38.2s)
+    Gurobi incumbent: f1=46869.7 f2=241.24  g=3.49226  MIPgap=0.00%  (444.0s)
+
+  --- lambda = 0.75 ---
+    metaheuristic warm start: f1=44300.7 f2=856.22  (31.2s)
+    Gurobi incumbent: f1=44175.7 f2=644.21  g=4.92268  MIPgap=0.00%  (325.2s)
+
+  --- baselines ---
+    baselines computed in 0.2s
+
+                    method       key  f1_turnaround_slots      f2_cost  avg_turnaround_s    avg_wait_s  avg_bounded_slowdown  p95_bounded_slowdown  cloud_jobs  n_unscheduled  mip_gap_pct    wall_s
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+           gurobi_weighted    λ=0.25         50977.7         3.39           9157.7        1531.9         1.513          2.25        95         0      0.00     461.0
+           gurobi_weighted     λ=0.5         46869.7       241.24           8419.7         794.0         1.371          1.96       662         0      0.00     444.0
+           gurobi_weighted    λ=0.75         44175.7       644.21           7935.7         310.0         1.336          1.96      1141         0      0.00     325.2
+           onprem_only_spt       θ=∞         52453.2         0.00           9425.6        1845.9         1.539          2.40         0         1         -         -
+greedy_earliest_completion    greedy         44163.7      3112.12           7933.6         307.8         1.336          1.96       688         0         -         -
+        threshold_bursting       θ=0         44163.7      1543.83           7933.6         307.8         1.336          1.96       891         0         -         -
+        threshold_bursting       θ=1         45604.7      1290.76           8192.5         566.7         1.515          2.74       730         0         -         -
+        threshold_bursting       θ=2         47540.7      1135.05           8540.2         914.5         1.756          3.68       604         0         -         -
+        threshold_bursting       θ=3         49923.7       888.93           8968.3        1342.6         2.053          4.64       476         0         -         -
+        threshold_bursting       θ=4         52514.7       709.47           9433.8        1808.0         2.364          5.60       355         0         -         -
+        threshold_bursting       θ=5         54406.7       546.49           9773.7        2147.9         2.587          6.38       284         0         -         -
+        threshold_bursting       θ=6         55811.7       559.62          10026.0        2400.3         2.759          7.15       220         0         -         -
+        threshold_bursting       θ=8         59353.7         0.00          10662.3        3036.6         3.284          8.87         0         0         -         -
+        threshold_bursting      θ=10         59353.7         0.00          10662.3        3036.6         3.284          8.87         0         0         -         -
+        threshold_bursting      θ=12         59353.7         0.00          10662.3        3036.6         3.284          8.87         0         0         -         -
+        threshold_bursting      θ=16         59353.7         0.00          10662.3        3036.6         3.284          8.87         0         0         -         -
+        threshold_bursting      θ=24         59353.7         0.00          10662.3        3036.6         3.284          8.87         0         0         -         -
+        threshold_bursting      θ=48         59353.7         0.00          10662.3        3036.6         3.284          8.87         0         0         -         -
+        threshold_bursting     θ=288         59353.7         0.00          10662.3        3036.6         3.284          8.87         0         0         -         -
+
+  → results/lambda_eval/pos_congestion_known_runtime_offline_10min_solutions.json
+  → results/lambda_eval/pos_congestion_known_runtime_offline_10min_summary.csv
+  → results/lambda_eval/fedhpc_known_runtime_offline_10min_frontier.png
+  → results/lambda_eval/pos_congestion_known_runtime_offline_10min_frontier.png
+ALL_DONE

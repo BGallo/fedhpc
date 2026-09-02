@@ -1,0 +1,129 @@
+
+Gurobi 13.0.1 (linux64) logging started Tue Sep  1 21:06:31 2026
+
+Set parameter LogFile to value "results/lambda_eval/ablation/pos_congestion_known_runtime_offline_10min_lam0.5_crossover_off.gurobi.log"
+Set parameter TimeLimit to value 1500
+Set parameter MIPGap to value 0.0001
+Set parameter Crossover to value 0
+Gurobi Optimizer version 13.0.1 build v13.0.1rc0 (linux64 - "CachyOS")
+
+CPU model: Intel(R) Core(TM) i7-14700KF, instruction set [SSE2|AVX|AVX2]
+Thread count: 28 physical cores, 28 logical processors, using up to 28 threads
+
+Non-default parameters:
+TimeLimit  1500
+Crossover  0
+LogToConsole  0
+
+Academic license 2669763 - for non-commercial use only - registered to bg___@id.uff.br
+Optimize a model with 11434 rows, 24760192 columns and 120245560 nonzeros (Min)
+Model fingerprint: 0x4de5a3a0
+Model has 24752128 linear objective coefficients
+Variable types: 0 continuous, 24760192 integer (24752128 binary)
+Coefficient statistics:
+  Matrix range     [6e-04, 4e+02]
+  Objective range  [7e-05, 4e-01]
+  Bounds range     [1e+00, 1e+00]
+  RHS range        [1e+00, 1e+09]
+
+Presolve removed 29 rows and 28 columns (presolve time = 5s)...
+Presolve removed 29 rows and 28 columns (presolve time = 12s)...
+Presolve removed 29 rows and 28 columns (presolve time = 15s)...
+Presolve removed 185 rows and 184 columns (presolve time = 20s)...
+Presolve removed 185 rows and 184 columns (presolve time = 25s)...
+Presolve removed 185 rows and 184 columns (presolve time = 30s)...
+Presolve removed 185 rows and 184 columns (presolve time = 35s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 41s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 46s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 50s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 56s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 62s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 65s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 70s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 76s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 81s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 86s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 90s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 95s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 101s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 106s)...
+Presolve removed 185 rows and 36800 columns (presolve time = 111s)...
+Presolve removed 185 rows and 36800 columns
+Presolve time: 113.09s
+Presolved: 11249 rows, 24723392 columns, 98788107 nonzeros
+Variable types: 0 continuous, 24723392 integer (24715512 binary)
+Found heuristic solution: objective 42.6587976
+Deterministic concurrent LP optimizer: primal simplex, dual simplex, and barrier
+Showing barrier log only...
+
+Warning: Concurrent optimizer requires crossover - forcing it on
+Root barrier log...
+
+Ordering time: 1.32s
+
+Barrier statistics:
+ AA' NZ     : 2.643e+07
+ Factor NZ  : 6.075e+07 (roughly 10.0 GB of memory)
+ Factor Ops : 4.282e+11 (roughly 1 second per iteration)
+ Threads    : 26
+
+                  Objective                Residual
+Iter       Primal          Dual         Primal    Dual     Compl     Time
+   0   2.07121916e+09 -1.97028114e+07  7.89e+11 6.94e-18  1.07e+03   226s
+   1   1.17433206e+09 -1.51407065e+07  4.47e+11 1.48e-02  6.21e+02   230s
+   2   3.73866376e+08 -1.74319221e+07  1.42e+11 9.05e-15  2.05e+02   237s
+   3   7.47387558e+07 -5.27964339e+06  2.85e+10 8.67e-04  4.15e+01   246s
+   4   4.91214174e+07 -1.96503513e+06  1.87e+10 2.44e-04  2.76e+01   254s
+   5   2.51759995e+07 -1.04394637e+06  9.61e+09 1.42e-04  1.42e+01   260s
+   6   1.10125638e+07 -7.18818989e+05  4.20e+09 9.96e-05  6.21e+00   266s
+   7   4.50220227e+06 -3.59960540e+05  1.72e+09 4.21e-05  2.54e+00   271s
+   8   1.88471159e+06 -2.45343545e+05  7.19e+08 1.92e-05  1.07e+00   277s
+   9   1.11913044e+06 -1.44521712e+05  4.27e+08 1.92e-06  6.34e-01   284s
+  10   3.49607090e+05 -9.71966541e+04  1.34e+08 5.28e-15  2.01e-01   293s
+  11   1.29229142e+05 -7.55382391e+04  4.96e+07 6.01e-15  7.54e-02   301s
+  12   8.92210462e+04 -5.43535134e+04  3.45e+07 5.91e-15  5.26e-02   307s
+  13   6.70261626e+04 -4.67844899e+04  2.60e+07 7.29e-15  3.99e-02   313s
+  14   5.77598443e+04 -3.88498679e+04  2.24e+07 6.48e-15  3.45e-02   318s
+
+Barrier performed 14 iterations in 318.49 seconds (611.41 work units)
+Barrier solve interrupted - model solved by another algorithm
+
+Concurrent spin time: 21.45s (can be avoided by choosing Method=3)
+
+Solved with primal simplex
+
+Root simplex log...
+
+Iteration    Objective       Primal Inf.    Dual Inf.      Time
+  413365    3.4922565e+00   0.000000e+00   3.019627e-03    321s
+  414772    3.4922565e+00   0.000000e+00   0.000000e+00    323s
+
+Extra simplex iterations after uncrush: 1407
+
+Root relaxation: objective 3.492256e+00, 414772 iterations, 139.93 seconds (145.34 work units)
+
+    Nodes    |    Current Node    |     Objective Bounds      |     Work
+ Expl Unexpl |  Obj  Depth IntInf | Incumbent    BestBd   Gap | It/Node Time
+
+     0     0    3.49226    0  162   42.65880    3.49226  91.8%     -  334s
+H    0     0                       3.5103886    3.49226  0.52%     -  363s
+H    0     0                       3.4922606    3.49226  0.00%     -  421s
+
+Explored 1 nodes (415616 simplex iterations) in 422.18 seconds (754.16 work units)
+Thread count was 28 (of 28 available processors)
+
+Solution count 3: 3.49226 3.51039 42.6588 
+
+Optimal solution found (tolerance 1.00e-04)
+Best objective 3.492260557110e+00, best bound 3.492256497045e+00, gap 0.0001%
+Discarded solution information including additional information
+Set parameter Method to value -1
+Set parameter Crossover to value -1
+Set parameter Presolve to value -1
+Set parameter Cuts to value -1
+Set parameter MIPFocus to value 0
+Set parameter NumericFocus to value 0
+Set parameter Heuristics to value 0.05
+Set parameter Threads to value 0
+Set parameter OutputFlag to value 1
+Set parameter LogToConsole to value 0

@@ -20,9 +20,11 @@ against experiments/tcc_2026/offloading_strategy_comparison/window_jobs:
   running_jobs        = initial_state_jobs rows with @start < t0 (i.e. truly
                         already running at t0), one entry per allocated
                         hostname, type_id resolved from the hostname's node
-                        group prefix (clb1/csr1/csr2/csr3/ecn).
+                        group prefix (clb1/csr1/csr2/csr3; the "ecn" fat
+                        nodes are dropped — jobs on them are skipped).
                         end = ceil((@end - t0) / time_scale).
-  instance_types      = identical on-prem/cloud catalog to fedhpc_known_runtime_offline.json
+  instance_types      = on-prem/cloud catalog matching fedhpc_known_runtime_offline.json
+                        MINUS the "ecn" fat node (see _ONPREM_GROUPS)
                         (same physical cluster + AWS catalog is shared by both
                         experiments' .cfg files), with cost_vm recomputed for
                         this instance's own time_scale_seconds.
@@ -73,14 +75,17 @@ def _load_dict_lines(path: Path) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 # group -> (cores_per_node, cost_per_hour_per_node, mem_gb_per_node, n_nodes)
+# NOTE: the "ecn" group (1000 cores/node, 8000 GB, 2 nodes) was dropped — a
+# 1000-core node grossly oversubscribes the real hardware and let the solver
+# absorb large jobs onto a fictitious fat node. Every real job fits on "csr3"
+# (64 cores / 480 GB) or a cloud VM, so removing it makes nothing infeasible.
 _ONPREM_GROUPS = {
     "clb1": (40, 0.95, 300, 9 * 32),
     "csr1": (40, 0.95, 300, 12 * 32 + 22),
     "csr2": (40, 0.95, 300, 16 * 32),
     "csr3": (64, 0.95, 480, 10 * 41 + 38),
-    "ecn":  (1000, 0.95, 8000, 2),
 }
-_ONPREM_ORDER = ["clb1", "csr1", "csr2", "csr3", "ecn"]
+_ONPREM_ORDER = ["clb1", "csr1", "csr2", "csr3"]
 
 # prefix -> (cores, cost_per_hour, mem_gb) — mirrors fedhpc_known_runtime_offline.json
 _CLOUD_TYPES = [
@@ -123,8 +128,9 @@ def _group_of_hostname(h: str) -> str | None:
         return "csr2"
     if h.startswith("csr3"):
         return "csr3"
-    if h in ("npaa1838", "npab1838"):
-        return "ecn"
+    # npaa1838 / npab1838 were the "ecn" fat nodes — dropped as an unrealistic
+    # hardware oversubscribe (see _ONPREM_GROUPS). Treat as unmapped so any
+    # running jobs on them are skipped rather than crashing on a missing group.
     return None
 
 

@@ -1,0 +1,4 @@
+=== [chain] main ablation done; running combined configs ter 01 set 2026 22:47:27 -03 ===
+=== [chain2] resume: mipfocus_bound(pos) + combined configs ter 01 set 2026 22:49:47 -03 ===
+=== [chain2] ablation resume done; precision sweep ter 01 set 2026 23:27:50 -03 ===
+=== [chain2] PRECISION_DONE qua 02 set 2026 00:03:33 -03 ===

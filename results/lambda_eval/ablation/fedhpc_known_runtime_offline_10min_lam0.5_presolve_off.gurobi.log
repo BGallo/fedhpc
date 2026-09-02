@@ -1,0 +1,85 @@
+
+Gurobi 13.0.1 (linux64) logging started Tue Sep  1 20:05:07 2026
+
+Set parameter LogFile to value "results/lambda_eval/ablation/fedhpc_known_runtime_offline_10min_lam0.5_presolve_off.gurobi.log"
+Set parameter TimeLimit to value 1500
+Set parameter MIPGap to value 0.0001
+Set parameter Presolve to value 0
+Gurobi Optimizer version 13.0.1 build v13.0.1rc0 (linux64 - "CachyOS")
+
+CPU model: Intel(R) Core(TM) i7-14700KF, instruction set [SSE2|AVX|AVX2]
+Thread count: 28 physical cores, 28 logical processors, using up to 28 threads
+
+Non-default parameters:
+TimeLimit  1500
+LogToConsole  0
+Presolve  0
+
+Academic license 2669763 - for non-commercial use only - registered to bg___@id.uff.br
+Optimize a model with 9376 rows, 7653711 columns and 36925802 nonzeros (Min)
+Model fingerprint: 0x33898f67
+Model has 7645330 linear objective coefficients
+Variable types: 0 continuous, 7653711 integer (7645330 binary)
+Coefficient statistics:
+  Matrix range     [1e-02, 3e+02]
+  Objective range  [9e-05, 2e-01]
+  Bounds range     [1e+00, 1e+00]
+  RHS range        [1e+00, 1e+09]
+
+Variable types: 0 continuous, 7653711 integer (7645330 binary)
+
+Deterministic concurrent LP optimizer: primal simplex, dual simplex, and barrier
+Showing barrier log only...
+
+Root barrier log...
+
+Ordering time: 0.50s
+
+Barrier statistics:
+ AA' NZ     : 8.292e+06
+ Factor NZ  : 4.119e+07 (roughly 3.4 GB of memory)
+ Factor Ops : 2.463e+11 (less than 1 second per iteration)
+ Threads    : 26
+
+                  Objective                Residual
+Iter       Primal          Dual         Primal    Dual     Compl     Time
+   0   4.31300904e+10 -6.20858251e+06  1.82e+13 6.94e-18  8.17e+04    29s
+   1   2.12957759e+10 -5.33289450e+06  8.98e+12 2.10e-02  3.99e+04    31s
+
+Barrier performed 1 iterations in 31.45 seconds (24.29 work units)
+Barrier solve interrupted - model solved by another algorithm
+
+Concurrent spin time: 2.04s (can be avoided by choosing Method=3)
+
+Solved with dual simplex
+
+Root simplex log...
+
+Iteration    Objective       Primal Inf.    Dual Inf.      Time
+    9595    1.3788598e+00   0.000000e+00   0.000000e+00     32s
+
+Root relaxation: objective 1.378860e+00, 9595 iterations, 8.32 seconds (5.72 work units)
+
+    Nodes    |    Current Node    |     Objective Bounds      |     Work
+ Expl Unexpl |  Obj  Depth IntInf | Incumbent    BestBd   Gap | It/Node Time
+
+*    0     0               0       1.3788598    1.37886  0.00%     -   32s
+
+Explored 1 nodes (9595 simplex iterations) in 32.42 seconds (26.49 work units)
+Thread count was 28 (of 28 available processors)
+
+Solution count 1: 1.37886 
+
+Optimal solution found (tolerance 1.00e-04)
+Best objective 1.378859820194e+00, best bound 1.378859820194e+00, gap 0.0000%
+Discarded solution information including additional information
+Set parameter Method to value -1
+Set parameter Crossover to value -1
+Set parameter Presolve to value -1
+Set parameter Cuts to value -1
+Set parameter MIPFocus to value 0
+Set parameter NumericFocus to value 0
+Set parameter Heuristics to value 0.05
+Set parameter Threads to value 0
+Set parameter OutputFlag to value 1
+Set parameter LogToConsole to value 0

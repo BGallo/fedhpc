@@ -1,0 +1,143 @@
+{
+  "instance": "pos_congestion_known_runtime_offline_10min",
+  "reference_points": {
+    "f1_T": 44163.67,
+    "f2_T": 648.526,
+    "f1_0": 51251.67
+  },
+  "runs": {
+    "0.5": {
+      "lam": 0.5,
+      "degenerate": false,
+      "build_s": 91.4,
+      "solve_s": 425.43,
+      "status": 2,
+      "sol_count": 3,
+      "n_bin": 24752128,
+      "n_var": 24760192,
+      "n_constr": 11434,
+      "f1": 46869.67,
+      "f2": 241.2406611111111,
+      "obj": 3.4922605571105,
+      "bound": 3.492256497045,
+      "mip_gap": 1.1625892e-06,
+      "wall_s": 584.76,
+      "first_incumbent": {
+        "t": 335,
+        "incumbent": 42.6588,
+        "bound": 3.49226,
+        "gap_pct": 91.8
+      },
+      "trajectory": [
+        {
+          "t": 335,
+          "incumbent": 42.6588,
+          "bound": 3.49226,
+          "gap_pct": 91.8
+        },
+        {
+          "t": 364,
+          "incumbent": 3.5103886,
+          "bound": 3.49226,
+          "gap_pct": 0.52
+        },
+        {
+          "t": 423,
+          "incumbent": 3.4922606,
+          "bound": 3.49226,
+          "gap_pct": 0.0
+        }
+      ],
+      "root_relax_obj": 3.492256,
+      "root_relax_seconds": 141.1,
+      "n_nodes": 1,
+      "time_limit": 3600.0,
+      "extra_params": {}
+    },
+    "0.75": {
+      "lam": 0.75,
+      "degenerate": false,
+      "build_s": 91.00459327099998,
+      "solve_s": 295.97802488899833,
+      "status": 2,
+      "sol_count": 2,
+      "n_bin": 24752128,
+      "n_var": 24760192,
+      "n_constr": 11434,
+      "presolve_removed": null,
+      "f1": 44175.67,
+      "f2": 644.2136999999999,
+      "obj": 4.922681967720379,
+      "bound": 4.9226819677203695,
+      "mip_gap": 0.0,
+      "wall_s": 454.1134603270002,
+      "first_incumbent": {
+        "t": 294,
+        "incumbent": 4.922682,
+        "bound": 4.92268,
+        "gap_pct": 0.0
+      },
+      "trajectory": [
+        {
+          "t": 294,
+          "incumbent": 4.922682,
+          "bound": 4.92268,
+          "gap_pct": 0.0
+        }
+      ],
+      "root_relax_obj": 4.922682,
+      "root_relax_seconds": 105.17,
+      "n_nodes": 1
+    }
+  },
+  "results": [
+    {
+      "lam": 0.5,
+      "degenerate": false,
+      "build_s": 91.4,
+      "solve_s": 425.43,
+      "status": 2,
+      "sol_count": 3,
+      "n_bin": 24752128,
+      "n_var": 24760192,
+      "n_constr": 11434,
+      "f1": 46869.67,
+      "f2": 241.2406611111111,
+      "obj": 3.4922605571105,
+      "bound": 3.492256497045,
+      "mip_gap": 1.1625892e-06,
+      "wall_s": 584.76,
+      "first_incumbent": {
+        "t": 335,
+        "incumbent": 42.6588,
+        "bound": 3.49226,
+        "gap_pct": 91.8
+      },
+      "trajectory": [
+        {
+          "t": 335,
+          "incumbent": 42.6588,
+          "bound": 3.49226,
+          "gap_pct": 91.8
+        },
+        {
+          "t": 364,
+          "incumbent": 3.5103886,
+          "bound": 3.49226,
+          "gap_pct": 0.52
+        },
+        {
+          "t": 423,
+          "incumbent": 3.4922606,
+          "bound": 3.49226,
+          "gap_pct": 0.0
+        }
+      ],
+      "root_relax_obj": 3.492256,
+      "root_relax_seconds": 141.1,
+      "n_nodes": 1,
+      "time_limit": 3600.0,
+      "extra_params": {}
+    }
+  ]
+}

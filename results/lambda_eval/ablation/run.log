@@ -1,0 +1,92 @@
+
+================================================================================================
+fedhpc_known_runtime_offline_10min  λ=0.5  —  964 jobs, 29 types, H=289
+================================================================================================
+  model built in 27s  (7,653,711 vars, 9,376 constrs, 7,645,330 binaries)
+Set parameter OutputFlag to value 1
+Set parameter LogToConsole to value 0
+  default                   solve     77s  root_lp   17.6s  nodes   1  obj 1.378859
+  method_primal_simplex     solve     61s  root_lp    5.4s  nodes   1  obj 1.378861
+  method_dual_simplex       solve     64s  root_lp    3.8s  nodes   1  obj 1.378860
+  method_barrier            solve    362s  root_lp  304.1s  nodes   1  obj 1.378859
+  method_concurrent         solve     75s  root_lp   16.6s  nodes   1  obj 1.378859
+  crossover_off             solve     74s  root_lp   17.4s  nodes   1  obj 1.378859
+  barrier_no_crossover      solve    369s  root_lp  310.9s  nodes   1  obj 1.378859
+  presolve_off              solve     32s  root_lp    8.3s  nodes   1  obj 1.378860
+  presolve_aggressive       solve    423s  root_lp   20.1s  nodes   1  obj 1.378859
+  threads_1                 solve     69s  root_lp   11.5s  nodes   1  obj 1.378859
+  threads_4                 solve     71s  root_lp   14.6s  nodes   1  obj 1.378859
+  cuts_off                  solve     74s  root_lp   17.7s  nodes   1  obj 1.378859
+  heuristics_off            solve     55s  root_lp   18.1s  nodes   1  obj 1.378859
+  mipfocus_bound            solve    202s  root_lp   20.2s  nodes   1  obj 1.378859
+  → results/lambda_eval/ablation/fedhpc_known_runtime_offline_10min_lam0.5_ablation.json
+  → results/lambda_eval/ablation/fedhpc_known_runtime_offline_10min_lam0.5_ablation.csv
+/home/bernardo/Documentos/programs/fedhpc/src/fedhpc/data.py:244: UserWarning: Running jobs for type 2 exceed capacity 512; excess entries are ignored.
+  inst.build()
+/home/bernardo/Documentos/programs/fedhpc/src/fedhpc/data.py:244: UserWarning: Running jobs for type 1 exceed capacity 406; excess entries are ignored.
+  inst.build()
+/home/bernardo/Documentos/programs/fedhpc/src/fedhpc/data.py:244: UserWarning: Running jobs for type 3 exceed capacity 448; excess entries are ignored.
+  inst.build()
+
+================================================================================================
+pos_congestion_known_runtime_offline_10min  λ=0.5  —  3340 jobs, 28 types, H=288
+================================================================================================
+  model built in 88s  (24,760,192 vars, 11,434 constrs, 24,752,128 binaries)
+Set parameter OutputFlag to value 1
+Set parameter LogToConsole to value 0
+  default                   solve    429s  root_lp  141.6s  nodes   1  obj 3.492261
+  method_primal_simplex     solve    275s  root_lp   39.9s  nodes   1  obj 3.492514
+  method_dual_simplex       solve    297s  root_lp   45.1s  nodes   1  obj 3.492263
+  method_barrier            solve   1047s  root_lp  748.7s  nodes   1  obj 3.492258
+  method_concurrent         solve    382s  root_lp  120.2s  nodes   1  obj 3.492256
+  crossover_off             solve    422s  root_lp  139.9s  nodes   1  obj 3.492261
+  barrier_no_crossover      solve   1055s  root_lp  749.7s  nodes   1  obj 3.492258
+  presolve_off              solve    193s  root_lp  115.9s  nodes   1  obj 3.492270
+  presolve_aggressive       solve   1501s  root_lp    nans  nodes   1  obj 42.855816  ⚠ not proven
+  threads_1                 solve    361s  root_lp   69.1s  nodes   1  obj 3.492261
+  threads_4                 solve    375s  root_lp   96.1s  nodes   1  obj 3.492407
+  cuts_off                  solve    422s  root_lp  141.1s  nodes   1  obj 3.492261
+Traceback (most recent call last):
+  File "/home/bernardo/Documentos/programs/fedhpc/scripts/gurobi_ablation.py", line 202, in <module>
+    "data/pos_congestion_known_runtime_offline_10min.json",
+    ^^
+  File "/home/bernardo/Documentos/programs/fedhpc/scripts/gurobi_ablation.py", line 198, in main
+    def main() -> None:
+            ^^^^^^^^^^^
+  File "/home/bernardo/Documentos/programs/fedhpc/scripts/gurobi_ablation.py", line 143, in run_instance
+    t1 = time.perf_counter()
+             ^^^^^^^^^^^^^^^
+  File "/home/bernardo/Documentos/programs/fedhpc/scripts/gurobi_ablation.py", line 84, in _parse_log
+    if m:
+    
+ValueError: could not convert string to float: '-'
+
+================================================================================================
+fedhpc_known_runtime_offline_10min  λ=0.5  —  964 jobs, 29 types, H=289
+================================================================================================
+  model built in 26s  (7,653,711 vars, 9,376 constrs, 7,645,330 binaries)
+Set parameter OutputFlag to value 1
+Set parameter LogToConsole to value 0
+  mipfocus_bound            solve    204s  root_lp   20.5s  nodes   1  obj 1.378859
+  presolve_off+dual_simplex  solve     27s  root_lp    3.6s  nodes   1  obj 1.378860
+  presolve_off+primal_simplex  solve     59s  root_lp    9.1s  nodes   1  obj 1.378861
+  → results/lambda_eval/ablation/fedhpc_known_runtime_offline_10min_lam0.5_ablation.json
+  → results/lambda_eval/ablation/fedhpc_known_runtime_offline_10min_lam0.5_ablation.csv
+/home/bernardo/Documentos/programs/fedhpc/src/fedhpc/data.py:244: UserWarning: Running jobs for type 2 exceed capacity 512; excess entries are ignored.
+  inst.build()
+/home/bernardo/Documentos/programs/fedhpc/src/fedhpc/data.py:244: UserWarning: Running jobs for type 1 exceed capacity 406; excess entries are ignored.
+  inst.build()
+/home/bernardo/Documentos/programs/fedhpc/src/fedhpc/data.py:244: UserWarning: Running jobs for type 3 exceed capacity 448; excess entries are ignored.
+  inst.build()
+
+================================================================================================
+pos_congestion_known_runtime_offline_10min  λ=0.5  —  3340 jobs, 28 types, H=288
+================================================================================================
+  model built in 88s  (24,760,192 vars, 11,434 constrs, 24,752,128 binaries)
+Set parameter OutputFlag to value 1
+Set parameter LogToConsole to value 0
+  mipfocus_bound            solve   1401s  root_lp  138.7s  nodes   1  obj 3.492258
+  presolve_off+dual_simplex  solve    155s  root_lp   24.6s  nodes   1  obj 3.492273
+  presolve_off+primal_simplex  solve    160s  root_lp   76.0s  nodes   1  obj 3.492264
+  → results/lambda_eval/ablation/pos_congestion_known_runtime_offline_10min_lam0.5_ablation.json
+  → results/lambda_eval/ablation/pos_congestion_known_runtime_offline_10min_lam0.5_ablation.csv

@@ -72,17 +72,17 @@
     },
     {
       "id": 4,
-      "kind": "on-prem",
+      "kind": "cloud",
       "perf": 1.0,
       "io_time": 0.0,
       "deploy": 0,
       "cost_io": 0.0,
-      "cost_vm": 0.0,
+      "cost_vm": 0.1883333333333333,
       "cost_stor": 0.0,
-      "cpu": 1000,
-      "mem": 8000,
+      "cpu": 48,
+      "mem": 512,
       "stor": 10000,
-      "capacity": 2
+      "capacity": null
     },
     {
       "id": 5,
@@ -91,7 +91,7 @@
       "io_time": 0.0,
       "deploy": 0,
       "cost_io": 0.0,
-      "cost_vm": 0.1883333333333333,
+      "cost_vm": 0.68,
       "cost_stor": 0.0,
       "cpu": 48,
       "mem": 512,
@@ -105,7 +105,7 @@
       "io_time": 0.0,
       "deploy": 0,
       "cost_io": 0.0,
-      "cost_vm": 0.68,
+      "cost_vm": 0.1883333333333333,
       "cost_stor": 0.0,
       "cpu": 48,
       "mem": 512,
@@ -119,7 +119,7 @@
       "io_time": 0.0,
       "deploy": 0,
       "cost_io": 0.0,
-      "cost_vm": 0.1883333333333333,
+      "cost_vm": 0.6166666666666667,
       "cost_stor": 0.0,
       "cpu": 48,
       "mem": 512,
@@ -133,7 +133,7 @@
       "io_time": 0.0,
       "deploy": 0,
       "cost_io": 0.0,
-      "cost_vm": 0.6166666666666667,
+      "cost_vm": 0.24666666666666667,
       "cost_stor": 0.0,
       "cpu": 48,
       "mem": 512,
@@ -147,7 +147,7 @@
       "io_time": 0.0,
       "deploy": 0,
       "cost_io": 0.0,
-      "cost_vm": 0.24666666666666667,
+      "cost_vm": 0.6116666666666666,
       "cost_stor": 0.0,
       "cpu": 48,
       "mem": 512,
@@ -161,7 +161,7 @@
       "io_time": 0.0,
       "deploy": 0,
       "cost_io": 0.0,
-      "cost_vm": 0.6116666666666666,
+      "cost_vm": 0.17833333333333332,
       "cost_stor": 0.0,
       "cpu": 48,
       "mem": 512,
@@ -175,7 +175,7 @@
       "io_time": 0.0,
       "deploy": 0,
       "cost_io": 0.0,
-      "cost_vm": 0.17833333333333332,
+      "cost_vm": 0.7683333333333333,
       "cost_stor": 0.0,
       "cpu": 48,
       "mem": 512,
@@ -189,7 +189,7 @@
       "io_time": 0.0,
       "deploy": 0,
       "cost_io": 0.0,
-      "cost_vm": 0.7683333333333333,
+      "cost_vm": 0.20666666666666667,
       "cost_stor": 0.0,
       "cpu": 48,
       "mem": 512,
@@ -203,7 +203,7 @@
       "io_time": 0.0,
       "deploy": 0,
       "cost_io": 0.0,
-      "cost_vm": 0.20666666666666667,
+      "cost_vm": 0.6883333333333334,
       "cost_stor": 0.0,
       "cpu": 48,
       "mem": 512,
@@ -217,7 +217,7 @@
       "io_time": 0.0,
       "deploy": 0,
       "cost_io": 0.0,
-      "cost_vm": 0.6883333333333334,
+      "cost_vm": 0.225,
       "cost_stor": 0.0,
       "cpu": 48,
       "mem": 512,
@@ -231,7 +231,7 @@
       "io_time": 0.0,
       "deploy": 0,
       "cost_io": 0.0,
-      "cost_vm": 0.225,
+      "cost_vm": 0.68,
       "cost_stor": 0.0,
       "cpu": 48,
       "mem": 512,
@@ -245,20 +245,6 @@
       "io_time": 0.0,
       "deploy": 0,
       "cost_io": 0.0,
-      "cost_vm": 0.68,
-      "cost_stor": 0.0,
-      "cpu": 48,
-      "mem": 512,
-      "stor": 10000,
-      "capacity": null
-    },
-    {
-      "id": 17,
-      "kind": "cloud",
-      "perf": 1.0,
-      "io_time": 0.0,
-      "deploy": 0,
-      "cost_io": 0.0,
       "cost_vm": 0.255,
       "cost_stor": 0.0,
       "cpu": 64,
@@ -267,7 +253,7 @@
       "capacity": null
     },
     {
-      "id": 18,
+      "id": 17,
       "kind": "cloud",
       "perf": 1.0,
       "io_time": 0.0,
@@ -281,7 +267,7 @@
       "capacity": null
     },
     {
-      "id": 19,
+      "id": 18,
       "kind": "cloud",
       "perf": 1.0,
       "io_time": 0.0,
@@ -295,7 +281,7 @@
       "capacity": null
     },
     {
-      "id": 20,
+      "id": 19,
       "kind": "cloud",
       "perf": 1.0,
       "io_time": 0.0,
@@ -309,7 +295,7 @@
       "capacity": null
     },
     {
-      "id": 21,
+      "id": 20,
       "kind": "cloud",
       "perf": 1.0,
       "io_time": 0.0,
@@ -323,7 +309,7 @@
       "capacity": null
     },
     {
-      "id": 22,
+      "id": 21,
       "kind": "cloud",
       "perf": 1.0,
       "io_time": 0.0,
@@ -337,7 +323,7 @@
       "capacity": null
     },
     {
-      "id": 23,
+      "id": 22,
       "kind": "cloud",
       "perf": 1.0,
       "io_time": 0.0,
@@ -351,7 +337,7 @@
       "capacity": null
     },
     {
-      "id": 24,
+      "id": 23,
       "kind": "cloud",
       "perf": 1.0,
       "io_time": 0.0,
@@ -365,7 +351,7 @@
       "capacity": null
     },
     {
-      "id": 25,
+      "id": 24,
       "kind": "cloud",
       "perf": 1.0,
       "io_time": 0.0,
@@ -379,7 +365,7 @@
       "capacity": null
     },
     {
-      "id": 26,
+      "id": 25,
       "kind": "cloud",
       "perf": 1.0,
       "io_time": 0.0,
@@ -393,7 +379,7 @@
       "capacity": null
     },
     {
-      "id": 27,
+      "id": 26,
       "kind": "cloud",
       "perf": 1.0,
       "io_time": 0.0,
@@ -407,7 +393,7 @@
       "capacity": null
     },
     {
-      "id": 28,
+      "id": 27,
       "kind": "cloud",
       "perf": 1.0,
       "io_time": 0.0,
