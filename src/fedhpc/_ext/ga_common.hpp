@@ -747,6 +747,81 @@ inline bool local_search(Individual& ind, const Problem& prob, EvalWorkspace& ws
     return any_improved;
 }
 
+// ── Preemptive-SRPT completion-time ordering (Extract-from-Preempt decode) ────
+//
+// For a fixed type assignment the start-time subproblem on each type m is
+// P | r_j | sum C_j  (identical parallel machines = the type's cap slots, minus
+// the time-varying init_occ, with job release dates = arrivals). SPT is the
+// optimal list-scheduling rule for that problem *without* release dates but has
+// no constant-factor guarantee with them. Sequencing jobs in the order of their
+// completion times in the optimal *preemptive* schedule (built here by SRPT:
+// at every time step the cap-many released jobs with least remaining work run)
+// and then list-scheduling non-preemptively in that order is the classic
+// "Extract-from-Preempt" 2-approximation (Phillips, Stein & Wein 1998;
+// (3 - 1/m) on m machines, Chekuri et al. 2001). This routine returns that
+// order. It is release-date aware, which the plain SPT sort is not.
+//
+// O( sum_m  max_slot * n_m log n_m ). Deterministic. Called only from the
+// per-individual finishing decode (finish_decode), never the inner LS scan.
+inline void srpt_completion_order(const Problem& prob, const Individual& ind,
+                                  std::vector<int>& order_out) {
+    const int stride = prob.max_slot + 1;
+    std::vector<double> cP(prob.n_jobs, 0.0);
+    std::vector<int> rel(prob.n_jobs), proc(prob.n_jobs);
+    std::vector<std::vector<int>> by_type(prob.n_types);
+
+    for (int j = 0; j < prob.n_jobs; j++) {
+        const SlotInfo& s = prob.job_slots[j][ind.genes[j]];
+        int begin = ind.genes[j];
+        for (const auto& sp : prob.job_type_span[j])
+            if (sp[0] == s.type_id) { begin = sp[1]; break; }
+        rel[j]  = prob.job_slots[j][begin].start;   // earliest feasible start on this type
+        proc[j] = prob.job_slots[j][begin].p_occ;
+        by_type[s.type_id].push_back(j);
+    }
+
+    std::vector<int> remaining, ready;
+    for (int m = 0; m < prob.n_types; m++) {
+        auto& jobs = by_type[m];
+        if (jobs.empty()) continue;
+        const int cap = prob.type_cap[m];
+        if (cap < 0) {                       // unlimited capacity: no contention
+            for (int j : jobs) cP[j] = rel[j] + proc[j];
+            continue;
+        }
+        // SRPT simulation on the integer grid: each step, the `avail` released
+        // and unfinished jobs with least remaining work get one time unit.
+        remaining.assign(jobs.size(), 0);
+        for (size_t i = 0; i < jobs.size(); i++) remaining[i] = proc[jobs[i]];
+        int done = 0;
+        for (int t = 0; t < prob.max_slot && done < (int)jobs.size(); t++) {
+            const int avail = cap - prob.init_occ_flat[m * stride + t];
+            if (avail <= 0) continue;
+            ready.clear();
+            for (size_t i = 0; i < jobs.size(); i++)
+                if (remaining[i] > 0 && rel[jobs[i]] <= t) ready.push_back((int)i);
+            if (ready.empty()) continue;
+            const int run = std::min<int>(avail, (int)ready.size());
+            std::partial_sort(ready.begin(), ready.begin() + run, ready.end(),
+                [&](int a, int b) { return remaining[a] < remaining[b]; });
+            for (int r = 0; r < run; r++) {
+                const int i = ready[r];
+                if (--remaining[i] == 0) { cP[jobs[i]] = t + 1; done++; }
+            }
+        }
+        for (size_t i = 0; i < jobs.size(); i++)
+            if (remaining[i] > 0) cP[jobs[i]] = prob.max_slot + remaining[i];
+    }
+
+    order_out.resize(prob.n_jobs);
+    std::iota(order_out.begin(), order_out.end(), 0);
+    std::sort(order_out.begin(), order_out.end(), [&](int a, int b) {
+        if (cP[a] != cP[b]) return cP[a] < cP[b];
+        if (proc[a] != proc[b]) return proc[a] < proc[b];
+        return a < b;
+    });
+}
+
 // ── Earliest-feasible list-scheduling repair ─────────────────────────────────
 //
 // Problem-specific decoder. Cost (f2) depends *only* on which type each job
@@ -779,8 +854,17 @@ inline bool local_search(Individual& ind, const Problem& prob, EvalWorkspace& ws
 // which is otherwise the dominant source of avoidable turnaround at the
 // cost-minimal end. Still a weakly-dominating move: cost never rises, p_occ
 // never rises, start never rises. Default 0 keeps the single-type scan.
+//
+// order_mode selects the list-scheduling priority order:
+//   0 (default) — SPT: (p_occ asc, start asc), the classic rule.
+//   1           — preemptive-SRPT completion order (srpt_completion_order):
+//                 release-date aware, the Extract-from-Preempt 2-approx order.
+//   2           — start asc (then p_occ asc): the left-justification order used
+//                 by forward_backward_improve.
+// Modes 1/2 are used only by finish_decode; the hot inner LS scan uses 0.
 inline bool schedule_repair(Individual& ind, const Problem& prob, EvalWorkspace& ws,
-                            int max_passes = 2, int free_pool_balance = 0) {
+                            int max_passes = 2, int free_pool_balance = 0,
+                            int order_mode = 0) {
     const int stride = prob.max_slot + 1;
     bool any_improved = false;
 
@@ -803,21 +887,33 @@ inline bool schedule_repair(Individual& ind, const Problem& prob, EvalWorkspace&
             }
         }
 
-        // Shortest-processing-time-first (SPT). Placing jobs in ascending
-        // p_occ order and giving each the earliest feasible slot is the
-        // classic list-scheduling rule that minimises total completion time
-        // (hence f1 = total turnaround) on parallel identical machines — an
-        // A/B on the 10min instance confirmed SPT beats both current-start
-        // order and release-date order at the cost-minimal corner (f1 gap to
-        // the proven optimum roughly halved). Ties broken by current start.
+        // List-scheduling priority order (see order_mode doc above). The
+        // default SPT rule (0) minimises total completion time on parallel
+        // identical machines without release dates — an A/B on the 10min
+        // instance confirmed it beats current-start and release-date order at
+        // the cost-minimal corner. Mode 1 (SRPT completion order) adds
+        // release-date awareness; mode 2 is the left-justification order.
         std::vector<int> order(prob.n_jobs);
-        std::iota(order.begin(), order.end(), 0);
-        std::sort(order.begin(), order.end(), [&](int a, int b) {
-            const SlotInfo& sa = prob.job_slots[a][ind.genes[a]];
-            const SlotInfo& sb = prob.job_slots[b][ind.genes[b]];
-            if (sa.p_occ != sb.p_occ) return sa.p_occ < sb.p_occ;
-            return sa.start < sb.start;
-        });
+        if (order_mode == 1) {
+            srpt_completion_order(prob, ind, order);
+        } else {
+            std::iota(order.begin(), order.end(), 0);
+            if (order_mode == 2) {
+                std::sort(order.begin(), order.end(), [&](int a, int b) {
+                    const SlotInfo& sa = prob.job_slots[a][ind.genes[a]];
+                    const SlotInfo& sb = prob.job_slots[b][ind.genes[b]];
+                    if (sa.start != sb.start) return sa.start < sb.start;
+                    return sa.p_occ < sb.p_occ;
+                });
+            } else {
+                std::sort(order.begin(), order.end(), [&](int a, int b) {
+                    const SlotInfo& sa = prob.job_slots[a][ind.genes[a]];
+                    const SlotInfo& sb = prob.job_slots[b][ind.genes[b]];
+                    if (sa.p_occ != sb.p_occ) return sa.p_occ < sb.p_occ;
+                    return sa.start < sb.start;
+                });
+            }
+        }
 
         bool pass_improved = false;
 
@@ -893,6 +989,255 @@ inline bool schedule_repair(Individual& ind, const Problem& prob, EvalWorkspace&
         if (!pass_improved) break;
     }
     return any_improved;
+}
+
+// ── Forward-backward improvement (double justification) ──────────────────────
+//
+// Valls, Ballestin & Quintanilla (2005), "Justification and RCPSP: a technique
+// that pays". A schedule is right-justified (every job pushed as late as
+// capacity allows, bounded by the horizon, jobs processed latest-finishing
+// first) and then left-justified (schedule_repair with order_mode 2). For a
+// regular objective — sum of turnarounds is regular — the left pass never
+// worsens f1, and running it from a right-justified schedule reconsiders jobs
+// in a different order, letting the schedule escape the arrangement a single
+// forward pass got stuck in. Iterated; the best f1 seen is kept, so the step
+// is monotone regardless of the free_pool type moves.
+
+// Reset every gene to the latest slot of its current type block, so a
+// subsequent forward pass re-places the job from scratch (schedule_repair only
+// ever moves a job earlier). Type (hence f2) is unchanged.
+inline void reset_genes_to_latest(Individual& ind, const Problem& prob) {
+    for (int j = 0; j < prob.n_jobs; j++) {
+        const int tid = prob.job_slots[j][ind.genes[j]].type_id;
+        for (const auto& sp : prob.job_type_span[j])
+            if (sp[0] == tid) { ind.genes[j] = sp[2] - 1; break; }
+    }
+}
+
+// Right-justification: mirror of the forward earliest-feasible pass. Jobs are
+// processed in non-increasing order of current completion time and each is
+// moved to the LATEST capacity-feasible slot of its type block (or a
+// weakly-dominating block, with free_pool_balance). Mutates ind.genes; does
+// NOT refresh f1/f2/cv. Returns true if any gene moved.
+inline bool right_justify(Individual& ind, const Problem& prob, EvalWorkspace& ws,
+                          int free_pool_balance = 0) {
+    const int stride = prob.max_slot + 1;
+    for (int idx : ws.dirty) ws.occ[idx] = 0;
+    ws.dirty.clear();
+
+    std::vector<int> order(prob.n_jobs);
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [&](int a, int b) {
+        const SlotInfo& sa = prob.job_slots[a][ind.genes[a]];
+        const SlotInfo& sb = prob.job_slots[b][ind.genes[b]];
+        const int ca = sa.start + sa.p_occ, cb = sb.start + sb.p_occ;
+        if (ca != cb) return ca > cb;
+        return sa.start > sb.start;
+    });
+
+    bool moved = false;
+    std::vector<std::array<int, 3>> dom_spans;
+    for (int j : order) {
+        const int cur_k = ind.genes[j];
+        const SlotInfo& cur = prob.job_slots[j][cur_k];
+
+        dom_spans.clear();
+        if (free_pool_balance) {
+            for (const auto& sp : prob.job_type_span[j]) {
+                const SlotInfo& first = prob.job_slots[j][sp[1]];
+                if (first.cost <= cur.cost + 1e-9 && first.p_occ <= cur.p_occ)
+                    dom_spans.push_back(sp);
+            }
+        } else {
+            for (const auto& sp : prob.job_type_span[j])
+                if (sp[0] == cur.type_id) { dom_spans.push_back(sp); break; }
+        }
+
+        int chosen = cur_k, chosen_start = -1;
+        for (const auto& sp : dom_spans) {
+            const int m = sp[0], b = sp[1], e = sp[2];
+            const int mcap = prob.type_cap[m];
+            const int mbase = m * stride;
+            for (int k = e - 1; k >= b; k--) {          // latest slot first
+                const SlotInfo& s = prob.job_slots[j][k];
+                if (s.start <= chosen_start) break;      // nothing later to gain
+                bool fits = true;
+                if (mcap >= 0) {
+                    for (int t = s.start; t < s.start + s.p_occ; t++)
+                        if (ws.occ[mbase + t] + prob.init_occ_flat[mbase + t] >= mcap) {
+                            fits = false; break;
+                        }
+                }
+                if (fits) { chosen = k; chosen_start = s.start; break; }
+            }
+        }
+        if (chosen != cur_k) { ind.genes[j] = chosen; moved = true; }
+
+        const SlotInfo& applied = prob.job_slots[j][ind.genes[j]];
+        if (prob.type_cap[applied.type_id] >= 0) {
+            const int abase = applied.type_id * stride;
+            for (int t = applied.start; t < applied.start + applied.p_occ; t++) {
+                const int idx = abase + t;
+                if (ws.occ[idx] == 0) ws.dirty.push_back(idx);
+                ws.occ[idx]++;
+            }
+        }
+    }
+    return moved;
+}
+
+// Full list-scheduling forward pass in an explicit job order — a serial
+// schedule generation scheme. Every job is (re)placed from scratch at the
+// earliest capacity-feasible slot of its type block (or a weakly-dominating
+// block, with free_pool_balance), given only the jobs earlier in `order`.
+// Unlike schedule_repair, which merely left-shifts a job from its current
+// slot, this ignores the incoming start entirely, so `order` alone determines
+// the schedule. Mutates ind.genes; does NOT refresh f1/f2/cv.
+inline void sgs_forward(Individual& ind, const Problem& prob, EvalWorkspace& ws,
+                        const std::vector<int>& order, int free_pool_balance) {
+    const int stride = prob.max_slot + 1;
+    for (int idx : ws.dirty) ws.occ[idx] = 0;
+    ws.dirty.clear();
+
+    std::vector<std::array<int, 3>> dom_spans;
+    for (int j : order) {
+        const SlotInfo& cur = prob.job_slots[j][ind.genes[j]];
+        dom_spans.clear();
+        if (free_pool_balance) {
+            for (const auto& sp : prob.job_type_span[j]) {
+                const SlotInfo& f0 = prob.job_slots[j][sp[1]];
+                if (f0.cost <= cur.cost + 1e-9 && f0.p_occ <= cur.p_occ)
+                    dom_spans.push_back(sp);
+            }
+        } else {
+            for (const auto& sp : prob.job_type_span[j])
+                if (sp[0] == cur.type_id) { dom_spans.push_back(sp); break; }
+        }
+
+        int chosen = ind.genes[j];
+        int chosen_start = std::numeric_limits<int>::max();
+        for (const auto& sp : dom_spans) {
+            const int m = sp[0], b = sp[1], e = sp[2];
+            const int mcap = prob.type_cap[m];
+            if (mcap < 0) {
+                const int st = prob.job_slots[j][b].start;
+                if (st < chosen_start) { chosen = b; chosen_start = st; }
+                continue;
+            }
+            const int mbase = m * stride;
+            for (int k = b; k < e; k++) {
+                const SlotInfo& s = prob.job_slots[j][k];
+                if (s.start >= chosen_start) break;
+                bool fits = true;
+                for (int t = s.start; t < s.start + s.p_occ; t++)
+                    if (ws.occ[mbase + t] + prob.init_occ_flat[mbase + t] >= mcap) {
+                        fits = false; break;
+                    }
+                if (fits) { chosen = k; chosen_start = s.start; break; }
+            }
+        }
+        ind.genes[j] = chosen;
+
+        const SlotInfo& ap = prob.job_slots[j][chosen];
+        if (prob.type_cap[ap.type_id] >= 0) {
+            const int abase = ap.type_id * stride;
+            for (int t = ap.start; t < ap.start + ap.p_occ; t++) {
+                const int idx = abase + t;
+                if (ws.occ[idx] == 0) ws.dirty.push_back(idx);
+                ws.occ[idx]++;
+            }
+        }
+    }
+}
+
+// Forward-backward improvement. `ind` must arrive forward-decoded and
+// evaluated. Each pass tries two moves from the best schedule so far and keeps
+// whichever lowers f1 without raising cv:
+//   (1) double justification (Valls, Ballestin & Quintanilla 2005): right-
+//       justify, then left-justify — the schedule is "shaken" and re-packed;
+//   (2) re-decode by realized completion order (an SGS fixpoint step): re-run
+//       the list scheduler with jobs ordered by the completion times they
+//       actually attained. SPT orders by p_occ, a proxy; completion order
+//       accounts for the contention and release delays each job really saw,
+//       and is the move that reduces sum-C_j which (1) alone does not deliver.
+// Stops when a pass improves nothing. Leaves `ind` evaluated.
+inline bool forward_backward_improve(Individual& ind, const Problem& prob,
+                                     EvalWorkspace& ws, int passes,
+                                     int free_pool_balance = 0) {
+    if (passes <= 0) return false;
+    Individual best = ind;
+    double best_f1 = ind.f1, best_cv = ind.cv;
+    std::vector<int> order(prob.n_jobs);
+    bool improved = false;
+
+    for (int p = 0; p < passes; p++) {
+        bool step = false;
+
+        {   // (1) right-justify + left-justify
+            Individual w = best;
+            right_justify(w, prob, ws, free_pool_balance);
+            schedule_repair(w, prob, ws, 2, free_pool_balance, /*order_mode=*/2);
+            evaluate(w, prob, ws);
+            if (w.cv <= best_cv + 1e-9 && w.f1 < best_f1 - 1e-9) {
+                best = std::move(w); best_f1 = best.f1; best_cv = best.cv; step = true;
+            }
+        }
+        {   // (2) re-decode in realized-completion order
+            Individual w = best;
+            std::iota(order.begin(), order.end(), 0);
+            std::sort(order.begin(), order.end(), [&](int a, int b) {
+                const SlotInfo& sa = prob.job_slots[a][w.genes[a]];
+                const SlotInfo& sb = prob.job_slots[b][w.genes[b]];
+                const int ca = sa.start + sa.p_occ, cb = sb.start + sb.p_occ;
+                if (ca != cb) return ca < cb;
+                if (sa.p_occ != sb.p_occ) return sa.p_occ < sb.p_occ;
+                return a < b;
+            });
+            sgs_forward(w, prob, ws, order, free_pool_balance);
+            evaluate(w, prob, ws);
+            if (w.cv <= best_cv + 1e-9 && w.f1 < best_f1 - 1e-9) {
+                best = std::move(w); best_f1 = best.f1; best_cv = best.cv; step = true;
+            }
+        }
+
+        if (step) improved = true; else break;
+    }
+    ind = std::move(best);
+    return improved;
+}
+
+// ── Per-individual finishing decode ──────────────────────────────────────────
+//
+// `ind` arrives forward-decoded (SPT) and evaluated. Tries, and keeps whichever
+// gives the lowest f1 without raising cv:
+//   (A) decode_order == 1: an Extract-from-Preempt re-decode — reset to latest,
+//       then list-schedule in preemptive-SRPT completion order.
+//   (D) fbi_passes  >  0 : forward-backward improvement.
+// f2 is invariant (type vector never changes) so the weighted-sum g is monotone
+// non-increasing. Deterministic; uses only the passed workspace.
+inline void finish_decode(Individual& ind, const Problem& prob, EvalWorkspace& ws,
+                          int decode_order, int fbi_passes, int free_pool_balance) {
+    if (decode_order <= 0 && fbi_passes <= 0) return;
+    Individual best = ind;
+    double best_f1 = ind.f1, best_cv = ind.cv;
+
+    if (decode_order == 1) {
+        Individual w = ind;
+        reset_genes_to_latest(w, prob);
+        schedule_repair(w, prob, ws, 2, free_pool_balance, /*order_mode=*/1);
+        evaluate(w, prob, ws);
+        if (w.cv <= best_cv + 1e-9 && w.f1 < best_f1 - 1e-9) {
+            best = std::move(w); best_f1 = best.f1; best_cv = best.cv;
+        }
+    }
+    if (fbi_passes > 0) {
+        Individual w = best;
+        forward_backward_improve(w, prob, ws, fbi_passes, free_pool_balance);
+        if (w.cv <= best_cv + 1e-9 && w.f1 < best_f1 - 1e-9) {
+            best = std::move(w); best_f1 = best.f1; best_cv = best.cv;
+        }
+    }
+    ind = std::move(best);
 }
 
 // ── Mutation-rate annealing ───────────────────────────────────────────────────

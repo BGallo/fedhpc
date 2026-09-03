@@ -1091,6 +1091,7 @@ from fedhpc.model import solve_weighted_sum
 from fedhpc.moea import (
     heuristic_weighted_reference_points,
     weighted_solve,
+    weighted_solve_brkga,
 )
 from fedhpc.pareto import _reference_points
 
@@ -1318,3 +1319,87 @@ class TestWeightedMutMode:
         d = weighted_solve(known_pareto_inst, 0.5, pop_size=12, n_gen=15)
         u = weighted_solve(known_pareto_inst, 0.5, pop_size=12, n_gen=15, mut_mode=0)
         assert (d.f1, d.f2) == (u.f1, u.f2)
+
+
+class TestWeightedDecodeOptions:
+    """decode_order (A: Extract-from-Preempt re-decode) and fbi_passes
+    (D: forward-backward improvement). Both keep f2 fixed and g monotone;
+    both must stay valid + deterministic. decode_order defaults to 1."""
+
+    @pytest.mark.parametrize("kw", [
+        dict(decode_order=0),
+        dict(decode_order=1),
+        dict(fbi_passes=3),
+        dict(decode_order=1, fbi_passes=3),
+        dict(decode_order=0, fbi_passes=1),
+    ])
+    @pytest.mark.parametrize("lam", [0.0, 0.5, 1.0])
+    def test_valid_deterministic(self, kw, lam, known_pareto_inst):
+        inst = known_pareto_inst
+        a = weighted_solve(inst, lam, pop_size=12, n_gen=15, **kw)
+        b = weighted_solve(inst, lam, pop_size=12, n_gen=15, **kw)
+        assert (a.f1, a.f2) == (b.f1, b.f2)
+        assert capacity_violations(inst, a) == []
+        assert a.f2 <= inst.budget + 1e-6
+        assert recompute_f1(inst, a) == pytest.approx(a.f1, abs=1e-6)
+
+    def test_default_is_decode_order_1(self, known_pareto_inst):
+        default = weighted_solve(known_pareto_inst, 0.5, pop_size=12, n_gen=15)
+        explicit = weighted_solve(known_pareto_inst, 0.5, pop_size=12, n_gen=15,
+                                  decode_order=1, fbi_passes=0)
+        assert (default.f1, default.f2) == (explicit.f1, explicit.f2)
+
+    @pytest.mark.parametrize("lam", [0.25, 0.5, 0.75])
+    def test_g_no_worse_than_spt_only_on_known_inst(self, lam, known_pareto_inst):
+        """A and D keep f2 fixed and only lower f1, so g must not regress vs the
+        SPT-only decoder (decode_order=0) on the known-answer instance."""
+        inst = known_pareto_inst
+        f1_T, f2_T, f1_0 = 10.0, 50.0, 30.0  # from the fixture's exact front
+
+        def g(s):
+            return lam / (f1_0 - f1_T) * s.f1 + (1 - lam) / f2_T * s.f2
+
+        base = weighted_solve(inst, lam, f1_T=f1_T, f2_T=f2_T, f1_0=f1_0,
+                              pop_size=16, n_gen=20, decode_order=0)
+        both = weighted_solve(inst, lam, f1_T=f1_T, f2_T=f2_T, f1_0=f1_0,
+                              pop_size=16, n_gen=20, decode_order=1, fbi_passes=3)
+        assert g(both) <= g(base) + 1e-6
+
+
+class TestWeightedBrkga:
+    """weighted_solve_brkga — random-key + serial-SGS encoding (options B + C).
+    Must return one feasible Solution, be deterministic, recover the single-
+    objective optima at the lam extremes, and land on the exact front on the
+    known-answer instance."""
+
+    _brkga = staticmethod(weighted_solve_brkga)
+
+    @pytest.mark.parametrize("use_delay", [False, True])
+    @pytest.mark.parametrize("lam", [0.0, 0.25, 0.5, 0.75, 1.0])
+    def test_valid_feasible_deterministic(self, use_delay, lam, known_pareto_inst):
+        inst = known_pareto_inst
+        a = self._brkga(inst, lam, pop_size=20, n_gen=25, use_delay=use_delay)
+        b = self._brkga(inst, lam, pop_size=20, n_gen=25, use_delay=use_delay)
+        assert (a.f1, a.f2) == (b.f1, b.f2)
+        assert capacity_violations(inst, a) == []
+        assert a.f2 <= inst.budget + 1e-6
+        assert recompute_f1(inst, a) == pytest.approx(a.f1, abs=1e-6)
+        assert recompute_f2(inst, a) == pytest.approx(a.f2, abs=1e-6)
+
+    def test_lam_extremes_recover_single_objective_optima(self, known_pareto_inst):
+        inst = known_pareto_inst
+        turn = self._brkga(inst, 1.0, pop_size=24, n_gen=40)
+        cost = self._brkga(inst, 0.0, pop_size=24, n_gen=40)
+        assert (turn.f1, turn.f2) == (10.0, 100.0)
+        assert (cost.f1, cost.f2) == (30.0, 0.0)
+
+    @pytest.mark.parametrize("lam", [0.0, 0.5, 1.0])
+    def test_lands_on_exact_front(self, lam, known_pareto_inst, known_pareto_front):
+        s = self._brkga(known_pareto_inst, lam, pop_size=24, n_gen=40,
+                        f1_T=10.0, f2_T=50.0, f1_0=30.0)
+        assert (s.f1, s.f2) in known_pareto_front
+
+    def test_use_delay_default_true(self, known_pareto_inst):
+        d = self._brkga(known_pareto_inst, 0.5, pop_size=20, n_gen=25)
+        on = self._brkga(known_pareto_inst, 0.5, pop_size=20, n_gen=25, use_delay=True)
+        assert (d.f1, d.f2) == (on.f1, on.f2)

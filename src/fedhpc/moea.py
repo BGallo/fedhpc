@@ -661,6 +661,8 @@ def _weighted_raw(
     extra_seeds: list[list[int]] | None = None,
     xover_mode: int = 0,
     mut_mode: int = 0,
+    decode_order: int = 0,
+    fbi_passes: int = 0,
 ) -> tuple[list[tuple[int, int]], float, float, float, int]:
     _require_ext()
     return _ext.weighted(
@@ -684,6 +686,8 @@ def _weighted_raw(
         extra_seeds     = extra_seeds or [],
         xover_mode      = xover_mode,
         mut_mode        = mut_mode,
+        decode_order    = decode_order,
+        fbi_passes      = fbi_passes,
     )
 
 
@@ -732,6 +736,8 @@ def weighted_solve(
     lp_seed: bool = False,
     xover_mode: int = 2,
     mut_mode: int = 0,
+    decode_order: int = 1,
+    fbi_passes: int = 0,
 ) -> Solution:
     """Heuristically minimise ``lam·f̂1 + (1−lam)·f̂2`` (the single-objective
     weighted-sum scalarisation), returning one feasible ``Solution``.
@@ -746,8 +752,10 @@ def weighted_solve(
     — ``(lam/(f1_0−f1_T))·f1 + ((1−lam)/f2_T)·f2`` subject to ``f1 ≤ f1_0`` —
     but with a memetic metaheuristic (see ``_ext/weighted.hpp``): a small
     population of per-job type-assignment vectors, each decoded to a schedule
-    by the SPT list-scheduling repair, refined by a greedy scalar type-flip
-    local search, recombined by **Multi-Step Crossover Fusion** (``xover_mode``
+    by the SPT list-scheduling repair plus (``decode_order=1``, the default) an
+    Extract-from-Preempt re-decode in preemptive-SRPT completion order, refined
+    by a greedy scalar type-flip local search, recombined by
+    **Multi-Step Crossover Fusion** (``xover_mode``
     2, the default — a short scalar-guided walk from one parent toward the
     other; A/B on the two 10-min instances: gap to the Gurobi optimum
     +2.0 %%→+0.3 %% / +3.9 %%→+3.5 %% vs plain two-point), with ILS
@@ -772,6 +780,18 @@ def weighted_solve(
                        (``0`` disables kicks).
     shortlist        : type-flip candidates decoded exactly per local-search
                        step (ranked first by an O(1) Δobjective estimate).
+    decode_order     : 1 (default) additionally tries an Extract-from-Preempt
+                       re-decode (preemptive-SRPT completion order — release-date
+                       aware, the 2-approx order of Phillips-Stein-Wein) per
+                       individual, keeping the lower f1; f2 is unchanged so g is
+                       monotone. 0 = SPT list-scheduling decoder only (the raw
+                       ``_ext.weighted`` binding still defaults to 0). Promoted
+                       to 1 by an A/B: neutral on the 964-job instance, ~1–5 pp
+                       gap reduction at the turnaround corner on the congested
+                       3340-job instance, seed-stable, ~1.5× wall time.
+    fbi_passes       : >0 applies that many forward-backward improvement (double
+                       justification, Valls-Ballestin-Quintanilla 2005) passes
+                       per individual, keeping the lower f1. 0 (default) off.
     seed, n_threads  : determinism / OpenMP controls (bit-for-bit stable for a
                        fixed ``(seed, n_threads)``).
 
@@ -804,7 +824,83 @@ def weighted_solve(
         inst, w1, w2, f1_cap, pop_size=pop_size, n_gen=n_gen, seed=seed,
         n_threads=n_threads, ls_moves=ls_moves, restart_patience=restart_patience,
         shortlist=shortlist, ablate=ablate, extra_seeds=extra, xover_mode=xover_mode,
-        mut_mode=mut_mode,
+        mut_mode=mut_mode, decode_order=decode_order, fbi_passes=fbi_passes,
+    )
+    return _to_solutions(inst, [(asgn, f1, f2)])[0]
+
+
+def weighted_solve_brkga(
+    inst: Instance,
+    lam: float,
+    *,
+    f1_T: float | None = None,
+    f2_T: float | None = None,
+    f1_0: float | None = None,
+    pop_size: int = 48,
+    n_gen: int = 100,
+    seed: int = 42,
+    n_threads: int = 0,
+    ablate: int = 0,
+    lp_seed: bool = False,
+    use_delay: bool = True,
+    local_polish: int = 2,
+) -> Solution:
+    """Weighted-sum solve with the random-key / serial-SGS encoding (options
+    B + C; see ``_ext/weighted_brkga.hpp``).
+
+    The genotype is ``3*n_jobs`` random keys — priority, delay, type — and the
+    decoder is a serial schedule generation scheme run in the evolved priority
+    order, with a per-job delay floor (``use_delay``; parameterized-active
+    schedules, Mendes-Gonçalves-Resende 2005). Serial SGS generates the active
+    schedules, so an optimal schedule is reachable — unlike the fixed SPT order
+    of :func:`weighted_solve`. BRKGA population management (elite / mutant /
+    biased-uniform crossover). ``local_polish``: 0 = none, 1 = start-time
+    re-optimisation on the key-chosen types only, 2 (default) = also the scalar
+    type-flip local search with the improved types written back into the keys
+    (memetic BRKGA).
+
+    Same normalised objective and reference-point handling as
+    :func:`weighted_solve`; returns one feasible ``Solution``.
+    """
+    if not 0.0 <= lam <= 1.0:
+        raise ValueError("lam must be in [0, 1]")
+    _require_ext()
+
+    if f1_T is None or f2_T is None or f1_0 is None:
+        f1_T, f2_T, f1_0 = heuristic_weighted_reference_points(
+            inst, seed=seed, n_threads=n_threads,
+        )
+
+    degenerate = f1_0 <= f1_T + 1e-8 or f2_T <= 1e-8
+    if degenerate:
+        w1, w2, f1_cap = 1e-6, 1.0, f1_0
+    else:
+        w1 = lam / (f1_0 - f1_T)
+        w2 = (1.0 - lam) / f2_T
+        f1_cap = f1_0
+
+    extra = None
+    if lp_seed:
+        extra = _lp_relaxation_seeds(inst, [lam], f1_T=f1_T, f2_T=f2_T, f1_0=f1_0)
+
+    asgn, f1, f2, _g, _dec = _ext.weighted_brkga(
+        n_jobs       = len(inst.jobs),
+        budget       = inst.budget,
+        job_slots    = _job_slots(inst),
+        type_cap     = _type_cap(inst),
+        type_risk    = _type_risk(inst),
+        init_occ     = _init_occ(inst),
+        w1           = w1,
+        w2           = w2,
+        f1_cap       = f1_cap,
+        pop_size     = pop_size,
+        n_gen        = n_gen,
+        seed         = seed,
+        n_threads    = n_threads,
+        ablate       = ablate,
+        extra_seeds  = extra or [],
+        use_delay    = int(bool(use_delay)),
+        local_polish = int(local_polish),
     )
     return _to_solutions(inst, [(asgn, f1, f2)])[0]
 

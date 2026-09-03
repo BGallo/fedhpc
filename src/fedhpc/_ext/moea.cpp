@@ -16,6 +16,7 @@
 #include "nsga3.hpp"
 #include "moead.hpp"
 #include "weighted.hpp"
+#include "weighted_brkga.hpp"
 
 // Convert a Profile (vector<pair<string,double>>) to a Python dict.
 static py::dict profile_to_dict(const Profile& prof) {
@@ -201,11 +202,13 @@ PYBIND11_MODULE(_moea, m) {
            double w1, double w2, double f1_cap,
            int pop_size, int n_gen, int seed, int n_threads,
            int ls_moves, int restart_patience, int shortlist, int ablate,
-           const std::vector<std::vector<int>>& extra_seeds, int xover_mode, int mut_mode) {
+           const std::vector<std::vector<int>>& extra_seeds, int xover_mode, int mut_mode,
+           int decode_order, int fbi_passes) {
             auto [asgn, f1, f2, g, ls_calls] = run_weighted(
                 build_problem(n_jobs, budget, job_slots, type_cap, type_risk, init_occ, ablate),
                 w1, w2, f1_cap, pop_size, n_gen, seed, n_threads,
-                ls_moves, restart_patience, shortlist, ablate, extra_seeds, xover_mode, mut_mode);
+                ls_moves, restart_patience, shortlist, ablate, extra_seeds, xover_mode, mut_mode,
+                decode_order, fbi_passes);
             return py::make_tuple(asgn, f1, f2, g, ls_calls);
         },
         py::arg("n_jobs"),
@@ -228,14 +231,68 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("extra_seeds")      = std::vector<std::vector<int>>{},
         py::arg("xover_mode")       = 0,
         py::arg("mut_mode")        = 0,
+        py::arg("decode_order")    = 0,
+        py::arg("fbi_passes")      = 0,
         "Single-objective memetic metaheuristic: minimise w1*f1 + w2*f2 with a\n"
         "soft cap f1 <= f1_cap. Memetic GA over per-job type assignments with an\n"
         "SPT list-scheduling decoder + greedy scalar type-flip local search and\n"
         "ILS perturbation kicks on stagnation. xover_mode: 0 = two-point,\n"
         "1 = none (pure ILS), 2 = Multi-Step Crossover Fusion (scalar-guided walk\n"
         "from one parent toward the other; best on both 10-min instances). Raw\n"
-        "binding default 0; moea.weighted_solve defaults to 2. Deterministic for\n"
-        "fixed (seed, n_threads). Returns (assignment, f1, f2, g, n_ls_calls)."
+        "binding default 0; moea.weighted_solve defaults to 2.\n"
+        "decode_order: 0 (this raw binding's default) = SPT list-scheduling\n"
+        "decoder only; 1 = also try an Extract-from-Preempt re-decode\n"
+        "(preemptive-SRPT completion order, the release-date-aware 2-approx order)\n"
+        "per individual, keeping the better f1. moea.weighted_solve defaults to 1.\n"
+        "fbi_passes: >0 applies that many forward-backward improvement (double\n"
+        "justification) passes per individual, keeping the better f1. Both keep\n"
+        "f2 fixed, so g is monotone; both are off by default (byte-for-byte\n"
+        "unchanged). Deterministic for fixed (seed, n_threads).\n"
+        "Returns (assignment, f1, f2, g, n_ls_calls)."
+    );
+
+    m.def("weighted_brkga",
+        [](int n_jobs, double budget,
+           const std::vector<std::vector<std::tuple<int,int,int,double,double>>>& job_slots,
+           const std::vector<int>& type_cap,
+           const std::vector<double>& type_risk,
+           const std::vector<std::tuple<int,int,int>>& init_occ,
+           double w1, double w2, double f1_cap,
+           int pop_size, int n_gen, int seed, int n_threads, int ablate,
+           const std::vector<std::vector<int>>& extra_seeds,
+           int use_delay, int local_polish) {
+            auto [asgn, f1, f2, g, decodes] = run_weighted_brkga(
+                build_problem(n_jobs, budget, job_slots, type_cap, type_risk, init_occ, ablate),
+                w1, w2, f1_cap, pop_size, n_gen, seed, n_threads,
+                ablate, extra_seeds, use_delay, local_polish);
+            return py::make_tuple(asgn, f1, f2, g, decodes);
+        },
+        py::arg("n_jobs"),
+        py::arg("budget"),
+        py::arg("job_slots"),
+        py::arg("type_cap"),
+        py::arg("type_risk"),
+        py::arg("init_occ"),
+        py::arg("w1"),
+        py::arg("w2"),
+        py::arg("f1_cap")        = 1e18,
+        py::arg("pop_size")      = 48,
+        py::arg("n_gen")         = 100,
+        py::arg("seed")          = 42,
+        py::arg("n_threads")     = 0,
+        py::arg("ablate")        = 0,
+        py::arg("extra_seeds")   = std::vector<std::vector<int>>{},
+        py::arg("use_delay")     = 1,
+        py::arg("local_polish")  = 2,
+        "Weighted-sum solver, random-key / serial-SGS encoding (options B+C).\n"
+        "Chromosome = 3*n_jobs random keys (priority | delay | type); decoder is\n"
+        "a serial schedule generation scheme driven by the evolved priority\n"
+        "order, with a per-job delay floor (parameterized-active schedules,\n"
+        "Mendes-Goncalves-Resende 2005). BRKGA population management (elite /\n"
+        "mutant / biased-uniform crossover). use_delay=0 disables the delay\n"
+        "block (pure serial SGS = option B only). local_polish=1 runs the\n"
+        "type-flip local search on each decoded schedule. Deterministic for\n"
+        "fixed (seed, n_threads). Returns (assignment, f1, f2, g, n_decodes)."
     );
 
     m.def("time_seeds",

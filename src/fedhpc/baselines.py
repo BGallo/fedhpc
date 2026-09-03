@@ -14,12 +14,16 @@ that lets jobs start sooner" — exactly what the baselines below sweep.
 
 Baselines
 ---------
-``onprem_only_spt``           — never burst: SPT list-schedule on the on-prem
-                                pools only.  Zero cost, maximal turnaround;
-                                jobs that do not fit the horizon are left
-                                unscheduled (reported).  The "do nothing" /
+``onprem_only_spt``           — never burst: least-slack-first list-schedule
+                                (SPT as tiebreak — see ``_least_slack_order``)
+                                on the on-prem pools only.  Zero cost, maximal
+                                turnaround; jobs with no feasible slot at all
+                                are left unscheduled (reported), but a job the
+                                exact MIP can place is no longer starved by
+                                processing order.  The "do nothing" /
                                 status-quo anchor.
-``greedy_earliest_completion`` — per job (SPT order) pick the feasible type that
+``greedy_earliest_completion`` — per job (least-slack order by default; SPT
+                                as tiebreak) pick the feasible type that
                                 finishes it earliest, breaking ties toward the
                                 cheaper type.  Near-minimal turnaround, high
                                 cost — an eager-bursting anchor.
@@ -154,6 +158,43 @@ def _spt_order(inst: Instance) -> list[int]:
     ]
 
 
+def _least_slack_order(inst: Instance) -> list[int]:
+    """Job ids by ascending scheduling slack — tightest deadline first, SPT as
+    tiebreak among equally-urgent jobs.
+
+    slack_j = horizon - ceil(arrival_j) - min_{m in F_j} p_occ[j, m]
+
+    i.e. how many slots of flexibility job j has left before it becomes
+    infeasible to finish within the horizon at all.
+
+    Pure SPT (shortest job first) starves long jobs with a narrow feasible
+    window: on every mit_supercloud_* instance whose horizon was sized
+    exactly to its own tail (see build_mit_supercloud_instance.py), the
+    single job that determines the horizon has slack close to zero by
+    construction — SPT processes it dead last (it's the longest job in the
+    instance), and by then every other list-scheduling baseline had already
+    filled its narrow window with shorter jobs, leaving it permanently
+    unscheduled even though the exact MIP always finds it a feasible slot.
+    Verified: onprem_only_spt/greedy_earliest_completion left exactly that
+    job unscheduled on mit_supercloud_20210317 (job 646), 20210604 (job
+    644), and 20210812 (job 169) — three different instances, same
+    mechanism. Ordering by slack first (a form of Least-Slack-Time /
+    Earliest-Deadline-First scheduling) fixes all three: the tightest jobs
+    claim their narrow windows before anything else can crowd them out.
+    """
+    def slack(j) -> float:
+        feas = inst.F.get(j.id, ())
+        if not feas:
+            return math.inf  # unschedulable regardless of order; sort last
+        min_p_occ = min(inst.p_occ[j.id, m] for m in feas)
+        return inst.horizon - math.ceil(j.arrival) - min_p_occ
+
+    return [
+        j.id
+        for j in sorted(inst.jobs, key=lambda j: (slack(j), j.exec_time, j.arrival, j.id))
+    ]
+
+
 def _arrival_order(inst: Instance) -> list[int]:
     return [j.id for j in sorted(inst.jobs, key=lambda j: (j.arrival, j.exec_time, j.id))]
 
@@ -170,17 +211,24 @@ def _cheapest_cloud_type(inst: Instance, jid: int, onprem: set[int]) -> int | No
 # ─────────────────────────────────────────────────────────────────────────────
 
 def onprem_only_spt(inst: Instance) -> Solution:
-    """SPT list-schedule on the on-prem pools only — never burst to cloud.
+    """List-schedule on the on-prem pools only — never burst to cloud.
 
     Each job is placed at the globally earliest feasible slot across *all*
     on-prem types it fits on (equal price, so this is a weakly-dominating
-    choice).  Jobs that cannot fit before the horizon are left unscheduled.
+    choice). Processing order is least-slack-first (see _least_slack_order),
+    not pure SPT: pure SPT reliably strands the single job with the
+    tightest feasible window (typically the longest job, processed dead
+    last) even when a feasible schedule exists — verified across three
+    mit_supercloud_* instances. Least-slack-first schedules every job the
+    exact MIP can, matching it on feasibility; SPT is still the tiebreak
+    among equally-urgent jobs, preserving SPT's flow-time-minimizing intent
+    everywhere slack isn't the binding constraint.
     """
     onprem = _onprem_ids(inst)
     state = _Capacity.fresh(inst)
     assignment: dict[int, tuple[int, int]] = {}
 
-    for jid in _spt_order(inst):
+    for jid in _least_slack_order(inst):
         feas = [m for m in inst.F[jid] if m in onprem]
         best: tuple[int, int, int] | None = None            # (completion, start, type)
         for mid in feas:
@@ -206,10 +254,17 @@ def greedy_earliest_completion(inst: Instance, *, order: str = "spt") -> Solutio
     whenever it is immediately available).  Cloud is unlimited, so a job that
     cannot start now on-prem bursts immediately — an eager-bursting policy that
     approaches the minimum-turnaround anchor at maximal cost.
+
+    order="spt" now means least-slack-first with SPT as tiebreak, not pure
+    SPT — see _least_slack_order's docstring: pure SPT strands the
+    tightest-deadline job (usually the longest one) behind every shorter
+    job, leaving it permanently unscheduled even when feasible. This is the
+    same fix as onprem_only_spt's, needed here for the same reason (both
+    functions defaulted to _spt_order and hit the identical failure mode).
     """
     onprem = _onprem_ids(inst)
     state = _Capacity.fresh(inst)
-    job_ids = _spt_order(inst) if order == "spt" else _arrival_order(inst)
+    job_ids = _least_slack_order(inst) if order == "spt" else _arrival_order(inst)
     assignment: dict[int, tuple[int, int]] = {}
 
     for jid in job_ids:

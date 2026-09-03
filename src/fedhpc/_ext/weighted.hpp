@@ -192,7 +192,7 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
              int pop_size, int n_gen, int seed, int n_threads,
              int ls_moves, int restart_patience, int shortlist, int ablate = 0,
              const std::vector<std::vector<int>>& extra_seeds = {}, int xover_mode = 0,
-             int mut_mode = 0) {
+             int mut_mode = 0, int decode_order = 0, int fbi_passes = 0) {
     py::gil_scoped_release release;
     set_num_threads(n_threads);
 
@@ -202,6 +202,12 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
     const bool abl_kick  = ablate & ABL_NO_ILS_KICK;
     const bool abl_elit  = ablate & ABL_NO_ELITISM;
     const bool abl_mut   = ablate & ABL_NO_MUTATION;
+    // Finishing-decode config (D = forward-backward improvement, A = SRPT
+    // completion order). fpb mirrors weighted_local_search's free-pool switch.
+    const int fpb = (ablate & ABL_NO_FREE_POOL) ? 0 : 1;
+    auto finish = [&](Individual& ind, EvalWorkspace& ws, int passes) {
+        finish_decode(ind, prob, ws, decode_order, passes, fpb);
+    };
 
     std::mt19937 rng(seed);
     WeightedScalar G{w1, w2, f1_cap,
@@ -232,6 +238,7 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
                 pop[k] = make_random(prob, lrng, abl_unif);
             }
             weighted_local_search(pop[k], prob, ws, G, ls_moves, shortlist, ablate);
+            finish(pop[k], ws, fbi_passes);
             local_calls++;
         }
         #pragma omp atomic
@@ -246,6 +253,7 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
                 pop[k] = make_random(prob, lrng, abl_unif);
             }
             weighted_local_search(pop[k], prob, ws, G, ls_moves, shortlist, ablate);
+            finish(pop[k], ws, fbi_passes);
             ls_calls++;
         }
     }
@@ -295,6 +303,7 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
                     else mutate(c, prob, p_mut, lrng);
                 }
                 weighted_local_search(c, prob, ws, G, gen_moves, shortlist, ablate);
+                finish(c, ws, fbi_passes);
                 local_calls++;
                 offspring[k] = std::move(c);
             }
@@ -324,6 +333,7 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
                     else mutate(c, prob, p_mut, lrng);
                 }
                 weighted_local_search(c, prob, ws, G, gen_moves, shortlist, ablate);
+                finish(c, ws, fbi_passes);
                 ls_calls++;
                 offspring[k] = std::move(c);
             }
@@ -350,6 +360,7 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
                 kick.genes[j] = span[rng() % span.size()][1];
             }
             weighted_local_search(kick, prob, ws, G, ls_moves, shortlist, ablate);
+            finish(kick, ws, fbi_passes);
             ls_calls++;
             pop[pop_size - 1] = kick;
             const double g = G(kick);
@@ -362,6 +373,7 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
     {
         EvalWorkspace ws; ws.reset(prob.n_types, prob.max_slot);
         weighted_local_search(incumbent, prob, ws, G, ls_moves * 3, shortlist, ablate);
+        finish(incumbent, ws, fbi_passes > 0 ? fbi_passes * 2 + 2 : 0);
         ls_calls++;
         evaluate(incumbent, prob, ws);
     }
