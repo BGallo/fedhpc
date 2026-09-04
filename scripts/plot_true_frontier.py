@@ -3,7 +3,7 @@ data/fedhpc_known_runtime_offline_10min.json from the pareto_runs checkpoints.
 
   uv run python scripts/plot_true_frontier.py [--ea] [-o OUT.png]
 
---ea   overlay the NSGA-II / MOEA-D heuristic fronts (pop 400 x 2000 gen)
+--ea   overlay the NSGA-II / NSGA-III / MOEA-D heuristic fronts (pop 400 x 2000 gen)
 -o     output path (default: pareto_runs/true_frontier.png)
 """
 from __future__ import annotations
@@ -31,6 +31,7 @@ INSTANCE = "data/fedhpc_known_runtime_offline_10min.json"
 EXACT = "#0f766e"
 HEUR = "#b4530a"
 MUTED = "#8a9a97"
+NSGA3 = "#6b4fa0"
 INK = "#16201f"
 
 
@@ -99,22 +100,17 @@ def main():
             shaded_label = True
 
     if args.ea:
-        try:
-            with open(
-                "/tmp/claude-1000/-home-bernardo-Documentos-programas-fedhpc/"
-                "68e50666-adb2-411a-b4da-7d7b152ccc62/scratchpad/frontier_data.json"
-            ) as f:
-                ea = json.load(f)
-        except FileNotFoundError:
-            from fedhpc.formulations import configure_env
-            from fedhpc.moea import moead_frontier, nsga2_frontier
-            configure_env(verbose=False)
-            ea = {
-                "nsga2": [(s.f1, s.f2) for s in nsga2_frontier(inst, pop_size=400, n_gen=2000, seed=42)],
-                "moead": [(s.f1, s.f2) for s in moead_frontier(inst, n_weights=400, n_gen=2000, seed=42)],
-            }
-        for key, col, lab in [("nsga2", HEUR, "NSGA-II  (pop 400 x 2000)"),
-                              ("moead", MUTED, "MOEA/D   (pop 400 x 2000)")]:
+        from fedhpc.formulations import configure_env
+        from fedhpc.moea import moead_frontier, nsga2_frontier, nsga3_frontier
+        configure_env(verbose=False)
+        ea = {
+            "nsga2": [(s.f1, s.f2) for s in nsga2_frontier(inst, pop_size=400, n_gen=2000, seed=42)],
+            "nsga3": [(s.f1, s.f2) for s in nsga3_frontier(inst, pop_size=400, n_divisions=399, n_gen=2000, seed=42)],
+            "moead": [(s.f1, s.f2) for s in moead_frontier(inst, n_weights=400, n_gen=2000, seed=42)],
+        }
+        for key, col, lab in [("nsga2", HEUR, "NSGA-II   (pop 400 x 2000)"),
+                              ("nsga3", NSGA3, "NSGA-III  (pop 400 x 2000)"),
+                              ("moead", MUTED, "MOEA/D    (pop 400 x 2000)")]:
             p = np.array(sorted(ea[key]))
             ax.plot(p[:, 0], p[:, 1], "-", color=col, lw=1.0, alpha=0.55, zorder=2)
             ax.scatter(p[:, 0], p[:, 1], s=6, color=col, alpha=0.55, zorder=2, label=lab)

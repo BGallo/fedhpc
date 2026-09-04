@@ -17,6 +17,7 @@
 #include "moead.hpp"
 #include "weighted.hpp"
 #include "weighted_brkga.hpp"
+#include "sgs_algos.hpp"
 
 // Convert a Profile (vector<pair<string,double>>) to a Python dict.
 static py::dict profile_to_dict(const Profile& prof) {
@@ -293,6 +294,85 @@ PYBIND11_MODULE(_moea, m) {
         "block (pure serial SGS = option B only). local_polish=1 runs the\n"
         "type-flip local search on each decoded schedule. Deterministic for\n"
         "fixed (seed, n_threads). Returns (assignment, f1, f2, g, n_decodes)."
+    );
+
+    // ── Priority-key + non-delay-SGS representation (sgs_algos.hpp) ───────────
+    // Standard-literature chromosome alternative: a job-processing permutation
+    // + per-job type-choice index, decoded via a non-delay Schedule Generation
+    // Scheme, instead of ga_common.hpp's job_slots-index encoding. See
+    // sgs_common.hpp's file comment for the full rationale.
+
+    m.def("nsga2_sgs",
+        [](int n_jobs, double budget, int horizon,
+           const std::vector<double>& arrival,
+           const std::vector<std::vector<std::tuple<int,int,int,int,int,double>>>& cand,
+           const std::vector<std::tuple<int,int,int>>& init_occ,
+           int pop_size, int n_gen, int seed, int n_threads,
+           double p_mut_start, double p_mut_end, int crossover_kind, int tourn_k) {
+            auto [results, prof] = run_nsga2_sgs(
+                build_sgs_problem(n_jobs, budget, horizon, arrival, cand, init_occ),
+                pop_size, n_gen, seed, n_threads, p_mut_start, p_mut_end,
+                crossover_kind, tourn_k);
+            return py::make_tuple(results, profile_to_dict(prof));
+        },
+        py::arg("n_jobs"), py::arg("budget"), py::arg("horizon"),
+        py::arg("arrival"), py::arg("cand"), py::arg("init_occ"),
+        py::arg("pop_size") = 100, py::arg("n_gen") = 200, py::arg("seed") = 42,
+        py::arg("n_threads") = 0, py::arg("p_mut_start") = -1.0, py::arg("p_mut_end") = -1.0,
+        py::arg("crossover_kind") = 0, py::arg("tourn_k") = 2,
+        "NSGA-II on the priority-key + non-delay-SGS representation "
+        "(see sgs_common.hpp). Same dominance/crowding selection as nsga2(), "
+        "different chromosome and decoder."
+    );
+
+    m.def("nsga3_sgs",
+        [](int n_jobs, double budget, int horizon,
+           const std::vector<double>& arrival,
+           const std::vector<std::vector<std::tuple<int,int,int,int,int,double>>>& cand,
+           const std::vector<std::tuple<int,int,int>>& init_occ,
+           int pop_size, int n_divisions, int n_gen, int seed, int n_threads,
+           double p_mut_start, double p_mut_end, int crossover_kind, int tourn_k) {
+            auto [results, prof] = run_nsga3_sgs(
+                build_sgs_problem(n_jobs, budget, horizon, arrival, cand, init_occ),
+                pop_size, n_divisions, n_gen, seed, n_threads, p_mut_start, p_mut_end,
+                crossover_kind, tourn_k);
+            return py::make_tuple(results, profile_to_dict(prof));
+        },
+        py::arg("n_jobs"), py::arg("budget"), py::arg("horizon"),
+        py::arg("arrival"), py::arg("cand"), py::arg("init_occ"),
+        py::arg("pop_size") = 100, py::arg("n_divisions") = 99, py::arg("n_gen") = 200,
+        py::arg("seed") = 42, py::arg("n_threads") = 0,
+        py::arg("p_mut_start") = -1.0, py::arg("p_mut_end") = -1.0,
+        py::arg("crossover_kind") = 0, py::arg("tourn_k") = 2,
+        "NSGA-III on the priority-key + non-delay-SGS representation "
+        "(see sgs_common.hpp). Same reference-point niching as nsga3(), "
+        "different chromosome and decoder."
+    );
+
+    m.def("moead_sgs",
+        [](int n_jobs, double budget, int horizon,
+           const std::vector<double>& arrival,
+           const std::vector<std::vector<std::tuple<int,int,int,int,int,double>>>& cand,
+           const std::vector<std::tuple<int,int,int>>& init_occ,
+           int n_weights, int n_gen, int neighborhood_size,
+           int seed, int n_threads, int max_replace,
+           double p_mut_start, double p_mut_end, int crossover_kind, int archive_size) {
+            auto [results, prof] = run_moead_sgs(
+                build_sgs_problem(n_jobs, budget, horizon, arrival, cand, init_occ),
+                n_weights, n_gen, neighborhood_size, seed, n_threads, max_replace,
+                p_mut_start, p_mut_end, crossover_kind, archive_size);
+            return py::make_tuple(results, profile_to_dict(prof));
+        },
+        py::arg("n_jobs"), py::arg("budget"), py::arg("horizon"),
+        py::arg("arrival"), py::arg("cand"), py::arg("init_occ"),
+        py::arg("n_weights") = 100, py::arg("n_gen") = 200, py::arg("neighborhood_size") = 20,
+        py::arg("seed") = 42, py::arg("n_threads") = 0, py::arg("max_replace") = -1,
+        py::arg("p_mut_start") = -1.0, py::arg("p_mut_end") = -1.0,
+        py::arg("crossover_kind") = 0, py::arg("archive_size") = 0,
+        "MOEA/D on the priority-key + non-delay-SGS representation "
+        "(see sgs_common.hpp). Same Tchebycheff decomposition + bounded "
+        "neighbourhood replacement as moead(), different chromosome and "
+        "decoder; no scalar_ls_interval polish (no SGS analogue)."
     );
 
     m.def("time_seeds",

@@ -905,6 +905,170 @@ def weighted_solve_brkga(
     return _to_solutions(inst, [(asgn, f1, f2)])[0]
 
 
+# ── Priority-key + non-delay-SGS representation ────────────────────────────────
+#
+# Standard-literature chromosome alternative to the job_slots-index encoding
+# above: a job-processing permutation + per-job type-choice index, decoded via
+# a non-delay Schedule Generation Scheme (src/fedhpc/_ext/sgs_common.hpp).
+# C++ port of scripts/priority_sgs_problem.py's pymoo prototype, for a
+# matched-eval-budget comparison against nsga2_frontier/nsga3_frontier/
+# moead_frontier. No local_search/schedule_repair/scalar_ls_interval analogue
+# exists for this representation (see sgs_algos.hpp's file comment).
+
+def _sgs_candidates(inst: Instance) -> list[list[tuple[int, int, int, int, int, float]]]:
+    """Per-job, cost-ascending list of (type_id, p_occ, a_min, t_max_excl, cap, cost).
+
+    cap uses -1 for unlimited capacity (matches SgsCandidate.cap's C++
+    convention), unlike Instance.instance_types' capacity=None.
+    """
+    cap_of = {m.id: (m.capacity if m.capacity is not None else -1) for m in inst.instance_types}
+    out: list[list[tuple[int, int, int, int, int, float]]] = []
+    for j in inst.jobs:
+        cands = []
+        for m_id in inst.F[j.id]:
+            Trange = inst.T[j.id, m_id]
+            cands.append((
+                m_id,
+                inst.p_occ[j.id, m_id],
+                Trange.start,
+                Trange.stop,
+                cap_of[m_id],
+                inst.c[j.id, m_id],
+            ))
+        cands.sort(key=lambda c: c[5])
+        out.append(cands)
+    return out
+
+
+def nsga2_sgs_frontier(
+    inst: Instance,
+    *,
+    pop_size: int = 400,
+    n_gen: int = 200,
+    seed: int = 42,
+    n_threads: int = 0,
+    p_mut_start: float = -1.0,
+    p_mut_end: float = -1.0,
+    crossover_kind: int = 0,
+    tourn_k: int = 2,
+    profile: bool = False,
+) -> list[Solution]:
+    """NSGA-II on the priority-key + non-delay-SGS representation.
+
+    Same dominance/crowding selection as nsga2_frontier — see that
+    function's docstring for the shared parameters. No local_search /
+    sched_repair / ablate / extra_seeds (no analogue for this
+    representation).
+    """
+    _require_ext()
+    raw, prof = _ext.nsga2_sgs(
+        n_jobs   = len(inst.jobs),
+        budget   = inst.budget,
+        horizon  = inst.horizon,
+        arrival  = [float(j.arrival) for j in inst.jobs],
+        cand     = _sgs_candidates(inst),
+        init_occ = _init_occ(inst),
+        pop_size = pop_size,
+        n_gen    = n_gen,
+        seed     = seed,
+        n_threads = n_threads,
+        p_mut_start = p_mut_start,
+        p_mut_end   = p_mut_end,
+        crossover_kind = crossover_kind,
+        tourn_k  = tourn_k,
+    )
+    if profile:
+        _print_profile(prof, algorithm="nsga2", label=f"[SGS] pop={pop_size}")
+    return _to_solutions(inst, raw)
+
+
+def nsga3_sgs_frontier(
+    inst: Instance,
+    *,
+    pop_size: int = 400,
+    n_divisions: int = 399,
+    n_gen: int = 200,
+    seed: int = 42,
+    n_threads: int = 0,
+    p_mut_start: float = -1.0,
+    p_mut_end: float = -1.0,
+    crossover_kind: int = 0,
+    tourn_k: int = 2,
+    profile: bool = False,
+) -> list[Solution]:
+    """NSGA-III on the priority-key + non-delay-SGS representation.
+
+    Same reference-point niching as nsga3_frontier — see that function's
+    docstring for the shared parameters.
+    """
+    _require_ext()
+    raw, prof = _ext.nsga3_sgs(
+        n_jobs   = len(inst.jobs),
+        budget   = inst.budget,
+        horizon  = inst.horizon,
+        arrival  = [float(j.arrival) for j in inst.jobs],
+        cand     = _sgs_candidates(inst),
+        init_occ = _init_occ(inst),
+        pop_size = pop_size,
+        n_divisions = n_divisions,
+        n_gen    = n_gen,
+        seed     = seed,
+        n_threads = n_threads,
+        p_mut_start = p_mut_start,
+        p_mut_end   = p_mut_end,
+        crossover_kind = crossover_kind,
+        tourn_k  = tourn_k,
+    )
+    if profile:
+        _print_profile(prof, algorithm="nsga3", label=f"[SGS] pop={pop_size}")
+    return _to_solutions(inst, raw)
+
+
+def moead_sgs_frontier(
+    inst: Instance,
+    *,
+    n_weights: int = 400,
+    n_gen: int = 200,
+    neighborhood_size: int = 20,
+    seed: int = 42,
+    n_threads: int = 0,
+    max_replace: int = 5,
+    p_mut_start: float = -1.0,
+    p_mut_end: float = -1.0,
+    crossover_kind: int = 0,
+    archive_size: int = 20,
+    profile: bool = False,
+) -> list[Solution]:
+    """MOEA/D on the priority-key + non-delay-SGS representation.
+
+    Same Tchebycheff decomposition + bounded neighbourhood replacement as
+    moead_frontier — see that function's docstring for the shared
+    parameters. No scalar_ls_interval polish (no SGS analogue).
+    """
+    _require_ext()
+    raw, prof = _ext.moead_sgs(
+        n_jobs   = len(inst.jobs),
+        budget   = inst.budget,
+        horizon  = inst.horizon,
+        arrival  = [float(j.arrival) for j in inst.jobs],
+        cand     = _sgs_candidates(inst),
+        init_occ = _init_occ(inst),
+        n_weights = n_weights,
+        n_gen    = n_gen,
+        neighborhood_size = neighborhood_size,
+        seed     = seed,
+        n_threads = n_threads,
+        max_replace = max_replace,
+        p_mut_start = p_mut_start,
+        p_mut_end   = p_mut_end,
+        crossover_kind = crossover_kind,
+        archive_size = archive_size,
+    )
+    if profile:
+        _print_profile(prof, algorithm="moead", label=f"[SGS] n_weights={n_weights}")
+    return _to_solutions(inst, raw)
+
+
 def time_seeds(inst: Instance) -> list[dict]:
     """Diagnostic: time each deterministic heuristic seed individually.
 
