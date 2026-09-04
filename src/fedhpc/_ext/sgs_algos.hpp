@@ -13,12 +13,16 @@
  * (it only ever touches Individual.f1/f2/cv/rank/crowding), not
  * re-implemented.
  *
- * Deliberately omitted relative to the job_slots-index drivers: periodic
- * local_search()/schedule_repair() (no SGS analogue), the ablation bitmask,
- * extra_seeds/lp_seeds, and MOEA/D's scalar_ls_interval polish (built around
- * job_slots type-flip moves). This keeps the comparison to a plain GA loop —
- * heuristic seeds + permutation-aware crossover/mutation + selection — same
- * class of algorithm the seeded pymoo prototype ran, just at C++ speed.
+ * Each driver now also runs local_search_sgs() (sgs_common.hpp) periodically
+ * on the survivor population, every `local_search_interval` generations
+ * (default -1 -> max(1, n_gen/10), same auto-interval convention as
+ * nsga2.hpp/nsga3.hpp/moead.hpp) plus once as a final polish before
+ * extraction — mirroring exactly how those headers use local_search().
+ *
+ * Still deliberately omitted relative to the job_slots-index drivers:
+ * schedule_repair() (no SGS analogue), the ablation bitmask, extra_seeds/
+ * lp_seeds, and MOEA/D's scalar_ls_interval polish (built around job_slots
+ * type-flip moves).
  */
 #pragma once
 
@@ -31,13 +35,15 @@
 inline std::pair<ResultList, Profile>
 run_nsga2_sgs(const SgsProblem& prob, int pop_size, int n_gen, int seed, int n_threads,
              double p_mut_start = -1.0, double p_mut_end = -1.0, int crossover_kind = 0,
-             int tourn_k = 2) {
+             int tourn_k = 2, int local_search_interval = -1) {
     py::gil_scoped_release release;
     set_num_threads(n_threads);
     const auto t_total = Clock::now();
 
     std::mt19937 rng(seed);
     const auto mut_sched = make_mutation_schedule(p_mut_start, p_mut_end, 2.0 / prob.n_jobs);
+    const int ls_interval = (local_search_interval < 0)
+        ? std::max(1, n_gen / 10) : local_search_interval;
 
     auto h_seeds = make_heuristic_seeds_sgs(prob);
     const int n_hs = static_cast<int>(h_seeds.size());
@@ -137,6 +143,42 @@ run_nsga2_sgs(const SgsProblem& prob, int pop_size, int n_gen, int seed, int n_t
                 break;
             }
         }
+
+        // ── Periodic local search (see sgs_common.hpp's local_search_sgs) ──
+        if (ls_interval > 0 && (gen + 1) % ls_interval == 0) {
+            std::vector<uint32_t> ls_seeds(pop.size());
+            for (auto& s : ls_seeds) s = rng();
+#ifdef _OPENMP
+            #pragma omp parallel
+            {
+                SgsWorkspace ws; ws.reset(prob);
+                #pragma omp for schedule(static)
+                for (int k = 0; k < (int)pop.size(); k++) {
+                    std::mt19937 lrng(ls_seeds[k]);
+                    local_search_sgs(pop[k], prob, ws, lrng, /*max_passes=*/1);
+                }
+            }
+#else
+            {
+                SgsWorkspace ws; ws.reset(prob);
+                for (int k = 0; k < (int)pop.size(); k++) {
+                    std::mt19937 lrng(ls_seeds[k]);
+                    local_search_sgs(pop[k], prob, ws, lrng, 1);
+                }
+            }
+#endif
+        }
+    }
+
+    // Final polish before ranking — see nsga2.hpp's extraction step.
+    {
+        std::vector<uint32_t> ls_seeds(pop.size());
+        for (auto& s : ls_seeds) s = rng();
+        SgsWorkspace ws_polish; ws_polish.reset(prob);
+        for (int k = 0; k < (int)pop.size(); k++) {
+            std::mt19937 lrng(ls_seeds[k]);
+            local_search_sgs(pop[k], prob, ws_polish, lrng, /*max_passes=*/3);
+        }
     }
 
     auto fronts = fast_nds(pop);
@@ -160,13 +202,15 @@ run_nsga2_sgs(const SgsProblem& prob, int pop_size, int n_gen, int seed, int n_t
 inline std::pair<ResultList, Profile>
 run_nsga3_sgs(const SgsProblem& prob, int pop_size, int n_divisions, int n_gen,
              int seed, int n_threads, double p_mut_start = -1.0, double p_mut_end = -1.0,
-             int crossover_kind = 0, int tourn_k = 2) {
+             int crossover_kind = 0, int tourn_k = 2, int local_search_interval = -1) {
     py::gil_scoped_release release;
     set_num_threads(n_threads);
     const auto t_total = Clock::now();
 
     std::mt19937 rng(seed);
     const auto mut_sched = make_mutation_schedule(p_mut_start, p_mut_end, 2.0 / prob.n_jobs);
+    const int ls_interval = (local_search_interval < 0)
+        ? std::max(1, n_gen / 10) : local_search_interval;
     const auto refs = make_reference_points_2d(n_divisions);
     const int  R    = (int)refs.size();
 
@@ -290,6 +334,42 @@ run_nsga3_sgs(const SgsProblem& prob, int pop_size, int n_divisions, int n_gen,
                 pop.push_back(std::move(combined[cf[critical_fi][k]]));
         }
         if ((int)pop.size() > pop_size) pop.resize(pop_size);
+
+        // ── Periodic local search (see sgs_common.hpp's local_search_sgs) ──
+        if (ls_interval > 0 && (gen + 1) % ls_interval == 0) {
+            std::vector<uint32_t> ls_seeds(pop.size());
+            for (auto& s : ls_seeds) s = rng();
+#ifdef _OPENMP
+            #pragma omp parallel
+            {
+                SgsWorkspace ws; ws.reset(prob);
+                #pragma omp for schedule(static)
+                for (int k = 0; k < (int)pop.size(); k++) {
+                    std::mt19937 lrng(ls_seeds[k]);
+                    local_search_sgs(pop[k], prob, ws, lrng, /*max_passes=*/1);
+                }
+            }
+#else
+            {
+                SgsWorkspace ws; ws.reset(prob);
+                for (int k = 0; k < (int)pop.size(); k++) {
+                    std::mt19937 lrng(ls_seeds[k]);
+                    local_search_sgs(pop[k], prob, ws, lrng, 1);
+                }
+            }
+#endif
+        }
+    }
+
+    // Final polish before ranking — see nsga2.hpp's extraction step.
+    {
+        std::vector<uint32_t> ls_seeds(pop.size());
+        for (auto& s : ls_seeds) s = rng();
+        SgsWorkspace ws_polish; ws_polish.reset(prob);
+        for (int k = 0; k < (int)pop.size(); k++) {
+            std::mt19937 lrng(ls_seeds[k]);
+            local_search_sgs(pop[k], prob, ws_polish, lrng, /*max_passes=*/3);
+        }
     }
 
     auto fronts = fast_nds(pop);
@@ -314,13 +394,15 @@ inline std::pair<ResultList, Profile>
 run_moead_sgs(const SgsProblem& prob, int n_weights, int n_gen, int T_size,
              int seed, int n_threads, int max_replace = -1,
              double p_mut_start = -1.0, double p_mut_end = -1.0, int crossover_kind = 0,
-             int archive_size = 0) {
+             int archive_size = 0, int local_search_interval = -1) {
     py::gil_scoped_release release;
     set_num_threads(n_threads);
     const auto t_total = Clock::now();
 
     std::mt19937 rng(seed);
     const auto mut_sched = make_mutation_schedule(p_mut_start, p_mut_end, 1.0 / prob.n_jobs);
+    const int ls_interval = (local_search_interval < 0)
+        ? std::max(1, n_gen / 10) : local_search_interval;
 
     constexpr double W_EPS = 1e-4;
     std::vector<std::pair<double,double>> W(n_weights);
@@ -467,6 +549,47 @@ run_moead_sgs(const SgsProblem& prob, int n_weights, int n_gen, int T_size,
                 if (replaced >= max_replace) break;
                 if (scalar(children[i], j) <= scalar(pop[j], j)) { pop[j] = children[i]; replaced++; }
             }
+        }
+
+        // ── Periodic local search (see sgs_common.hpp's local_search_sgs) ──
+        if (ls_interval > 0 && (gen + 1) % ls_interval == 0) {
+            std::vector<uint32_t> ls_seeds(pop.size());
+            for (auto& s : ls_seeds) s = rng();
+#ifdef _OPENMP
+            #pragma omp parallel
+            {
+                SgsWorkspace ws; ws.reset(prob);
+                #pragma omp for schedule(static)
+                for (int i = 0; i < (int)pop.size(); i++) {
+                    std::mt19937 lrng(ls_seeds[i]);
+                    local_search_sgs(pop[i], prob, ws, lrng, /*max_passes=*/1);
+                }
+            }
+#else
+            {
+                SgsWorkspace ws; ws.reset(prob);
+                for (int i = 0; i < (int)pop.size(); i++) {
+                    std::mt19937 lrng(ls_seeds[i]);
+                    local_search_sgs(pop[i], prob, ws, lrng, 1);
+                }
+            }
+#endif
+        }
+    }
+
+    // Final polish before extraction — see nsga2.hpp's extraction step.
+    {
+        std::vector<uint32_t> ls_seeds(pop.size() + archive.size());
+        for (auto& s : ls_seeds) s = rng();
+        SgsWorkspace ws_polish; ws_polish.reset(prob);
+        size_t si = 0;
+        for (auto& ind : pop) {
+            std::mt19937 lrng(ls_seeds[si++]);
+            local_search_sgs(ind, prob, ws_polish, lrng, /*max_passes=*/3);
+        }
+        for (auto& ind : archive) {
+            std::mt19937 lrng(ls_seeds[si++]);
+            local_search_sgs(ind, prob, ws_polish, lrng, /*max_passes=*/3);
         }
     }
 

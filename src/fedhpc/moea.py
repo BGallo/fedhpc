@@ -951,14 +951,17 @@ def nsga2_sgs_frontier(
     p_mut_end: float = -1.0,
     crossover_kind: int = 0,
     tourn_k: int = 2,
+    local_search_interval: int = -1,
     profile: bool = False,
 ) -> list[Solution]:
     """NSGA-II on the priority-key + non-delay-SGS representation.
 
     Same dominance/crowding selection as nsga2_frontier — see that
-    function's docstring for the shared parameters. No local_search /
-    sched_repair / ablate / extra_seeds (no analogue for this
-    representation).
+    function's docstring for the shared parameters. local_search_interval:
+    generations between periodic local_search_sgs() passes on survivors
+    (-1 = auto, max(1, n_gen/10)); a final polish always runs before
+    extraction. No sched_repair / ablate / extra_seeds (no analogue for
+    this representation).
     """
     _require_ext()
     raw, prof = _ext.nsga2_sgs(
@@ -976,6 +979,7 @@ def nsga2_sgs_frontier(
         p_mut_end   = p_mut_end,
         crossover_kind = crossover_kind,
         tourn_k  = tourn_k,
+        local_search_interval = local_search_interval,
     )
     if profile:
         _print_profile(prof, algorithm="nsga2", label=f"[SGS] pop={pop_size}")
@@ -994,12 +998,14 @@ def nsga3_sgs_frontier(
     p_mut_end: float = -1.0,
     crossover_kind: int = 0,
     tourn_k: int = 2,
+    local_search_interval: int = -1,
     profile: bool = False,
 ) -> list[Solution]:
     """NSGA-III on the priority-key + non-delay-SGS representation.
 
     Same reference-point niching as nsga3_frontier — see that function's
-    docstring for the shared parameters.
+    docstring for the shared parameters. local_search_interval: see
+    nsga2_sgs_frontier.
     """
     _require_ext()
     raw, prof = _ext.nsga3_sgs(
@@ -1018,6 +1024,7 @@ def nsga3_sgs_frontier(
         p_mut_end   = p_mut_end,
         crossover_kind = crossover_kind,
         tourn_k  = tourn_k,
+        local_search_interval = local_search_interval,
     )
     if profile:
         _print_profile(prof, algorithm="nsga3", label=f"[SGS] pop={pop_size}")
@@ -1037,13 +1044,15 @@ def moead_sgs_frontier(
     p_mut_end: float = -1.0,
     crossover_kind: int = 0,
     archive_size: int = 20,
+    local_search_interval: int = -1,
     profile: bool = False,
 ) -> list[Solution]:
     """MOEA/D on the priority-key + non-delay-SGS representation.
 
     Same Tchebycheff decomposition + bounded neighbourhood replacement as
     moead_frontier — see that function's docstring for the shared
-    parameters. No scalar_ls_interval polish (no SGS analogue).
+    parameters. local_search_interval: see nsga2_sgs_frontier. No
+    scalar_ls_interval polish (no SGS analogue).
     """
     _require_ext()
     raw, prof = _ext.moead_sgs(
@@ -1063,6 +1072,7 @@ def moead_sgs_frontier(
         p_mut_end   = p_mut_end,
         crossover_kind = crossover_kind,
         archive_size = archive_size,
+        local_search_interval = local_search_interval,
     )
     if profile:
         _print_profile(prof, algorithm="moead", label=f"[SGS] n_weights={n_weights}")

@@ -23,12 +23,24 @@
  * charge the capacity excess to cv — the same fallback convention the
  * Python prototype used, so results stay comparable.
  *
- * Deliberately NOT implemented for this representation: local_search(),
- * schedule_repair(), and MOEA/D's scalar_ls_interval polish. Those are all
- * built around job_slots indexing and don't have an SGS analogue here — this
- * keeps the comparison to the job_slots scheme honest (same class of
- * "vanilla GA loop" the seeded pymoo prototype used, just at C++ speed with
- * permutation-aware operators).
+ * local_search_sgs() (below) is this representation's analogue of
+ * ga_common.hpp's local_search(): coordinate descent, accept-only-if-
+ * weakly-dominating-or-cv-reducing, same periodic-during-run +
+ * final-polish usage pattern. It differs from local_search() in one
+ * structural way forced by the representation: a job's own slot choice in
+ * the job_slots scheme is independent of every other job's genes, so
+ * local_search() can compute one job's marginal violation/cost cheaply
+ * without touching the rest of the individual. Here, changing one job's
+ * type-choice or permutation position can shift the start times of every
+ * job placed *after* it, so there is no cheap marginal signal — each trial
+ * move requires a full O(n_jobs) re-decode via evaluate_sgs() and a
+ * whole-individual before/after comparison. Trial counts are bounded per
+ * call (not exhaustive over all jobs x all candidates) to keep this at a
+ * comparable order of cost to the job_slots scheme's periodic passes.
+ *
+ * schedule_repair() and MOEA/D's scalar_ls_interval polish are still NOT
+ * implemented for this representation — both are built around job_slots
+ * type-flip moves with no direct SGS analogue.
  */
 #pragma once
 
@@ -266,6 +278,105 @@ inline void mutate_sgs(Individual& ind, const SgsProblem& prob, double p_mut,
             const int ncand = static_cast<int>(prob.cand[j].size());
             ind.genes[n + j] = std::uniform_int_distribution<int>(0, ncand - 1)(rng);
         }
+}
+
+// ── Local search (SGS analogue of ga_common.hpp's local_search()) ─────────────
+//
+// Two move classes, both accepted only if the resulting whole-individual
+// (f1, f2, cv) is weakly-dominating relative to the pre-move baseline (or
+// strictly reduces cv when the baseline is infeasible) — identical accept
+// rule to local_search(), just evaluated on the full re-decode since this
+// representation has no cheap per-job marginal.
+//
+//   type-choice moves: for every job, try a small bounded set of alternative
+//   type-choice indices (cheapest, priciest, and its immediate cost-rank
+//   neighbours) — mirrors local_search()'s "job_candidates shortlist, not
+//   the full slot list" philosophy.
+//
+//   order moves: a bounded random sample of adjacent-position swaps in the
+//   permutation (not all O(n^2) pairs) — the cheapest move that can let a
+//   job jump ahead of / behind another in processing order.
+//
+// Job and swap-position counts are each capped (default 100) so the total
+// per-call cost stays a small, bounded multiple of one full population
+// pass, independent of how large n_jobs is.
+inline bool local_search_sgs(Individual& ind, const SgsProblem& prob, SgsWorkspace& ws,
+                             std::mt19937& rng, int max_passes = 1,
+                             int max_job_trials = 100, int max_order_trials = 100) {
+    const int n = prob.n_jobs;
+    constexpr double eps = 1e-9;
+    bool any_improved = false;
+
+    evaluate_sgs(ind, prob, ws);
+    double base_f1 = ind.f1, base_f2 = ind.f2, base_cv = ind.cv;
+
+    const auto better_than_base = [&](double f1, double f2, double cv) noexcept -> bool {
+        if (cv < base_cv - eps) return true;
+        if (cv > base_cv + eps) return false;
+        return f1 <= base_f1 + eps && f2 <= base_f2 + eps &&
+               (f1 < base_f1 - eps || f2 < base_f2 - eps);
+    };
+
+    std::vector<int> job_order(n);
+    std::iota(job_order.begin(), job_order.end(), 0);
+
+    for (int pass = 0; pass < max_passes; pass++) {
+        bool pass_improved = false;
+
+        // ── type-choice moves ───────────────────────────────────────────────
+        std::shuffle(job_order.begin(), job_order.end(), rng);
+        const int n_job_trials = std::min(n, max_job_trials);
+        for (int t = 0; t < n_job_trials; t++) {
+            const int j = job_order[t];
+            const int ncand = static_cast<int>(prob.cand[j].size());
+            if (ncand <= 1) continue;
+            const int cur_k = ind.genes[n + j];
+
+            int trial_ks[4]; int nt = 0;
+            const auto add = [&](int k) {
+                if (k < 0 || k >= ncand || k == cur_k) return;
+                for (int u = 0; u < nt; u++) if (trial_ks[u] == k) return;
+                trial_ks[nt++] = k;
+            };
+            add(0); add(cur_k - 1); add(cur_k + 1); add(ncand - 1);
+
+            int accepted_k = cur_k;
+            for (int ti = 0; ti < nt; ti++) {
+                ind.genes[n + j] = trial_ks[ti];
+                evaluate_sgs(ind, prob, ws);
+                if (better_than_base(ind.f1, ind.f2, ind.cv)) {
+                    base_f1 = ind.f1; base_f2 = ind.f2; base_cv = ind.cv;
+                    accepted_k = trial_ks[ti];
+                    pass_improved = true;
+                } else {
+                    ind.genes[n + j] = accepted_k;
+                }
+            }
+        }
+
+        // ── order moves: bounded sample of adjacent swaps ──────────────────
+        if (n > 1) {
+            const int n_order_trials = std::min(n - 1, max_order_trials);
+            std::uniform_int_distribution<int> pos_dist(0, n - 2);
+            for (int t = 0; t < n_order_trials; t++) {
+                const int i = pos_dist(rng);
+                std::swap(ind.genes[i], ind.genes[i + 1]);
+                evaluate_sgs(ind, prob, ws);
+                if (better_than_base(ind.f1, ind.f2, ind.cv)) {
+                    base_f1 = ind.f1; base_f2 = ind.f2; base_cv = ind.cv;
+                    pass_improved = true;
+                } else {
+                    std::swap(ind.genes[i], ind.genes[i + 1]);  // revert
+                }
+            }
+        }
+
+        any_improved = any_improved || pass_improved;
+        if (!pass_improved) break;
+    }
+
+    evaluate_sgs(ind, prob, ws);  // sync ind.f1/f2/cv to the finally-accepted genes
+    return any_improved;
 }
 
 // ── Heuristic seeds ────────────────────────────────────────────────────────────

@@ -308,11 +308,12 @@ PYBIND11_MODULE(_moea, m) {
            const std::vector<std::vector<std::tuple<int,int,int,int,int,double>>>& cand,
            const std::vector<std::tuple<int,int,int>>& init_occ,
            int pop_size, int n_gen, int seed, int n_threads,
-           double p_mut_start, double p_mut_end, int crossover_kind, int tourn_k) {
+           double p_mut_start, double p_mut_end, int crossover_kind, int tourn_k,
+           int local_search_interval) {
             auto [results, prof] = run_nsga2_sgs(
                 build_sgs_problem(n_jobs, budget, horizon, arrival, cand, init_occ),
                 pop_size, n_gen, seed, n_threads, p_mut_start, p_mut_end,
-                crossover_kind, tourn_k);
+                crossover_kind, tourn_k, local_search_interval);
             return py::make_tuple(results, profile_to_dict(prof));
         },
         py::arg("n_jobs"), py::arg("budget"), py::arg("horizon"),
@@ -320,9 +321,12 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("pop_size") = 100, py::arg("n_gen") = 200, py::arg("seed") = 42,
         py::arg("n_threads") = 0, py::arg("p_mut_start") = -1.0, py::arg("p_mut_end") = -1.0,
         py::arg("crossover_kind") = 0, py::arg("tourn_k") = 2,
+        py::arg("local_search_interval") = -1,
         "NSGA-II on the priority-key + non-delay-SGS representation "
         "(see sgs_common.hpp). Same dominance/crowding selection as nsga2(), "
-        "different chromosome and decoder."
+        "different chromosome and decoder. local_search_interval: generations "
+        "between periodic local_search_sgs() passes on survivors (-1 = auto, "
+        "max(1, n_gen/10)); a final polish always runs before extraction."
     );
 
     m.def("nsga3_sgs",
@@ -331,11 +335,12 @@ PYBIND11_MODULE(_moea, m) {
            const std::vector<std::vector<std::tuple<int,int,int,int,int,double>>>& cand,
            const std::vector<std::tuple<int,int,int>>& init_occ,
            int pop_size, int n_divisions, int n_gen, int seed, int n_threads,
-           double p_mut_start, double p_mut_end, int crossover_kind, int tourn_k) {
+           double p_mut_start, double p_mut_end, int crossover_kind, int tourn_k,
+           int local_search_interval) {
             auto [results, prof] = run_nsga3_sgs(
                 build_sgs_problem(n_jobs, budget, horizon, arrival, cand, init_occ),
                 pop_size, n_divisions, n_gen, seed, n_threads, p_mut_start, p_mut_end,
-                crossover_kind, tourn_k);
+                crossover_kind, tourn_k, local_search_interval);
             return py::make_tuple(results, profile_to_dict(prof));
         },
         py::arg("n_jobs"), py::arg("budget"), py::arg("horizon"),
@@ -344,9 +349,10 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("seed") = 42, py::arg("n_threads") = 0,
         py::arg("p_mut_start") = -1.0, py::arg("p_mut_end") = -1.0,
         py::arg("crossover_kind") = 0, py::arg("tourn_k") = 2,
+        py::arg("local_search_interval") = -1,
         "NSGA-III on the priority-key + non-delay-SGS representation "
         "(see sgs_common.hpp). Same reference-point niching as nsga3(), "
-        "different chromosome and decoder."
+        "different chromosome and decoder. local_search_interval: see nsga2_sgs()."
     );
 
     m.def("moead_sgs",
@@ -356,11 +362,12 @@ PYBIND11_MODULE(_moea, m) {
            const std::vector<std::tuple<int,int,int>>& init_occ,
            int n_weights, int n_gen, int neighborhood_size,
            int seed, int n_threads, int max_replace,
-           double p_mut_start, double p_mut_end, int crossover_kind, int archive_size) {
+           double p_mut_start, double p_mut_end, int crossover_kind, int archive_size,
+           int local_search_interval) {
             auto [results, prof] = run_moead_sgs(
                 build_sgs_problem(n_jobs, budget, horizon, arrival, cand, init_occ),
                 n_weights, n_gen, neighborhood_size, seed, n_threads, max_replace,
-                p_mut_start, p_mut_end, crossover_kind, archive_size);
+                p_mut_start, p_mut_end, crossover_kind, archive_size, local_search_interval);
             return py::make_tuple(results, profile_to_dict(prof));
         },
         py::arg("n_jobs"), py::arg("budget"), py::arg("horizon"),
@@ -369,10 +376,12 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("seed") = 42, py::arg("n_threads") = 0, py::arg("max_replace") = -1,
         py::arg("p_mut_start") = -1.0, py::arg("p_mut_end") = -1.0,
         py::arg("crossover_kind") = 0, py::arg("archive_size") = 0,
+        py::arg("local_search_interval") = -1,
         "MOEA/D on the priority-key + non-delay-SGS representation "
         "(see sgs_common.hpp). Same Tchebycheff decomposition + bounded "
         "neighbourhood replacement as moead(), different chromosome and "
-        "decoder; no scalar_ls_interval polish (no SGS analogue)."
+        "decoder; local_search_interval: see nsga2_sgs(). No scalar_ls_interval "
+        "polish (no SGS analogue)."
     );
 
     m.def("time_seeds",
