@@ -1,0 +1,8 @@
+case,solver,n_vars,n_int,n_cons,root_bound,obj,bound,status,nodes,build_s,solve_s
+fedhpc_known_runtime_offline_10min,st_base,7653711,7653711,9376,,1.38950319579082,1.3895031957908195,optimal,1,48.552,84.619
+fedhpc_known_runtime_offline_10min,st_cy,7653711,7645330,9376,,1.38950319579082,1.3895031957908195,optimal,1,48.268,83.492
+fedhpc_known_runtime_offline_10min,st_ge,7653711,7653711,9376,,1.3895382809747776,1.3895382809747765,optimal,1,44.778,71.818
+fedhpc_known_runtime_offline_10min,st_np,7653711,7653711,9376,,1.38950319579082,1.3895031957908195,optimal,1,44.228,78.816
+fedhpc_known_runtime_offline_10min,st_all,7653711,7645330,9376,,1.3895382809747776,1.3895382809747765,optimal,1,45.133,71.144
+fedhpc_known_runtime_offline_10min,meta,,,,,1.3971264690426617,,heuristic,,0.0,133.446
+fedhpc_known_runtime_offline_10min,meta_long,,,,,1.3903703702579913,,heuristic,,0.0,720.266

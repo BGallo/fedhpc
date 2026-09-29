@@ -34,6 +34,16 @@ def _require_ext() -> None:
         )
 
 
+def _require_no_fixed_costs(inst: Instance) -> None:
+    # The C++ layer scores f2 as a per-slot sum; a per-type fixed charge would
+    # be silently dropped, so refuse rather than report a wrong f2.
+    if inst.has_fixed_costs:
+        raise NotImplementedError(
+            "InstanceType.fixed_cost is only modelled by the Gurobi formulations; "
+            "the C++ heuristics do not support it"
+        )
+
+
 def _prune_dominated_cloud_types(
     inst: Instance, j_id: int, type_risk: list[float], cap_of: dict[int, int | None],
 ) -> list[int]:
@@ -74,13 +84,14 @@ def _job_slots(inst: Instance) -> list[list[tuple[int, int, int, float, float]]]
     """Flatten Instance into per-job slot tables for the C++ layer.
 
     Each slot is (type_id, start, p_occ, f1_contrib, cost).
-    f1_contrib = start + p_occ - arrival is precomputed to avoid recomputing
+    f1_contrib = weight * (start + p_occ - arrival) is precomputed to avoid recomputing
     it on every evaluation inside the tight C++ inner loop.
 
     Per-job feasible types are lightly pruned first (see
     _prune_dominated_cloud_types) — this only shrinks the heuristic search
     space, never the exact MIP's.
     """
+    _require_no_fixed_costs(inst)
     type_risk = _type_risk(inst)
     cap_of = {m.id: m.capacity for m in inst.instance_types}
     slots: list[list[tuple[int, int, int, float, float]]] = []
@@ -90,7 +101,7 @@ def _job_slots(inst: Instance) -> list[list[tuple[int, int, int, float, float]]]
             p_occ = inst.p_occ[j.id, m_id]
             cost  = inst.c[j.id, m_id]
             for t in inst.T[j.id, m_id]:
-                job_slots.append((m_id, t, p_occ, float(t + p_occ - j.arrival), cost))
+                job_slots.append((m_id, t, p_occ, float(j.weight * (t + p_occ - j.arrival)), cost))
         slots.append(job_slots)
     return slots
 
@@ -921,6 +932,10 @@ def _sgs_candidates(inst: Instance) -> list[list[tuple[int, int, int, int, int, 
     cap uses -1 for unlimited capacity (matches SgsCandidate.cap's C++
     convention), unlike Instance.instance_types' capacity=None.
     """
+    _require_no_fixed_costs(inst)
+    if any(j.weight != 1.0 for j in inst.jobs):
+        # the SGS decoders compute f1 from arrivals in C++, unweighted
+        raise NotImplementedError("Job.weight is not supported by the SGS heuristics")
     cap_of = {m.id: (m.capacity if m.capacity is not None else -1) for m in inst.instance_types}
     out: list[list[tuple[int, int, int, int, int, float]]] = []
     for j in inst.jobs:

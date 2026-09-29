@@ -27,6 +27,7 @@ class Job:
     cpu: float           # q^cpu_j
     mem: float           # q^mem_j
     stor: float          # q^stor_j
+    weight: float = 1.0  # w_j — turnaround weight in f1 (1.0 = plain total turnaround)
 
 
 @dataclass
@@ -48,6 +49,12 @@ class InstanceType:
     # before the job finishes (e.g. cloud spot/preemptible capacity). 0 for
     # on-demand/on-prem types. Informational only for the MIP; the MOEA/D and
     # NSGA layers use it to bias random-genome initialization (see moea.py).
+    fixed_cost: float = 0.0
+    # U_m — one-off monetary charge added to f2 when at least one (new) job is
+    # scheduled on this type (e.g. rental setup / activation fee). For a
+    # capacity-1 type this is exactly a per-machine usage fee. Modelled in the
+    # MIP by a binary z_m (see formulations.py); the C++ heuristics do not
+    # support it.
 
 
 @dataclass
@@ -219,6 +226,28 @@ class Instance:
             # Occupancy during [0, end_slot): counts towards per-slot capacity usage
             for t in range(end_slot):
                 self.occupied[mid, t] = self.occupied.get((mid, t), 0) + 1
+
+    # ---- Objective evaluation ----------------------------------------------
+
+    @property
+    def has_fixed_costs(self) -> bool:
+        return any(m.fixed_cost for m in self.instance_types)
+
+    def f1_of(self, completion: dict[int, int]) -> float:
+        """Weighted turnaround Σ w_j (C_j − a_j) over the jobs in ``completion``."""
+        return sum(
+            j.weight * (completion[j.id] - j.arrival)
+            for j in self.jobs if j.id in completion
+        )
+
+    def f2_of(self, assignment: dict[int, tuple[int, int]]) -> float:
+        """Monetary cost Σ c_jm + Σ_{m used} U_m of a ``{job: (type, start)}`` map."""
+        fixed = {m.id: m.fixed_cost for m in self.instance_types}
+        used = {mid for mid, _t in assignment.values()}
+        return (
+            sum(self.c[jid, mid] for jid, (mid, _t) in assignment.items())
+            + sum(fixed[mid] for mid in used)
+        )
 
     @classmethod
     def from_dict(cls, data: dict) -> Instance:

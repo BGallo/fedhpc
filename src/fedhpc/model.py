@@ -69,15 +69,9 @@ def set_mip_start(inst: Instance, x: dict, hint: Solution) -> None:
     B&B search toward a known-good incumbent; it never changes the feasible
     region or the proven-optimal objective.
     """
-    for j in inst.jobs:
-        if j.id not in hint.assignment:
-            continue
-        m_hint, t_hint = hint.assignment[j.id]
-        for m_id in inst.F[j.id]:
-            for t in inst.T[j.id, m_id]:
-                x[j.id, m_id, t].Start = (
-                    1.0 if (m_id == m_hint and t == t_hint) else 0.0
-                )
+    for (jid, m_id, t), v in x.items():
+        if jid in hint.assignment:
+            v.Start = 1.0 if hint.assignment[jid] == (m_id, t) else 0.0
 
 
 def _extract(
@@ -110,20 +104,13 @@ def _extract(
     assignment: dict[int, tuple[int, int]] = {}
     completion: dict[int, int] = {}
 
-    for j in inst.jobs:
-        for m_id in inst.F[j.id]:
-            for t in inst.T[j.id, m_id]:
-                if x[j.id, m_id, t].X > 0.5:
-                    assignment[j.id] = (m_id, t)
-                    completion[j.id] = t + inst.p_occ[j.id, m_id]
+    for (jid, m_id, t), v in x.items():
+        if v.X > 0.5:
+            assignment[jid] = (m_id, t)
+            completion[jid] = t + inst.p_occ[jid, m_id]
 
-    f1 = sum(completion[j.id] - j.arrival for j in inst.jobs if j.id in completion)
-    f2 = sum(
-        inst.c[j.id, m_id] * x[j.id, m_id, t].X
-        for j in inst.jobs
-        for m_id in inst.F[j.id]
-        for t in inst.T[j.id, m_id]
-    )
+    f1 = inst.f1_of(completion)
+    f2 = inst.f2_of(assignment)
     return Solution(
         status=status,
         objective=mdl.ObjVal,

@@ -128,8 +128,8 @@ def make_solution(inst: Instance, assignment: dict[int, tuple[int, int]]) -> Sol
     completion = {
         jid: t + inst.p_occ[jid, mid] for jid, (mid, t) in assignment.items()
     }
-    f1 = sum(completion[j.id] - j.arrival for j in inst.jobs if j.id in completion)
-    f2 = sum(inst.c[jid, mid] for jid, (mid, _t) in assignment.items())
+    f1 = inst.f1_of(completion)
+    f2 = inst.f2_of(assignment)
     n_missing = len(inst.jobs) - len(assignment)
     status = "heuristic" if n_missing == 0 else "partial"
     return Solution(

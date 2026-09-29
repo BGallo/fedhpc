@@ -43,6 +43,41 @@ def configure_env(verbose: bool = False) -> None:
     _shared_env = env
 
 
+class XVars(dict):
+    """``x[j, m, t]`` variable dict that also carries the fixed-cost binaries.
+
+    ``z[m]`` (only for types with ``fixed_cost > 0``) rides along on the x dict
+    so :meth:`Formulation.f2_expr` can charge ``U_m z_m`` while every caller
+    keeps passing just ``vars["x"]``.
+    """
+
+    z: dict[int, gp.Var]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.z = {}
+
+
+def add_fixed_cost_vars(mdl: gp.Model, inst: Instance, x: XVars) -> None:
+    """Add ``z[m] ∈ {0,1}`` per type with ``fixed_cost > 0`` and link it to x.
+
+    Linking uses the aggregated form ``Σ_t x[j,m,t] ≤ z[m]`` per (job, type)
+    pair: one row per pair instead of one per start time, and at least as
+    tight in the LP as the disaggregated ``x[j,m,t] ≤ z[m]``.
+    """
+    for itype in inst.instance_types:
+        if not itype.fixed_cost:
+            continue
+        mid = itype.id
+        z = x.z[mid] = mdl.addVar(vtype=GRB.BINARY, name=f"z[{mid}]")
+        for j in inst.jobs:
+            if mid in inst.F[j.id]:
+                mdl.addConstr(
+                    gp.quicksum(x[j.id, mid, t] for t in inst.T[j.id, mid]) <= z,
+                    name=f"use[{j.id},{mid}]",
+                )
+
+
 class Formulation(ABC):
     """Abstract base class for FED-HPC MIP formulations.
 
@@ -65,23 +100,75 @@ class Formulation(ABC):
     # Objective expressions (common to all formulations)
     # ------------------------------------------------------------------
 
+    # Both objectives iterate x's own keys rather than rebuilding them from
+    # inst.T, so a formulation may create x for a subset of T_jm only (see
+    # SpaceTimeFormulation(normal_patterns=True)).
+
     def f1_expr(self, inst: Instance, x: dict) -> gp.LinExpr:
-        """Total turnaround: Σ_{j,m,t} (t + p^occ_jm − a_j) x_jmt  (eq. 11)."""
+        """Weighted turnaround: Σ_{j,m,t} w_j (t + p^occ_jm − a_j) x_jmt  (eq. 11;
+        w_j = 1 by default)."""
+        job = {j.id: j for j in inst.jobs}
         return gp.quicksum(
-            (t + inst.p_occ[j.id, m_id] - j.arrival) * x[j.id, m_id, t]
-            for j in inst.jobs
-            for m_id in inst.F[j.id]
-            for t in inst.T[j.id, m_id]
+            job[jid].weight * (t + inst.p_occ[jid, m_id] - job[jid].arrival) * v
+            for (jid, m_id, t), v in x.items()
         )
 
     def f2_expr(self, inst: Instance, x: dict) -> gp.LinExpr:
-        """Total monetary cost: Σ_{j,m,t} c^proc_jm x_jmt  (eq. 13)."""
+        """Total monetary cost: Σ_{j,m,t} c^proc_jm x_jmt  (eq. 13)
+        + Σ_m U_m z_m for types with a fixed usage cost."""
+        z = getattr(x, "z", {})
+        missing = [m.id for m in inst.instance_types if m.fixed_cost and m.id not in z]
+        if missing:
+            raise ValueError(
+                f"types {missing} have fixed_cost but the model has no z vars — "
+                "build it with a Formulation that calls add_fixed_cost_vars"
+            )
+        fixed = {m.id: m.fixed_cost for m in inst.instance_types}
         return gp.quicksum(
-            inst.c[j.id, m_id] * x[j.id, m_id, t]
-            for j in inst.jobs
-            for m_id in inst.F[j.id]
-            for t in inst.T[j.id, m_id]
-        )
+            inst.c[jid, m_id] * v for (jid, m_id, _t), v in x.items()
+        ) + gp.quicksum(fixed[mid] * zm for mid, zm in z.items())
+
+
+def normal_pattern_starts(inst: Instance) -> dict[int, bytearray]:
+    """Per type m, a 0/1 mask over {0..H} of the *normal patterns*: times at
+    which some left-shifted schedule can start a job on m.
+
+    Seeds are every job's earliest start slot on m and every running-job
+    completion slot on m; the set is closed under ``q -> q + p^occ_jm`` for
+    jobs j with ``q >= a_j`` (Kramer et al. 2020, Algorithm 1). Every job start
+    in a left-shifted schedule — each job as early as capacity allows — is a
+    release slot or a completion slot on its type, so restricting x to these
+    times loses no optimum for any objective nondecreasing in start times
+    (f1 is increasing, f2/budget are time-independent). A superset is always
+    safe: processing times are grouped per distinct p^occ with the smallest
+    release among the jobs sharing it.
+    """
+    H = inst.horizon
+    masks: dict[int, bytearray] = {}
+    for itype in inst.instance_types:
+        mid = itype.id
+        min_rel: dict[int, int] = {}          # p_occ -> earliest start slot
+        seeds = set()
+        for j in inst.jobs:
+            if mid not in inst.F[j.id]:
+                continue
+            a = inst.T[j.id, mid].start
+            seeds.add(a)
+            p = inst.p_occ[j.id, mid]
+            min_rel[p] = min(min_rel.get(p, a), a)
+        seeds.update(v for (m2, v) in inst.rj_arrivals if m2 == mid)
+        P = bytearray(H + 1)
+        for q in seeds:
+            if q <= H:
+                P[q] = 1
+        items = sorted(min_rel.items())
+        for q in range(H + 1):
+            if P[q]:
+                for p, a in items:
+                    if q >= a and q + p <= H:
+                        P[q + p] = 1
+        masks[mid] = P
+    return masks
 
 
 class SpaceTimeFormulation(Formulation):
@@ -103,10 +190,37 @@ class SpaceTimeFormulation(Formulation):
     (18) Unique job assignment.
     (19) Flow conservation at every v ∈ T = {0, …, H}.
     (20) Global budget.
+
+    Options (all off by default — the plain formulation above)
+    ----------------------------------------------------------
+    continuous_idle : y relaxed to continuous ≥ 0. Integrality is implied: with
+                      x binary and integer N_m / running-job completions, flow
+                      conservation fixes every y[m,t] to an integer.
+    cover_ge        : assignment rows as Σ x ≥ 1 (Kramer et al. 2020's AF). No
+                      optimal solution duplicates a job, since each x carries a
+                      strictly positive f1 term and a nonnegative cost.
+    normal_patterns : x only for starts in :func:`normal_pattern_starts` —
+                      exact (see there); shrinks x and lets many flow rows
+                      degenerate into pure idle-arc links.
     """
+
+    def __init__(self, *, continuous_idle: bool = False, cover_ge: bool = False,
+                 normal_patterns: bool = False):
+        self.continuous_idle = continuous_idle
+        self.cover_ge = cover_ge
+        self.normal_patterns = normal_patterns
 
     def build(self, inst: Instance) -> tuple[gp.Model, dict]:
         H = inst.horizon
+        # S[j,m]: allowed start times (T_jm, or its normal-pattern subset)
+        if self.normal_patterns:
+            masks = normal_pattern_starts(inst)
+            S = {
+                (j.id, m_id): frozenset(t for t in inst.T[j.id, m_id] if masks[m_id][t])
+                for j in inst.jobs for m_id in inst.F[j.id]
+            }
+        else:
+            S = inst.T
         mdl = gp.Model("fedhpc", env=_shared_env)
         mdl.setParam("OutputFlag", 0)
 
@@ -120,19 +234,20 @@ class SpaceTimeFormulation(Formulation):
         # ---- Decision variables -------------------------------------------
 
         # x[j,m,t] ∈ {0,1}
-        x = {
-            (j.id, m_id, t): mdl.addVar(
+        x = XVars(
+            ((j.id, m_id, t), mdl.addVar(
                 vtype=GRB.BINARY, name=f"x[{j.id},{m_id},{t}]"
-            )
+            ))
             for j in inst.jobs
             for m_id in inst.F[j.id]
-            for t in inst.T[j.id, m_id]
-        }
+            for t in S[j.id, m_id]
+        )
 
         # y[m,t] ∈ Z≥0 — waiting instances during [t, t+1), for t ∈ T\{H}  (eq. 22)
         y = {
             (itype.id, t): mdl.addVar(
-                vtype=GRB.INTEGER, lb=0, name=f"y[{itype.id},{t}]"
+                vtype=GRB.CONTINUOUS if self.continuous_idle else GRB.INTEGER,
+                lb=0, name=f"y[{itype.id},{t}]"
             )
             for itype in inst.instance_types
             for t in range(H)  # t ∈ {0, …, H−1}
@@ -144,12 +259,13 @@ class SpaceTimeFormulation(Formulation):
 
         # (18) Unique assignment: each job processed exactly once
         for j in inst.jobs:
+            cover = gp.quicksum(
+                x[j.id, m_id, t]
+                for m_id in inst.F[j.id]
+                for t in S[j.id, m_id]
+            )
             mdl.addConstr(
-                gp.quicksum(
-                    x[j.id, m_id, t]
-                    for m_id in inst.F[j.id]
-                    for t in inst.T[j.id, m_id]
-                ) == 1,
+                cover >= 1 if self.cover_ge else cover == 1,
                 name=f"assign[{j.id}]",
             )
 
@@ -180,30 +296,25 @@ class SpaceTimeFormulation(Formulation):
                     gp.quicksum(
                         x[j.id, mid, v - inst.p_occ[j.id, mid]]
                         for j in jobs_mid
-                        if (v - inst.p_occ[j.id, mid]) in inst.T[j.id, mid]
+                        if (v - inst.p_occ[j.id, mid]) in S[j.id, mid]
                     )
                     + inst.rj_arrivals.get((mid, v), 0)  # ghost completions
                 )
                 starting = gp.quicksum(
                     x[j.id, mid, v]
                     for j in jobs_mid
-                    if v in inst.T[j.id, mid]
+                    if v in S[j.id, mid]
                 )
                 mdl.addConstr(
                     lhs_wait + arriving == rhs_wait + starting,
                     name=f"flow[{mid},{v}]",
                 )
 
-        # (20) Global budget
-        mdl.addConstr(
-            gp.quicksum(
-                inst.c[j.id, m_id] * x[j.id, m_id, t]
-                for j in inst.jobs
-                for m_id in inst.F[j.id]
-                for t in inst.T[j.id, m_id]
-            ) <= inst.budget,
-            name="budget",
-        )
+        # Fixed usage costs: z[m] linked to x (no-op without fixed costs)
+        add_fixed_cost_vars(mdl, inst, x)
+
+        # (20) Global budget (includes fixed usage costs)
+        mdl.addConstr(self.f2_expr(inst, x) <= inst.budget, name="budget")
 
         return mdl, {"x": x, "y": y}
 
@@ -227,14 +338,14 @@ class OccupancyFormulation(Formulation):
         mdl.setParam("OutputFlag", 0)
 
         # x[j,m,t] ∈ {0,1}
-        x = {
-            (j.id, m_id, t): mdl.addVar(
+        x = XVars(
+            ((j.id, m_id, t), mdl.addVar(
                 vtype=GRB.BINARY, name=f"x[{j.id},{m_id},{t}]"
-            )
+            ))
             for j in inst.jobs
             for m_id in inst.F[j.id]
             for t in inst.T[j.id, m_id]
-        }
+        )
 
         # w[m,t] ∈ Z≥0 — occupied instances during [t, t+1)
         w = {
@@ -294,15 +405,10 @@ class OccupancyFormulation(Formulation):
                 ub = max(0, base_ub - rj_occ)
                 mdl.addConstr(w[mid, t] <= ub, name=f"wbound[{mid},{t}]")
 
-        # Budget
-        mdl.addConstr(
-            gp.quicksum(
-                inst.c[j.id, m_id] * x[j.id, m_id, t]
-                for j in inst.jobs
-                for m_id in inst.F[j.id]
-                for t in inst.T[j.id, m_id]
-            ) <= inst.budget,
-            name="budget",
-        )
+        # Fixed usage costs: z[m] linked to x (no-op without fixed costs)
+        add_fixed_cost_vars(mdl, inst, x)
+
+        # Budget (includes fixed usage costs)
+        mdl.addConstr(self.f2_expr(inst, x) <= inst.budget, name="budget")
 
         return mdl, {"x": x, "w": w}

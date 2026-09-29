@@ -89,6 +89,16 @@ def build_parser() -> argparse.ArgumentParser:
                          "  spacetime  — space-time network with flow conservation\n"
                          "  occupancy  — occupancy-equality formulation\n"
                      ))
+    mip.add_argument("--engine", default="gurobi",
+                     choices=["gurobi", "bpc"],
+                     help=(
+                         "Solve engine for pareto-true (default: gurobi):\n"
+                         "  gurobi — compact MIP, solved directly with Gurobi\n"
+                         "  bpc    — exact branch-price-and-cut (fedhpc.bpc), Ryan-Foster\n"
+                         "           branching; no Gurobi B&B involved past small per-box LPs.\n"
+                         "           Only pareto-true supports this so far; --formulation is\n"
+                         "           ignored under it.\n"
+                     ))
     mip.add_argument("--alpha", type=float, default=0.5,
                      help="Weight for f1 in [0, 1] (used by 'weighted' and 'pareto-ws'). Default: 0.5.")
     mip.add_argument("--epsilon", type=float, default=None,
@@ -195,6 +205,11 @@ def main(argv: list[str] | None = None) -> None:
 
     # ── MIP methods — need Gurobi ─────────────────────────────────────────────
 
+    if args.engine == "bpc" and method != "pareto-true":
+        print(f"Error: --engine bpc is only supported for pareto-true (got method={method!r}).",
+              file=sys.stderr)
+        sys.exit(1)
+
     formulation = _FORMULATIONS[args.formulation]()
     configure_env(verbose=args.verbose)
 
@@ -249,7 +264,8 @@ def main(argv: list[str] | None = None) -> None:
         solutions = true_pareto_frontier(
             inst, formulation=formulation, verbose=args.verbose,
             max_solves=args.max_solves, time_budget=args.pareto_time_budget,
-            **gurobi_params
+            engine=args.engine,
+            **({} if args.engine == "bpc" else gurobi_params)
         )
         _print_pareto(solutions, inst, args.json, method=method)
         _save_pareto_outputs(solutions, inst, out_dir, stem=method)

@@ -1,0 +1,607 @@
+% !TeX program = xelatex
+%
+% The Memetic Weighted-Sum Solver — FED-HPC
+% A Metropolis-themed Beamer deck describing the memetic metaheuristic that
+% minimises the weighted-sum scalarisation of the FED-HPC bi-objective
+% scheduling problem (src/fedhpc/_ext/weighted.hpp).
+%
+% Compile with:  latexmk -xelatex memetic_weighted_sum_solver.tex
+% (or)           xelatex memetic_weighted_sum_solver.tex   (run twice)
+
+\documentclass[aspectratio=169,t]{beamer}
+
+% ---------------------------------------------------------------- theme ----
+\usetheme[progressbar=frametitle,numbering=fraction,block=fill]{metropolis}
+\metroset{sectionpage=progressbar}
+
+% ----------------------------------------------------------------- fonts ---
+\usepackage{fontspec}
+\setmonofont{Liberation Mono}[Scale=0.88]   % Fira Mono is unavailable here
+\setbeamerfont{normal text}{size=\small}    % 18 content-dense slides at 16:9
+
+% --------------------------------------------------------------- packages --
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{amsmath,amssymb}
+\usepackage{siunitx}
+\usepackage{algpseudocode}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage{adjustbox}
+\usepackage{xspace}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\g}{\ensuremath{g}\xspace}
+
+\title{The Memetic Weighted-Sum Solver}
+\subtitle{A memetic metaheuristic for the weighted-sum scalarisation of the FED-HPC bi-objective scheduling problem}
+\author{Bernardo Gallo Victorino dos Santos}
+\institute{FED-HPC --- Multi-objective scheduling for federated HPC platforms}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{frame}{Agenda}
+  \tableofcontents
+\end{frame}
+
+% =====================================================================
+\section{The scalarised problem}
+% =====================================================================
+
+\begin{frame}{Two objectives, one scalar}
+  \begin{itemize}
+    \item FED-HPC schedules jobs onto resource \alert{types} (on-prem pools, cloud
+      instance classes) at \alert{start times}, trading off two objectives:
+    \begin{itemize}
+      \item $f_1$ --- total turnaround: $\sum_j (\text{completion}_j - \text{arrival}_j)$
+      \item $f_2$ --- monetary cost: $\sum_j c_{j,m}$
+    \end{itemize}
+    \item The weighted-sum method collapses these into a single scalar,
+      normalised by three reference points (fedhpc.pdf, eq.~34/38):
+  \end{itemize}
+  \begin{block}{Reference-point weighted sum}
+    \[
+      \min_x \;\; \frac{\lambda}{f_1^{0} - f_1^{T}}\, f_1(x)
+                \;+\; \frac{1-\lambda}{f_2^{T}}\, f_2(x)
+      \qquad \text{s.t.} \quad f_1(x) \le f_1^{0}
+    \]
+  \end{block}
+  \begin{itemize}
+    \item $f_1^{T}$: lexicographic minimum turnaround \quad
+          $f_2^{T}$: minimum cost at that turnaround \quad
+          $f_1^{0}$: minimum turnaround at zero cost
+    \item $\lambda \in [0,1]$ is the trade-off knob; $\lambda{=}1$ is pure turnaround
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{The metaheuristic's fitness}
+  \begin{itemize}
+    \item The wrapper converts $\lambda$ into internal weights
+      $w_1 = \lambda/(f_1^{0}{-}f_1^{T})$, $w_2 = (1{-}\lambda)/f_2^{T}$, and a soft
+      cap $f_1^{\text{cap}} = f_1^{0}$.
+    \item The solver then minimises a \alert{penalised scalar fitness} \g:
+  \end{itemize}
+  \begin{block}{$G(x)$ --- \code{struct WeightedScalar}}
+    \[
+      G(x) = w_1 f_1(x) + w_2 f_2(x)
+             + p_{\text{cap}} \big(f_1(x) - f_1^{\text{cap}}\big)^{+}
+             + \big[10^{9} + 10^{6}\,cv(x)\big]\cdot \mathbb{1}\{cv(x) > 0\}
+    \]
+  \end{block}
+  \begin{itemize}
+    \item $p_{\text{cap}} = 10^{3}\max(w_1, w_2)$ --- soft Pareto-region penalty
+    \item $cv(x)$ --- aggregate capacity / budget violation
+    \item Feasibility is lexicographically dominant, but infeasible individuals
+      stay \emph{ordered} by violation --- selection always has a gradient
+  \end{itemize}
+\end{frame}
+
+% =====================================================================
+\section{Representation}
+% =====================================================================
+
+\begin{frame}{An indirect encoding}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.56\textwidth}
+      \begin{itemize}
+        \item Genotype: one integer gene per job, indexing into that job's
+          feasible \code{(type, start)} slot list
+        \item \alert{Structural fact --- the problem almost separates:}
+        \begin{itemize}
+          \item $f_2$ depends on the \textbf{type vector alone}
+          \item for a fixed type vector, $f_1$ is minimised by scheduling
+            every job as early as capacity allows --- a capacity-constrained
+            parallel-machine list-scheduling problem
+        \end{itemize}
+        \item So the genotype is treated as an \textbf{indirect encoding}:
+          search over ``one type per job'', \textbf{decode} (don't search)
+          the start times
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.40\textwidth}
+      \begin{tikzpicture}[
+          gene/.style={draw=mDarkTeal, fill=mDarkTeal!8, minimum width=7mm,
+                       minimum height=7mm, font=\scriptsize},
+          slot/.style={draw=mLightBrown, thick, fill=mLightBrown!10,
+                       rounded corners=1pt, font=\scriptsize, align=center,
+                       minimum width=2.6cm, minimum height=1.05cm}
+        ]
+        \foreach \i/\lab in {0/1,1/2,2/{\dots},3/j,4/{\dots},5/n} {
+          \node[gene] (g\i) at (\i*0.85, 2.1) {$\lab$};
+        }
+        \node[font=\tiny, above=1mm of g0, anchor=south west, xshift=-1mm]
+          {genotype $x$};
+        \node[slot, below=9mm of g3] (dec) {%
+          decoded: \\ $(\text{type}_j,\ \text{start}_j)$};
+        \draw[-{Stealth[length=2mm]}, mLightBrown, thick]
+          (g3.south) -- (dec.north);
+      \end{tikzpicture}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% =====================================================================
+\section{The decoder}
+% =====================================================================
+
+\begin{frame}{\code{schedule\_repair} --- SPT list scheduling}
+  \begin{itemize}
+    \item Jobs are sorted \alert{shortest-processing-time first} (ties by
+      current start) and each is moved to the \textbf{earliest capacity-feasible}
+      slot on its current type
+    \item \code{job\_slots[j]} is start-sorted within a type, so the first
+      feasible slot found is the earliest --- $f_1$ is non-increasing,
+      capacity violations only shrink, cost is invariant
+    \item \textbf{Free-pool balancing} (default on): widen the scan to every
+      type that \emph{weakly dominates} the current one (cost~$\le$ and
+      $p_{\text{occ}}\le$) --- spreads load across equally priced pools instead
+      of queueing everyone on the one the gene names
+  \end{itemize}
+  \begin{alertblock}{Why SPT alone is not enough}
+    SPT is optimal for $P\,\|\,\sum C_j$ (parallel machines, \emph{no} release
+    dates) but carries \textbf{no guarantee} once jobs arrive over time --- and
+    under heavy capacity contention that gap becomes real (next slides).
+  \end{alertblock}
+\end{frame}
+
+\begin{frame}{\code{local\_search} --- congestion repair \& polish}
+  \begin{itemize}
+    \item Bounded coordinate descent, restricted to a per-job, per-type
+      candidate shortlist (\code{job\_candidates}: nearest few slots per type,
+      plus geometrically spaced positions across the horizon)
+    \item For each job:
+    \begin{itemize}
+      \item a candidate that \textbf{strictly reduces} the job's marginal
+        capacity violation is taken unconditionally --- repair always wins
+      \item among candidates tied on violation, only a \textbf{weakly
+        Pareto-dominating} one is taken --- never regresses either objective
+    \end{itemize}
+    \item Together with \code{schedule\_repair} this realises the
+      decomposition: the repair relocates whole congested populations of jobs
+      across the horizon in one sweep; local search mops up residual
+      congestion and descends flat iso-$f_1$ plateaux
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Extract-from-Preempt re-decode \hfill{\small\code{decode\_order=1}}}
+  \begin{itemize}
+    \item Fix the type vector: the start-time subproblem is
+      $P \mid r_j \mid \sum C_j$ --- strongly NP-hard; SPT has no guarantee
+      once jobs carry release dates
+    \item \textbf{\code{srpt\_completion\_order}}: simulate the optimal
+      \emph{preemptive} per-type schedule (SRPT --- always run the cap-many
+      released jobs of least remaining work); record completion times
+    \item \textbf{Re-decode}: reset genes to their latest feasible slot, then
+      list-schedule in ascending preemptive-completion order --- the
+      \alert{Extract-from-Preempt} 2-approximation (Phillips, Stein \& Wein, 1998)
+    \item Keep the lower-$f_1$ of \{SPT, SRPT\} --- $f_2$ untouched, \g monotone
+  \end{itemize}
+  \begin{block}{Now the default}
+    Promoted by an A/B: neutral without congestion, 1--5~pp lower gap to the
+    proven front under heavy contention, seed-stable, $\sim\!1.5\times$ time.
+  \end{block}
+\end{frame}
+
+\begin{frame}{Why the release-aware order wins}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.42\textwidth}
+      \small
+      \textbf{Toy instance} --- one pool, capacity~1:
+      \begin{center}
+        \begin{tabular}{lcc}
+          \toprule
+          job & arrival $r_j$ & $p_j$ \\
+          \midrule
+          A & 0 & 2 \\
+          B & 0 & 3 \\
+          C & 1 & 1 \\
+          \bottomrule
+        \end{tabular}
+      \end{center}
+      \vspace{1mm}
+      SPT orders purely by $p_j$: \code{(C,A,B)} --- C's late release forces an
+      idle gap that pushes A, then B, later.
+      \vspace{1mm}
+
+      SRPT-completion order: \code{(A,C,B)} --- A runs while nothing else is
+      ready; C slots in when it arrives; B, the largest, goes last.
+    \end{column}
+    \begin{column}{0.58\textwidth}
+      \begin{tikzpicture}[
+          x=0.85cm, y=1cm,
+          jobA/.style={fill=mDarkTeal, draw=mDarkTeal!70!black},
+          jobB/.style={fill=black!35, draw=black!55},
+          jobC/.style={fill=mLightBrown, draw=mLightBrown!70!black},
+          lab/.style={font=\tiny\bfseries, white, align=center}
+        ]
+        % --- SPT order: C[1,2) A[2,4) B[4,7)  sum f1 = 1+4+7 = 12
+        \node[anchor=west, font=\small\bfseries] at (-0.3,2.6) {SPT order};
+        \node[anchor=west, font=\small] at (5.6,2.6) {$\sum f_1 = 12$};
+        \draw[-{Stealth[length=1.8mm]}] (0,2) -- (7.3,2) node[below left,font=\tiny]{$t$};
+        \foreach \t in {0,...,7} \draw (\t,1.95) -- (\t,2.05) node[above,font=\tiny]{\t};
+        \draw[jobC] (1,1.5) rectangle (2,1.9) node[midway,lab]{C};
+        \draw[jobA] (2,1.5) rectangle (4,1.9) node[midway,lab]{A};
+        \draw[jobB] (4,1.5) rectangle (7,1.9) node[midway,lab]{B};
+        \draw[dashed,mLightBrown] (1,1.4) -- (1,2.05);
+        % --- EFP order: A[0,2) C[2,3) B[3,6) sum f1 = 2+2+6 = 10
+        \node[anchor=west, font=\small\bfseries] at (-0.3,0.6) {Extract-from-Preempt};
+        \node[anchor=west, font=\small] at (5.6,0.6)
+          {$\sum f_1 = 10$ \textcolor{mLightBrown}{\textbf{($-18\%$)}}};
+        \draw[-{Stealth[length=1.8mm]}] (0,0) -- (7.3,0) node[below left,font=\tiny]{$t$};
+        \foreach \t in {0,...,7} \draw (\t,-0.05) -- (\t,0.05) node[above,font=\tiny]{\t};
+        \draw[jobA] (0,-0.5) rectangle (2,-0.1) node[midway,lab]{A};
+        \draw[jobC] (2,-0.5) rectangle (3,-0.1) node[midway,lab]{C};
+        \draw[jobB] (3,-0.5) rectangle (6,-0.1) node[midway,lab]{B};
+        \draw[dashed,mLightBrown] (1,-0.6) -- (1,0.05);
+      \end{tikzpicture}
+      \vspace{1mm}
+      \small the dashed line marks C's release time.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% =====================================================================
+\section{Embedded local search}
+% =====================================================================
+
+\begin{frame}{\code{weighted\_local\_search} --- the memetic core}
+  \begin{itemize}
+    \item A \alert{steepest-descent hill climb} over single job$\to$type
+      reassignments, each decoded exactly --- the objective is scalar, so
+      there is one improving direction and the search genuinely reaches a
+      local optimum of \g
+    \item Candidate moves are ranked by an $O(1)$ estimate before the
+      expensive exact decode:
+  \end{itemize}
+  \[
+    \widehat{\Delta g} = w_1\big(p'_{\text{occ}} - p_{\text{occ}}\big)
+                        + w_2\big(\text{cost}' - \text{cost}\big)
+  \]
+  \begin{itemize}
+    \item $\Delta f_2$ exact; $\Delta f_1$ approximated by $\Delta p_{\text{occ}}$
+      at the target type's earliest slot
+    \item Only the \code{shortlist} most promising moves are decoded exactly;
+      the true best is committed --- \textbf{Lamarckian}: improvements are
+      written back into the genotype
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{\code{weighted\_local\_search} --- procedure}
+  \footnotesize
+  \begin{algorithmic}[1]
+    \Procedure{WeightedLocalSearch}{$x$, \texttt{maxMoves}, \texttt{shortlist}}
+      \State $x \leftarrow$ \Call{ScheduleRepair}{$x$}; \Call{Evaluate}{$x$}; $\;g \leftarrow G(x)$
+      \For{$mv = 1 \ldots \texttt{maxMoves}$}
+        \State candidates $\leftarrow$ every job$\to$type flip with $\widehat{\Delta g} < 0$
+        \State keep the \texttt{shortlist} candidates of least $\widehat{\Delta g}$
+        \ForAll{kept candidate $c$}
+          \State decode $c$ exactly: \Call{ScheduleRepair}{}, \Call{LocalSearch}{}, \Call{Evaluate}{}
+        \EndFor
+        \If{best decoded $G < g$}
+          \State $x \leftarrow$ best decoded; $g \leftarrow G(x)$
+        \Else\ \textbf{break}
+        \EndIf
+      \EndFor
+      \State \Return $x$
+    \EndProcedure
+  \end{algorithmic}
+\end{frame}
+
+% =====================================================================
+\section{Population \& evolution}
+% =====================================================================
+
+\begin{frame}{Initialisation --- structured seeds}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.5\textwidth}
+      \small
+      \textbf{Structured} (\code{make\_seeds}):
+      \begin{itemize}
+        \item greedy min-turnaround / min-cost
+        \item as-soon-as-possible
+        \item cloud-burst
+        \item fixed-delay 25\% / 50\%
+        \item index-staggered
+        \item capacity-aware first-fit list schedule
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+      \small
+      \textbf{Randomised remainder} (\code{make\_random}):
+      \begin{itemize}
+        \item each gene drawn from a cost/risk-biased distribution over the
+          job's slots
+        \item cheaper, lower-risk slots weighted higher (worst slot keeps
+          20\% of the best slot's weight)
+        \item degenerates to uniform when there is no cost signal
+      \end{itemize}
+    \end{column}
+  \end{columns}
+  \vspace{1.5mm}
+  \begin{alertblock}{Every seed is refined}
+    Each individual is run through \code{weighted\_local\_search} before
+    evolution begins --- the initial population is a population of local optima.
+  \end{alertblock}
+\end{frame}
+
+\begin{frame}{The generational loop --- skeleton}
+  \footnotesize
+  \begin{algorithmic}[1]
+    \State $\text{pop} \gets$ heuristic seeds $\cup$ weighted-random; refine each with \Call{WeightedLocalSearch}{}
+    \State $\text{incumbent} \gets \arg\min_x G(x)$;\quad $\text{stagn} \gets 0$
+    \For{$\text{gen} = 1 \ldots$ \texttt{n\_gen}}
+      \State $\text{offspring}[0] \gets \text{incumbent}$ \Comment{elitism}
+      \State $a,b \gets$ \Call{Tournament}{pop}, \Call{Tournament}{pop} \Comment{$\forall k$, parallel}
+      \State $c \gets$ \Call{MSXF}{$a,b,G$};\ \Call{Mutate}{$c$};\ \Call{WeightedLocalSearch}{$c$}
+      \State $\text{offspring}[k] \gets c$;\quad $\text{pop} \gets \text{offspring}$
+      \If{improved}
+        \State update incumbent; $\text{stagn}\gets 0$
+      \Else
+        \State $\text{stagn}\gets\text{stagn}+1$
+      \EndIf
+      \If{$\text{stagn} \ge$ \texttt{restart\_patience}}
+        \State \Call{ILSKick}{}
+      \EndIf
+    \EndFor
+    \State \Return \Call{WeightedLocalSearch}{incumbent, $3\times$ budget} \Comment{final polish}
+  \end{algorithmic}
+\end{frame}
+
+\begin{frame}{The generational loop --- pipeline}
+  \begin{center}
+  \adjustbox{max width=\textwidth, max totalheight=6.2cm}{%
+  \begin{tikzpicture}[
+      box/.style={draw=mDarkTeal, fill=mDarkTeal!8, rounded corners=1.5pt,
+                  minimum height=9mm, text width=1.7cm, align=center,
+                  inner sep=1mm, font=\tiny},
+      kick/.style={draw=mLightBrown, thick, dashed, fill=mLightBrown!10,
+                   rounded corners=1.5pt, minimum height=9mm, text width=2.1cm,
+                   align=center, inner sep=1mm, font=\tiny},
+      arr/.style={-{Stealth[length=2mm]}, thick, mDarkTeal},
+      karr/.style={-{Stealth[length=2mm]}, thick, mLightBrown, dashed},
+      lab/.style={font=\tiny, mDarkTeal}
+    ]
+    \node[box] (init) {Initialise\\seeds + random};
+    \node[box, right=2.5mm of init] (sel) {Tournament select};
+    \node[box, right=2.5mm of sel]  (msxf) {MSXF recombine};
+    \node[box, right=2.5mm of msxf] (mut) {Mutate};
+    \node[box, right=2.5mm of mut]  (ls) {Local search};
+    \node[box, right=2.5mm of ls]   (rep) {Replace pop.\\update best};
+    \node[kick, right=13mm of rep] (kick) {ILS kick: perturb, re-optimise, inject};
+
+    \draw[arr] (init) -- (sel);
+    \draw[arr] (sel) -- (msxf);
+    \draw[arr] (msxf) -- (mut);
+    \draw[arr] (mut) -- (ls);
+    \draw[arr] (ls) -- (rep);
+
+    \draw[arr] (rep.north) -- ++(0,7mm) -| (sel.north);
+    \node[lab, above=9mm of msxf] {repeat for \texttt{n\_gen} generations};
+
+    \draw[karr] (rep.east) -- (kick.west) node[midway, above, font=\tiny] {stagnation};
+    \draw[karr] (kick.north) -- ++(0,1.3) -| (msxf.north);
+
+    \node[box, below=11mm of rep] (fin) {Final intensify $3\times$};
+    \node[box, right=2.5mm of fin, draw=mDarkTeal, ultra thick] (ret) {Return $(f_1,f_2)$};
+    \draw[arr] (rep.south) -- (fin.north)
+      node[midway, right, font=\tiny, text width=1.5cm] {after n\_gen};
+    \draw[arr] (fin) -- (ret);
+  \end{tikzpicture}%
+  }
+  \end{center}
+\end{frame}
+
+\begin{frame}{Recombination --- Multi-Step Crossover Fusion}
+  \begin{itemize}
+    \item \alert{MSXF} (Yamada \& Nakano) is a short, guided walk through
+      type-assignment space \emph{from} parent $b$ \emph{toward} parent $a$,
+      not an index-level crossover
+    \item Each of up to \code{steps} iterations:
+    \begin{enumerate}
+      \item sample (up to 12) genes where the parents still differ
+      \item adopt --- after an SPT decode --- the single gene of $a$ that
+        most reduces $G$
+      \item record the best point met along the path
+    \end{enumerate}
+    \item A short local search \emph{between} the parents: never shreds a
+      coherent building block the way index crossover can
+    \item \code{xover\_mode}: 0 = two-point, 1 = none (pure multi-start ILS),
+      \textbf{2 = MSXF (default)}
+  \end{itemize}
+  \begin{alertblock}{A/B on the two 10-min instances}
+    gap to the Gurobi optimum \; $+2.0\%\!\to\!+0.3\%$ \; / \; $+3.9\%\!\to\!+3.5\%$
+    \; vs.\ plain two-point crossover.
+  \end{alertblock}
+\end{frame}
+
+\begin{frame}{Mutation}
+  \begin{itemize}
+    \item \textbf{Default (\code{mut\_mode=0}):} uniform resample --- each gene,
+      independently with probability $p_{\text{mut}} = 2/n_{\text{jobs}}$, drawn
+      uniformly from the job's slots
+    \item \textbf{Scalar-directed reinsert (\code{mut\_mode=1},} Feltl \& Raidl
+      style\textbf{):} reinsert on a strictly \emph{cheaper} type with
+      probability $w_2/(w_1{+}w_2)$, otherwise a strictly \emph{faster} type ---
+      biasing perturbation toward whichever objective the current
+      $\lambda$-subproblem weights more heavily
+    \item Roughly neutral once MSXF + local search carry most of the search;
+      default stays at uniform resample
+  \end{itemize}
+\end{frame}
+
+% =====================================================================
+\section{Diversification}
+% =====================================================================
+
+\begin{frame}{ILS perturbation kicks}
+  \begin{itemize}
+    \item A stagnation counter tracks consecutive generations without an
+      improving incumbent
+    \item On reaching \code{restart\_patience} (default \textbf{6}):
+    \begin{enumerate}
+      \item perturb the incumbent with $\max(3, n_{\text{jobs}}/40)$ random
+        single-job type reassignments
+      \item drive it back to local optimality with a full-budget
+        \code{weighted\_local\_search}
+      \item inject it in place of the population's weakest member; adopt as
+        incumbent if it improves $G$
+      \item reset the stagnation counter
+    \end{enumerate}
+    \item The canonical \alert{perturb $\to$ local-search $\to$ accept} cycle
+      of iterated local search, applied to the elite solution while the
+      population keeps supplying recombinative diversity
+    \item \code{restart\_patience = 0} disables the mechanism
+  \end{itemize}
+\end{frame}
+
+% =====================================================================
+\section{Configuration}
+% =====================================================================
+
+\begin{frame}{Parameters \& defaults}
+  \begin{center}
+  \renewcommand{\arraystretch}{0.85}
+  \footnotesize
+  \begin{tabular}{lp{6.6cm}r}
+    \toprule
+    \textbf{parameter} & \textbf{meaning} & \textbf{default} \\
+    \midrule
+    \code{pop\_size}         & population size                                   & 32 \\
+    \code{n\_gen}            & generations                                       & 60 \\
+    \code{ls\_moves}         & max.\ improving type-flips per LS call ($\times 3$ final) & 8 \\
+    \code{shortlist}         & candidates decoded exactly per LS step            & 24 \\
+    \code{restart\_patience} & non-improving gens.\ before an ILS kick           & 6 \\
+    \code{xover\_mode}       & recombination operator                            & 2 (MSXF) \\
+    \code{decode\_order}     & 0 = SPT only, 1 = + Extract-from-Preempt          & \textbf{1} \\
+    $p_{\text{mut}}$         & per-gene mutation probability                     & $2/n_{\text{jobs}}$ \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+  \vspace{1mm}
+  \scriptsize Deterministic --- bit-for-bit stable for a fixed \code{(seed,
+  n\_threads)}: per-thread RNGs are seeded from the master RNG before every
+  parallel region.
+\end{frame}
+
+\begin{frame}{What kind of algorithm is this?}
+  \begin{center}
+  \small
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    \textbf{layer} & \textbf{role} & \textbf{technique} \\
+    \midrule
+    Encoding      & search-space reduction         & type-vector genotype + SPT/SRPT decoder \\
+    Local search  & intensification                & steepest-descent type-flip hill climb \\
+    Population    & recombinative diversification  & elitist GA, tournament, MSXF \\
+    ILS kicks     & escaping local optima          & perturb + local search + elitist accept \\
+    Constraints   & feasibility                    & static lexicographic exterior penalty \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+  \vspace{2mm}
+  \begin{alertblock}{A memetic algorithm with an indirect encoding}
+    The expensive combinatorial work (start-time scheduling under capacity)
+    is delegated to a polynomial decoder; evolution and local search operate
+    on the much smaller type-assignment space, and recombination is itself a
+    guided local search between elite solutions.
+  \end{alertblock}
+\end{frame}
+
+% =====================================================================
+\section{Empirical validation}
+% =====================================================================
+
+\begin{frame}{Why \code{decode\_order=1} is now the default}
+  \begin{center}
+  \begin{tikzpicture}
+    \begin{axis}[
+        width=11cm, height=5.4cm,
+        ybar, bar width=10pt, ymin=0, ymax=9,
+        symbolic x coords={$\lambda{=}0.25$,$\lambda{=}0.50$,$\lambda{=}0.75$},
+        xtick=data, tick align=inside,
+        ylabel={gap to proven front (\%)}, ylabel style={font=\scriptsize},
+        tick label style={font=\scriptsize},
+        legend style={font=\scriptsize, at={(0.5,1.12)}, anchor=south,
+                      legend columns=-1, draw=none},
+        enlarge x limits=0.28,
+        nodes near coords, nodes near coords style={font=\tiny},
+        axis lines*=left, axis line style={mDarkTeal},
+        every axis plot/.append style={draw=none},
+      ]
+      \addplot[fill=black!35]   coordinates {($\lambda{=}0.25$,2.8) ($\lambda{=}0.50$,4.1) ($\lambda{=}0.75$,1.6)};
+      \addplot[fill=mLightBrown] coordinates {($\lambda{=}0.25$,1.5) ($\lambda{=}0.50$,3.5) ($\lambda{=}0.75$,1.6)};
+      \legend{SPT decode only (old default), + Extract-from-Preempt (new default)}
+    \end{axis}
+  \end{tikzpicture}
+  \end{center}
+  \small pos\_congestion instance (3340 jobs), seeds 1 \& 7, gap of \g to the
+  best proven Pareto point. The re-decode is seed-stable --- base swings
+  \SIrange{2.8}{6.7}{\percent} across seeds at $\lambda{=}0.25$; the re-decode
+  holds at \SI{1.5}{\percent} on every seed.
+\end{frame}
+
+% =====================================================================
+\section{Summary}
+% =====================================================================
+
+\begin{frame}{Summary}
+  \begin{itemize}
+    \item An \alert{indirect-encoding memetic algorithm}: search the
+      type-assignment space, \textbf{decode} start times with a
+      capacity-aware list scheduler
+    \item \textbf{Two decoders}, cheaper kept: SPT (fast, near-optimal
+      without contention) and \textbf{Extract-from-Preempt} (release-date
+      aware, now default)
+    \item \textbf{Local search} does the intensification (Lamarckian
+      type-flip hill climbing); \textbf{MSXF} recombination is itself a
+      guided search between parents; \textbf{ILS kicks} escape stagnation
+    \item Deterministic, parallel, and validated against the exact Gurobi
+      MIP and an ablation of every component
+  \end{itemize}
+  \vspace{2mm}
+  \begin{block}{Source}
+    \code{src/fedhpc/\_ext/\{ga\_common,weighted\}.hpp} $\cdot$ binding
+    \code{moea.cpp} $\cdot$ wrapper \code{fedhpc/moea.py} $\cdot$ exact
+    counterpart \code{model.solve\_weighted\_sum}
+  \end{block}
+\end{frame}
+
+\begin{frame}{References}
+  \small
+  \begin{itemize}
+    \item Yamada, T. \& Nakano, R. --- Multi-Step Crossover Fusion
+    \item Feltl, H. \& Raidl, G.\,R. --- release-and-reinsert mutation
+    \item Phillips, C., Stein, C. \& Wein, J. (1998) --- Extract-from-Preempt,
+      a 2-approximation for $P \mid r_j \mid \sum C_j$
+    \item Chekuri, C., Motwani, R., Natarajan, B.\ \& Stein, C.\ (2001) ---
+      $(3{-}1/m)$-competitive scheduling on $m$ machines
+    \item Deb, K.\ (2002) --- constrained-dominance ranking
+  \end{itemize}
+\end{frame}
+
+\end{document}

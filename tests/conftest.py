@@ -12,6 +12,35 @@ def chdir_to_project_root(monkeypatch):
     monkeypatch.chdir(root)
 
 
+@pytest.fixture
+def weighted_fixed_cost_inst() -> Instance:
+    """3 jobs x 2 types, with job weights != 1 and a fixed activation cost on
+    the cloud type — exercises both formulation extras beyond MOFE §3 that
+    data.py/formulations.py add (Job.weight and InstanceType.fixed_cost /
+    add_fixed_cost_vars), which none of the tiny_*/known_pareto_inst
+    instances set. Used by tests/test_bpc.py and tests/test_bpc_branch.py.
+    """
+    inst = Instance(
+        jobs=[
+            Job(id=0, arrival=0, exec_time=6, io_volume=0, cpu=2, mem=4, stor=20, weight=1.0),
+            Job(id=1, arrival=0, exec_time=6, io_volume=0, cpu=2, mem=4, stor=20, weight=3.0),
+            Job(id=2, arrival=2, exec_time=4, io_volume=0, cpu=2, mem=4, stor=20, weight=2.0),
+        ],
+        instance_types=[
+            InstanceType(id=0, kind="on-prem", perf=1.0, io_time=0.0, deploy=0,
+                         cost_io=0.0, cost_vm=0.0, cost_stor=0.0,
+                         cpu=4, mem=8, stor=50, capacity=1),
+            InstanceType(id=1, kind="cloud", perf=1.0, io_time=0.0, deploy=0,
+                         cost_io=0.0, cost_vm=2.0, cost_stor=0.0,
+                         cpu=4, mem=8, stor=50, capacity=None, fixed_cost=15.0),
+        ],
+        horizon=25,
+        budget=1000,
+    )
+    inst.build()
+    return inst
+
+
 # ---------------------------------------------------------------------------
 # Known-answer fixture: 2 jobs × 2 types, exact 3-point Pareto front.
 #

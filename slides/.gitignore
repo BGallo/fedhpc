@@ -1,0 +1,12 @@
+# LaTeX / xelatex build artifacts (memetic_weighted_sum_solver.pdf is
+# git-ignored globally too; keep only the .tex source under version control)
+*.aux
+*.log
+*.nav
+*.out
+*.snm
+*.toc
+*.vrb
+*.fls
+*.fdb_latexmk
+*.synctex.gz

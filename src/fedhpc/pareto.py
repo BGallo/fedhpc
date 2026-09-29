@@ -86,17 +86,20 @@ def _make_lexmin_bounded(
             if mdl.Status == GRB.OPTIMAL:
                 return
 
+    _expr_of = {"f1": lambda x: fmt.f1_expr(inst, x), "f2": lambda x: fmt.f2_expr(inst, x)}
+
     def lexmin_bounded(
-        primary_expr_fn, secondary_expr_fn,
-        bound_expr_fn=None, bound_value: float | None = None,
+        primary: str, secondary: str,
+        bound: str | None = None, bound_value: float | None = None,
         *, start: Solution | None = None,
     ) -> Solution:
-        """Lex-min(primary, secondary) on a fresh model, s.t. bound_expr <= bound_value.
+        """Lex-min(primary, secondary) on a fresh model, s.t. bound <= bound_value.
 
-        primary_expr_fn/secondary_expr_fn/bound_expr_fn each take the fresh
-        model's own x and return the relevant expression — they can't be
-        precomputed outside since every call gets a brand-new model.
-        bound_expr_fn=None skips the bounding constraint entirely (used for
+        primary/secondary/bound are ``"f1"``/``"f2"`` — not callables taking
+        the model's own ``x``, so the same string protocol works whichever
+        engine built this closure (the BPC engine has no compact-model ``x``
+        to call a callable on; see ``bpc.make_bpc_lexmin_bounded``).
+        bound=None skips the bounding constraint entirely (used for
         unconstrained anchor solves).
 
         The returned Solution's ``.status`` is ``"optimal"`` only if *both*
@@ -111,11 +114,11 @@ def _make_lexmin_bounded(
             mdl.setParam("TimeLimit", per_solve_time_limit)
 
         x = vars_["x"]
-        primary_expr = primary_expr_fn(x)
-        secondary_expr = secondary_expr_fn(x)
+        primary_expr = _expr_of[primary](x)
+        secondary_expr = _expr_of[secondary](x)
 
-        if bound_expr_fn is not None:
-            mdl.addConstr(bound_expr_fn(x) <= bound_value, name="box_bound")
+        if bound is not None:
+            mdl.addConstr(_expr_of[bound](x) <= bound_value, name="box_bound")
         if start is not None:
             set_mip_start(inst, x, start)
         mdl.setObjective(primary_expr, GRB.MINIMIZE)
@@ -138,6 +141,39 @@ def _make_lexmin_bounded(
                         solve_time=_time.perf_counter() - t1)
 
     return lexmin_bounded, counters
+
+
+def _make_engine_lexmin_bounded(
+    inst: Instance,
+    formulation: Formulation | None,
+    params: dict,
+    eps: float,
+    per_solve_time_limit: float | None,
+    n_seed_retries: int,
+    engine: str,
+):
+    """Dispatch to the requested solve engine's ``lexmin_bounded`` factory.
+
+    Both engines' closures share the exact same call contract (primary/
+    secondary/bound as ``"f1"``/``"f2"`` strings — see ``_make_lexmin_bounded``
+    and ``bpc.make_bpc_lexmin_bounded``), so ``true_pareto_frontier``/
+    ``map_pareto_frontier``'s box-search logic needs zero engine-awareness
+    beyond this one dispatch point.
+
+    ``engine="bpc"`` ignores ``formulation``/``per_solve_time_limit``/
+    ``n_seed_retries``/most of ``params`` (Gurobi-solve-specific knobs with
+    no BPC equivalent yet) and instead runs the exact branch-and-price
+    engine in ``fedhpc.bpc`` — see that module for its own known
+    limitations (no time-limited graceful degradation yet, and Ryan-Foster
+    branching not fixing every hard sub-problem).
+    """
+    if engine == "bpc":
+        from . import bpc
+        return bpc.make_bpc_lexmin_bounded(inst, eps=eps)
+    if engine != "gurobi":
+        raise ValueError(f"unknown engine {engine!r} (expected 'gurobi' or 'bpc')")
+    fmt = formulation or SpaceTimeFormulation()
+    return _make_lexmin_bounded(inst, fmt, params, eps, per_solve_time_limit, n_seed_retries)
 
 
 # ── Checkpointing (true_pareto_frontier / map_pareto_frontier) ────────────────
@@ -250,9 +286,19 @@ def true_pareto_frontier(
     per_solve_time_limit: float | None = None,
     n_seed_retries: int = 3,
     checkpoint_path: str | None = None,
+    engine: str = "gurobi",
     **params,
 ) -> list[Solution]:
     """Enumerate the complete true Pareto front via exact box (rectangle) splitting.
+
+    ``engine`` — ``"gurobi"`` (default, the compact ``SpaceTimeFormulation``
+    MIP) or ``"bpc"`` (the exact branch-and-price engine in ``fedhpc.bpc``).
+    Selecting ``"bpc"`` changes nothing about this function's algorithm —
+    see ``_make_engine_lexmin_bounded`` — only which engine resolves each
+    box's lex-min-bounded sub-solve. BPC currently has no equivalent of
+    ``per_solve_time_limit``/``n_seed_retries``-style graceful degradation
+    under a wall-clock cap (see ``bpc.make_bpc_lexmin_bounded``'s
+    docstring), and ``formulation`` is ignored under it.
 
     Standard exact algorithm for biobjective integer programs (Hamacher,
     Pedersen & Ruzika 2007; related to the "balanced box" method of Boland,
@@ -392,16 +438,15 @@ def true_pareto_frontier(
     # and this project's largest instances turned out to have very sparse
     # fronts (2-3 points — see hybrid_frontier's findings), so the total
     # rebuild cost stays a handful of builds, not thousands.
-    params = {"MIPGap": 1e-9, "IntFeasTol": 1e-9, **params}
+    if engine == "gurobi":
+        params = {"MIPGap": 1e-9, "IntFeasTol": 1e-9, **params}
     _EPS = 1e-4
 
-    fmt = formulation or SpaceTimeFormulation()
-    _lexmin_bounded, _counters = _make_lexmin_bounded(
-        inst, fmt, params, _EPS, per_solve_time_limit, n_seed_retries
+    _lexmin_bounded, _counters = _make_engine_lexmin_bounded(
+        inst, formulation, params, _EPS, per_solve_time_limit, n_seed_retries, engine
     )
 
-    f1_of = lambda x: fmt.f1_expr(inst, x)
-    f2_of = lambda x: fmt.f2_expr(inst, x)
+    f1_of, f2_of = "f1", "f2"
 
     n_boxes_closed = 0
     n_boxes_unresolved = 0
@@ -580,9 +625,14 @@ def map_pareto_frontier(
     per_solve_time_limit: float | None = None,
     n_seed_retries: int = 3,
     checkpoint_path: str | None = None,
+    engine: str = "gurobi",
     **params,
 ) -> list[Solution]:
     """Map the Pareto front by bisection — broad coverage fast, not exhaustive proof.
+
+    ``engine`` — see ``true_pareto_frontier``'s docstring; identical contract
+    here (``"gurobi"`` default or ``"bpc"``, dispatched via
+    ``_make_engine_lexmin_bounded``).
 
     ``true_pareto_frontier()`` always resolves a box by jumping straight to
     its known-boundary's global optimum, which is what makes it complete in
@@ -647,14 +697,12 @@ def map_pareto_frontier(
     search (no boxes left), it's returned immediately with no new solves.
     """
     _EPS = 1e-4
-    fmt = formulation or SpaceTimeFormulation()
-    solve_params = {"MIPGap": 1e-9, "IntFeasTol": 1e-9, **params}
-    lexmin_bounded, counters = _make_lexmin_bounded(
-        inst, fmt, solve_params, _EPS, per_solve_time_limit, n_seed_retries
+    solve_params = {"MIPGap": 1e-9, "IntFeasTol": 1e-9, **params} if engine == "gurobi" else params
+    lexmin_bounded, counters = _make_engine_lexmin_bounded(
+        inst, formulation, solve_params, _EPS, per_solve_time_limit, n_seed_retries, engine
     )
 
-    f1_of = lambda x: fmt.f1_expr(inst, x)
-    f2_of = lambda x: fmt.f2_expr(inst, x)
+    f1_of, f2_of = "f1", "f2"
 
     n_boxes_unresolved = 0
 
