@@ -1329,6 +1329,7 @@ class TestWeightedDecodeOptions:
     @pytest.mark.parametrize("kw", [
         dict(decode_order=0),
         dict(decode_order=1),
+        dict(decode_order=2),
         dict(fbi_passes=3),
         dict(decode_order=1, fbi_passes=3),
         dict(decode_order=0, fbi_passes=1),

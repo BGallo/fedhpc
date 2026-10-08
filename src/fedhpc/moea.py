@@ -101,9 +101,16 @@ def _job_slots(inst: Instance) -> list[list[tuple[int, int, int, float, float]]]
             p_occ = inst.p_occ[j.id, m_id]
             cost  = inst.c[j.id, m_id]
             for t in inst.T[j.id, m_id]:
-                job_slots.append((m_id, t, p_occ, float(j.weight * (t + p_occ - j.arrival)), cost))
+                job_slots.append((m_id, t, p_occ,
+                                  float(j.weight * (t + p_occ - j.arrival)), cost))
         slots.append(job_slots)
     return slots
+
+
+def _job_slots_ext(inst: Instance):
+    """C++ payload: public/tested five-tuples plus the decoder-only weight."""
+    return [[(*slot, float(j.weight)) for slot in slots]
+            for j, slots in zip(inst.jobs, _job_slots(inst), strict=True)]
 
 
 def _type_cap(inst: Instance) -> list[int]:
@@ -339,7 +346,7 @@ def nsga2_frontier(
     raw, prof = _ext.nsga2(
         n_jobs         = len(inst.jobs),
         budget         = inst.budget,
-        job_slots      = _job_slots(inst),
+        job_slots      = _job_slots_ext(inst),
         type_cap       = _type_cap(inst),
         type_risk      = _type_risk(inst),
         init_occ       = _init_occ(inst),
@@ -428,7 +435,7 @@ def nsga3_frontier(
     raw, prof = _ext.nsga3(
         n_jobs         = len(inst.jobs),
         budget         = inst.budget,
-        job_slots      = _job_slots(inst),
+        job_slots      = _job_slots_ext(inst),
         type_cap       = _type_cap(inst),
         type_risk      = _type_risk(inst),
         init_occ       = _init_occ(inst),
@@ -547,7 +554,7 @@ def moead_frontier(
     raw, prof = _ext.moead(
         n_jobs            = len(inst.jobs),
         budget            = inst.budget,
-        job_slots         = _job_slots(inst),
+        job_slots         = _job_slots_ext(inst),
         type_cap          = _type_cap(inst),
         type_risk         = _type_risk(inst),
         init_occ          = _init_occ(inst),
@@ -679,7 +686,7 @@ def _weighted_raw(
     return _ext.weighted(
         n_jobs          = len(inst.jobs),
         budget          = inst.budget,
-        job_slots       = _job_slots(inst),
+        job_slots       = _job_slots_ext(inst),
         type_cap        = _type_cap(inst),
         type_risk       = _type_risk(inst),
         init_occ        = _init_occ(inst),
@@ -795,7 +802,8 @@ def weighted_solve(
                        re-decode (preemptive-SRPT completion order — release-date
                        aware, the 2-approx order of Phillips-Stein-Wein) per
                        individual, keeping the lower f1; f2 is unchanged so g is
-                       monotone. 0 = SPT list-scheduling decoder only (the raw
+                       monotone. 2 tries a WSPT/Smith-rule re-decode, intended
+                       for weighted-completion objectives. 0 = SPT only (the raw
                        ``_ext.weighted`` binding still defaults to 0). Promoted
                        to 1 by an A/B: neutral on the 964-job instance, ~1–5 pp
                        gap reduction at the turnaround corner on the congested
@@ -897,7 +905,7 @@ def weighted_solve_brkga(
     asgn, f1, f2, _g, _dec = _ext.weighted_brkga(
         n_jobs       = len(inst.jobs),
         budget       = inst.budget,
-        job_slots    = _job_slots(inst),
+        job_slots    = _job_slots_ext(inst),
         type_cap     = _type_cap(inst),
         type_risk    = _type_risk(inst),
         init_occ     = _init_occ(inst),
@@ -1114,7 +1122,7 @@ def time_seeds(inst: Instance) -> list[dict]:
     return _ext.time_seeds(
         n_jobs    = len(inst.jobs),
         budget    = inst.budget,
-        job_slots = _job_slots(inst),
+        job_slots = _job_slots_ext(inst),
         type_cap  = _type_cap(inst),
         type_risk = _type_risk(inst),
         init_occ  = _init_occ(inst),

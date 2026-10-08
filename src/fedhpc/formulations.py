@@ -19,6 +19,11 @@ from gurobipy import GRB
 
 from .data import Instance
 
+try:
+    from . import _graph as _graph_ext
+except ImportError:  # source-only installs retain the pure-Python fallback
+    _graph_ext = None
+
 # ── Shared Gurobi environment ─────────────────────────────────────────────────
 # Created once via configure_env() in cli.main() before any model is built.
 # Using gp.Env(empty=True) is the only reliable way to suppress the WLS licence
@@ -171,6 +176,51 @@ def normal_pattern_starts(inst: Instance) -> dict[int, bytearray]:
     return masks
 
 
+def _normal_pattern_graph_data(inst: Instance):
+    """Return ``(S, nodes, loss_arcs)`` for the compressed AF graph.
+
+    The compiled path performs the pseudo-polynomial closure and graph
+    bookkeeping. The fallback preserves source-only usability and is also a
+    readable reference implementation for equivalence tests.
+    """
+    if _graph_ext is not None:
+        specs = [
+            (j.id, mid, inst.T[j.id, mid].start, inst.T[j.id, mid].stop,
+             inst.p_occ[j.id, mid])
+            for j in inst.jobs for mid in inst.F[j.id]
+        ]
+        raw_s, raw_g = _graph_ext.build_normal_pattern_graph(
+            inst.horizon, max(m.id for m in inst.instance_types) + 1,
+            specs, list(inst.rj_arrivals),
+        )
+        valid_types = {m.id for m in inst.instance_types}
+        S = {(jid, mid): frozenset(ts) for jid, mid, ts in raw_s}
+        nodes = {mid: set(ns) for mid, ns, _arcs in raw_g if mid in valid_types}
+        loss = {mid: list(arcs) for mid, _ns, arcs in raw_g if mid in valid_types}
+        return S, nodes, loss
+
+    masks = normal_pattern_starts(inst)
+    S = {
+        (j.id, mid): frozenset(t for t in inst.T[j.id, mid] if masks[mid][t])
+        for j in inst.jobs for mid in inst.F[j.id]
+    }
+    H = inst.horizon
+    nodes, loss = {}, {}
+    for itype in inst.instance_types:
+        mid = itype.id
+        events = {0, H}
+        events.update(inst.T[j.id, mid].start for j in inst.jobs if mid in inst.F[j.id])
+        events.update(v for (m2, v) in inst.rj_arrivals if m2 == mid)
+        ev = sorted(events)
+        ns = {0, H}
+        ns.update(t for (jid, m), starts in S.items() if m == mid for t in starts)
+        ns.update(t + inst.p_occ[jid, mid]
+                  for (jid, m), starts in S.items() if m == mid for t in starts)
+        nodes[mid] = ns
+        loss[mid] = [(q, next(v for v in ev if v > q)) for q in sorted(ns) if q < H]
+    return S, nodes, loss
+
+
 class SpaceTimeFormulation(Formulation):
     """Space-time network formulation with flow conservation (fed-hpc.pdf).
 
@@ -202,23 +252,24 @@ class SpaceTimeFormulation(Formulation):
     normal_patterns : x only for starts in :func:`normal_pattern_starts` —
                       exact (see there); shrinks x and lets many flow rows
                       degenerate into pure idle-arc links.
+    compressed_flow : use the paper's normal-pattern graph, including jump
+                      loss arcs between release/capacity-event times.  Unlike
+                      ``normal_patterns`` this removes the full-grid idle
+                      variables and flow rows as well as unreachable x arcs.
     """
 
     def __init__(self, *, continuous_idle: bool = False, cover_ge: bool = False,
-                 normal_patterns: bool = False):
+                 normal_patterns: bool = False, compressed_flow: bool = False):
         self.continuous_idle = continuous_idle
         self.cover_ge = cover_ge
         self.normal_patterns = normal_patterns
+        self.compressed_flow = compressed_flow
 
     def build(self, inst: Instance) -> tuple[gp.Model, dict]:
         H = inst.horizon
         # S[j,m]: allowed start times (T_jm, or its normal-pattern subset)
-        if self.normal_patterns:
-            masks = normal_pattern_starts(inst)
-            S = {
-                (j.id, m_id): frozenset(t for t in inst.T[j.id, m_id] if masks[m_id][t])
-                for j in inst.jobs for m_id in inst.F[j.id]
-            }
+        if self.normal_patterns or self.compressed_flow:
+            S, pattern_nodes, pattern_loss = _normal_pattern_graph_data(inst)
         else:
             S = inst.T
         mdl = gp.Model("fedhpc", env=_shared_env)
@@ -243,15 +294,35 @@ class SpaceTimeFormulation(Formulation):
             for t in S[j.id, m_id]
         )
 
-        # y[m,t] ∈ Z≥0 — waiting instances during [t, t+1), for t ∈ T\{H}  (eq. 22)
-        y = {
-            (itype.id, t): mdl.addVar(
-                vtype=GRB.CONTINUOUS if self.continuous_idle else GRB.INTEGER,
-                lb=0, name=f"y[{itype.id},{t}]"
-            )
-            for itype in inst.instance_types
-            for t in range(H)  # t ∈ {0, …, H−1}
-        }
+        if self.compressed_flow:
+            # Paper AF loss arcs: from every normal-pattern node q to the next
+            # release/capacity event.  Flow can wait across an interval in one
+            # continuous variable instead of H unit idle arcs and H rows.
+            loss_arcs = pattern_loss
+            nodes = pattern_nodes
+            y = {
+                (mid, q, r): mdl.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=N[mid],
+                                        name=f"y[{mid},{q},{r}]")
+                for mid, arcs in loss_arcs.items() for q, r in arcs
+            }
+            loss_in = {(mid, v): [] for mid in nodes for v in nodes[mid]}
+            loss_out = {(mid, v): [] for mid in nodes for v in nodes[mid]}
+            for mid, arcs in loss_arcs.items():
+                for q, r in arcs:
+                    loss_out[mid, q].append(y[mid, q, r])
+                    loss_in[mid, r].append(y[mid, q, r])
+        else:
+            loss_arcs = {}
+            nodes = {}
+            loss_in = loss_out = {}
+            # y[m,t] ∈ Z≥0 — waiting instances during [t, t+1)
+            y = {
+                (itype.id, t): mdl.addVar(
+                    vtype=GRB.CONTINUOUS if self.continuous_idle else GRB.INTEGER,
+                    lb=0, name=f"y[{itype.id},{t}]"
+                )
+                for itype in inst.instance_types for t in range(H)
+            }
 
         mdl.update()
 
@@ -289,9 +360,16 @@ class SpaceTimeFormulation(Formulation):
             # Slots available to new jobs at the very start of the horizon
             nm_available = max(0, nm - inst.n_running.get(mid, 0))
             jobs_mid = jobs_by_type[mid]
-            for v in range(H + 1):  # v ∈ {0, …, H}
-                lhs_wait = nm_available if v == 0 else y[mid, v - 1]
-                rhs_wait = nm           if v == H else y[mid, v]
+            flow_nodes = sorted(nodes[mid]) if self.compressed_flow else range(H + 1)
+            for v in flow_nodes:
+                if self.compressed_flow:
+                    incoming_idle = gp.quicksum(loss_in[mid, v])
+                    outgoing_idle = gp.quicksum(loss_out[mid, v])
+                    lhs_wait = nm_available if v == 0 else incoming_idle
+                    rhs_wait = nm if v == H else outgoing_idle
+                else:
+                    lhs_wait = nm_available if v == 0 else y[mid, v - 1]
+                    rhs_wait = nm if v == H else y[mid, v]
                 arriving = (
                     gp.quicksum(
                         x[j.id, mid, v - inst.p_occ[j.id, mid]]

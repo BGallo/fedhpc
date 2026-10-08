@@ -10,9 +10,15 @@ find_package(pybind11 CONFIG REQUIRED)
 find_package(OpenMP)
 
 pybind11_add_module(_moea src/fedhpc/_ext/moea.cpp)
+pybind11_add_module(_graph src/fedhpc/_ext/graph.cpp)
+pybind11_add_module(_ilssp src/fedhpc/_ext/ilssp.cpp)
+pybind11_add_module(_rmprice src/fedhpc/_ext/rm_pricing.cpp)
 
 if(OpenMP_CXX_FOUND)
     target_link_libraries(_moea PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
 install(TARGETS _moea DESTINATION fedhpc)
+install(TARGETS _graph DESTINATION fedhpc)
+install(TARGETS _ilssp DESTINATION fedhpc)
+install(TARGETS _rmprice DESTINATION fedhpc)

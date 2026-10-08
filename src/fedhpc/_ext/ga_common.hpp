@@ -95,6 +95,7 @@ struct SlotInfo {
     int    p_occ;
     double f1_contrib;  // t + p_occ - arrival_j  (precomputed)
     double cost;        // c[j,m]
+    double weight;      // w_j (used by weighted sequencing decoders)
 };
 
 struct Problem {
@@ -822,6 +823,24 @@ inline void srpt_completion_order(const Problem& prob, const Individual& ind,
     });
 }
 
+// Static WSPT priority.  For r_j=0 this is Smith's rule and is optimal for a
+// fixed assignment; with release dates schedule_repair still places each job
+// at its earliest feasible start.  Kept as a separate candidate decoder so it
+// can only improve the incumbent selected by finish_decode().
+inline void wspt_order(const Problem& prob, const Individual& ind,
+                       std::vector<int>& order_out) {
+    order_out.resize(prob.n_jobs);
+    std::iota(order_out.begin(), order_out.end(), 0);
+    std::sort(order_out.begin(), order_out.end(), [&](int a, int b) {
+        const SlotInfo& sa = prob.job_slots[a][ind.genes[a]];
+        const SlotInfo& sb = prob.job_slots[b][ind.genes[b]];
+        const double ra = sa.p_occ / sa.weight, rb = sb.p_occ / sb.weight;
+        if (ra != rb) return ra < rb;
+        if (sa.start != sb.start) return sa.start < sb.start;
+        return a < b;
+    });
+}
+
 // ── Earliest-feasible list-scheduling repair ─────────────────────────────────
 //
 // Problem-specific decoder. Cost (f2) depends *only* on which type each job
@@ -1230,6 +1249,16 @@ inline void finish_decode(Individual& ind, const Problem& prob, EvalWorkspace& w
             best = std::move(w); best_f1 = best.f1; best_cv = best.cv;
         }
     }
+    if (decode_order == 2) {
+        Individual w = ind;
+        std::vector<int> order;
+        wspt_order(prob, w, order);
+        sgs_forward(w, prob, ws, order, free_pool_balance);
+        evaluate(w, prob, ws);
+        if (w.cv <= best_cv + 1e-9 && w.f1 < best_f1 - 1e-9) {
+            best = std::move(w); best_f1 = best.f1; best_cv = best.cv;
+        }
+    }
     if (fbi_passes > 0) {
         Individual w = best;
         forward_backward_improve(w, prob, ws, fbi_passes, free_pool_balance);
@@ -1313,7 +1342,7 @@ inline std::vector<std::tuple<int,int>> extract_assignment(const Individual& ind
 inline Problem build_problem(
     int    n_jobs,
     double budget,
-    const std::vector<std::vector<std::tuple<int,int,int,double,double>>>& raw_slots,
+    const std::vector<std::vector<std::tuple<int,int,int,double,double,double>>>& raw_slots,
     const std::vector<int>& type_cap,
     const std::vector<double>& type_risk,
     const std::vector<std::tuple<int,int,int>>& raw_init_occ,
@@ -1334,8 +1363,8 @@ inline Problem build_problem(
     int max_slot = 0;
     for (int j = 0; j < n_jobs; j++) {
         prob.job_slots[j].reserve(raw_slots[j].size());
-        for (auto& [tid, start, pocc, f1c, cost] : raw_slots[j]) {
-            prob.job_slots[j].push_back({tid, start, pocc, f1c, cost});
+        for (auto& [tid, start, pocc, f1c, cost, weight] : raw_slots[j]) {
+            prob.job_slots[j].push_back({tid, start, pocc, f1c, cost, weight});
             max_slot = std::max(max_slot, start + pocc);
         }
         compute_slot_weights(prob.job_slots[j], prob.type_risk, prob.slot_cum_weight[j]);

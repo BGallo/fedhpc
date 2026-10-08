@@ -40,7 +40,7 @@ PYBIND11_MODULE(_moea, m) {
 
     m.def("nsga2",
         [](int n_jobs, double budget,
-           const std::vector<std::vector<std::tuple<int,int,int,double,double>>>& job_slots,
+           const std::vector<std::vector<std::tuple<int,int,int,double,double,double>>>& job_slots,
            const std::vector<int>& type_cap,
            const std::vector<double>& type_risk,
            const std::vector<std::tuple<int,int,int>>& init_occ,
@@ -86,7 +86,7 @@ PYBIND11_MODULE(_moea, m) {
 
     m.def("nsga3",
         [](int n_jobs, double budget,
-           const std::vector<std::vector<std::tuple<int,int,int,double,double>>>& job_slots,
+           const std::vector<std::vector<std::tuple<int,int,int,double,double,double>>>& job_slots,
            const std::vector<int>& type_cap,
            const std::vector<double>& type_risk,
            const std::vector<std::tuple<int,int,int>>& init_occ,
@@ -134,7 +134,7 @@ PYBIND11_MODULE(_moea, m) {
 
     m.def("moead",
         [](int n_jobs, double budget,
-           const std::vector<std::vector<std::tuple<int,int,int,double,double>>>& job_slots,
+           const std::vector<std::vector<std::tuple<int,int,int,double,double,double>>>& job_slots,
            const std::vector<int>& type_cap,
            const std::vector<double>& type_risk,
            const std::vector<std::tuple<int,int,int>>& init_occ,
@@ -196,7 +196,7 @@ PYBIND11_MODULE(_moea, m) {
 
     m.def("weighted",
         [](int n_jobs, double budget,
-           const std::vector<std::vector<std::tuple<int,int,int,double,double>>>& job_slots,
+           const std::vector<std::vector<std::tuple<int,int,int,double,double,double>>>& job_slots,
            const std::vector<int>& type_cap,
            const std::vector<double>& type_risk,
            const std::vector<std::tuple<int,int,int>>& init_occ,
@@ -244,7 +244,9 @@ PYBIND11_MODULE(_moea, m) {
         "decode_order: 0 (this raw binding's default) = SPT list-scheduling\n"
         "decoder only; 1 = also try an Extract-from-Preempt re-decode\n"
         "(preemptive-SRPT completion order, the release-date-aware 2-approx order)\n"
-        "per individual, keeping the better f1. moea.weighted_solve defaults to 1.\n"
+        "per individual; 2 = instead try a WSPT/Smith-rule re-decode for\n"
+        "weighted-completion objectives. Both keep the better f1;\n"
+        "moea.weighted_solve defaults to 1.\n"
         "fbi_passes: >0 applies that many forward-backward improvement (double\n"
         "justification) passes per individual, keeping the better f1. Both keep\n"
         "f2 fixed, so g is monotone; both are off by default (byte-for-byte\n"
@@ -254,7 +256,7 @@ PYBIND11_MODULE(_moea, m) {
 
     m.def("weighted_brkga",
         [](int n_jobs, double budget,
-           const std::vector<std::vector<std::tuple<int,int,int,double,double>>>& job_slots,
+           const std::vector<std::vector<std::tuple<int,int,int,double,double,double>>>& job_slots,
            const std::vector<int>& type_cap,
            const std::vector<double>& type_risk,
            const std::vector<std::tuple<int,int,int>>& init_occ,
@@ -386,7 +388,7 @@ PYBIND11_MODULE(_moea, m) {
 
     m.def("time_seeds",
         [](int n_jobs, double budget,
-           const std::vector<std::vector<std::tuple<int,int,int,double,double>>>& job_slots,
+           const std::vector<std::vector<std::tuple<int,int,int,double,double,double>>>& job_slots,
            const std::vector<int>& type_cap,
            const std::vector<double>& type_risk,
            const std::vector<std::tuple<int,int,int>>& init_occ) {

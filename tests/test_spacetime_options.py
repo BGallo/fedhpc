@@ -1,4 +1,4 @@
-"""SpaceTimeFormulation options (continuous_idle, cover_ge, normal_patterns)
+"""SpaceTimeFormulation reduction options
 must leave every optimum unchanged."""
 import itertools
 import random
@@ -37,6 +37,8 @@ def _instance(seed: int) -> Instance:
 
 COMBOS = [dict(zip(("continuous_idle", "cover_ge", "normal_patterns"), c))
           for c in itertools.product([False, True], repeat=3)]
+COMBOS.append(dict(compressed_flow=True))
+COMBOS.append(dict(compressed_flow=True, cover_ge=True))
 
 
 @pytest.mark.parametrize("seed", range(4))
@@ -71,3 +73,15 @@ def test_normal_patterns_contain_release_and_running_slots():
             assert masks[m][inst.T[j.id, m].start]
     for (m, v) in inst.rj_arrivals:
         assert masks[m][v]
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_cpp_graph_builder_matches_python_fallback(seed, monkeypatch):
+    inst = _instance(seed)
+    compiled = formulations._normal_pattern_graph_data(inst)
+    ext = formulations._graph_ext
+    assert ext is not None
+    monkeypatch.setattr(formulations, "_graph_ext", None)
+    fallback = formulations._normal_pattern_graph_data(inst)
+    monkeypatch.setattr(formulations, "_graph_ext", ext)
+    assert compiled == fallback

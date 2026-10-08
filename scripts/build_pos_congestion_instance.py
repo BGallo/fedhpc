@@ -12,14 +12,19 @@ against experiments/tcc_2026/offloading_strategy_comparison/window_jobs:
   t0                 = case-study window start (WINDOW_START from prepare_data.py)
   time_scale_seconds  = min positive `elapsed` among window_jobs
   horizon             = ceil(48h / time_scale_seconds)   (confirmed exactly:
-                        5575 = ceil(172800 / 31) for the tcc_2026 snapshot)
+                        5575 = ceil(172800 / 31) for the tcc_2026 snapshot),
+                        window jobs whose best-case completion exceeds it are
+                        removed and listed (--extend-horizon instead stretches
+                        the horizon so every job fits)
   job.arrival         = (@submit - t0) / time_scale
   job.exec_time       = elapsed / time_scale
   job.cpu             = total_cpus ; job.mem = mem parsed from tres_req (GB)
   job.stor            = 0 ; job.io_volume = 0
   running_jobs        = initial_state_jobs rows with @start < t0 (i.e. truly
-                        already running at t0), one entry per allocated
-                        hostname, type_id resolved from the hostname's node
+                        already running at t0), one entry per busy
+                        hostname (jobs sharing a node are merged; the node
+                        is busy until the last one ends), type_id resolved
+                        from the hostname's node
                         group prefix (clb1/csr1/csr2/csr3; the "ecn" fat
                         nodes are dropped — jobs on them are skipped).
                         end = ceil((@end - t0) / time_scale).
@@ -154,6 +159,9 @@ def main() -> None:
     parser.add_argument("--slot-seconds", type=float, default=600.0,
                         help="Discretization slot size in seconds (default: 600 = 10 min, "
                              "matching fedhpc_known_runtime_offline_10min.json).")
+    parser.add_argument("--extend-horizon", action="store_true",
+                        help="Keep every window job by extending the horizon past 48h "
+                             "(default: keep 48h and remove — and list — jobs that cannot fit).")
     parser.add_argument("--out", type=Path, default=None,
                         help="Output path (default: data/pos_congestion_known_runtime_offline_<slot>.json).")
     args = parser.parse_args()
@@ -211,44 +219,54 @@ def main() -> None:
         type_idx += 1
 
     # ── jobs (window_jobs only — mirrors fedhpc_schedule_scope=window_jobs) ─
-    # A handful of window jobs (long reservoir-simulation runs, up to ~495h)
-    # cannot finish within the horizon even in the best case (fastest type,
-    # zero queueing) — Instance.build() would reject them outright ("no
-    # feasible start time"). tcc_2026's own snapshot never hit this because
-    # its longest job's best-case finish (1505 slots) was well under its
-    # horizon (5575). Here the tail is far heavier (P99.5 = 2132 slots but
-    # max = 29827 slots against horizon=2880), so we drop the jobs whose
-    # best-case (perf=1, zero deploy) completion exceeds the horizon and
-    # report how many/how much that discards.
-    dropped = 0
-    dropped_elapsed_h = 0.0
+    # Best-case completion: perf=1 and deploy=0 on every type, so p_occ =
+    # max(1, ceil(exec_time)) and the earliest start is ceil(arrival).
+    # A few window jobs (long reservoir-simulation runs, up to ~495h) cannot
+    # finish inside the 48h window even then. By default they are removed —
+    # and listed — so the instance keeps the 48h horizon (extending it to
+    # ~497h makes the space-time MIP ~10x larger and unbuildable in 62 GB);
+    # --extend-horizon keeps every job and stretches the horizon instead.
+    def best_finish(r) -> int:
+        a = (pd.Timestamp(r["@submit"]) - WINDOW_START).total_seconds() / time_scale_seconds
+        return max(0, math.ceil(a)) + max(1, math.ceil(r["elapsed"] / time_scale_seconds))
+
+    if args.extend_horizon:
+        min_horizon = max(best_finish(r) for r in window)
+        if min_horizon > horizon:
+            print(f"  horizon extended {horizon} -> {min_horizon} slots so every job fits",
+                  file=sys.stderr)
+            horizon = min_horizon
+    removed = [r for r in window if best_finish(r) > horizon]
+    if removed:
+        print(f"  removed {len(removed)}/{len(window)} window jobs that cannot finish "
+              f"within the {horizon}-slot horizon "
+              f"({sum(r['elapsed'] for r in removed) / 3600:.1f}h of runtime):",
+              file=sys.stderr)
+        for r in removed:
+            print(f"    jobid={r['jobid']}  elapsed={r['elapsed'] / 3600:.1f}h  "
+                  f"best-case finish=slot {best_finish(r)}", file=sys.stderr)
+
     jobs: list[dict] = []
     for r in window:
-        submit = pd.Timestamp(r["@submit"])
-        arrival = (submit - WINDOW_START).total_seconds() / time_scale_seconds
-        exec_time = r["elapsed"] / time_scale_seconds
-        if arrival + exec_time > horizon:
-            dropped += 1
-            dropped_elapsed_h += r["elapsed"] / 3600.0
+        if best_finish(r) > horizon:
             continue
+        submit = pd.Timestamp(r["@submit"])
         jobs.append(dict(
             id=len(jobs),
-            arrival=arrival,
-            exec_time=exec_time,
+            arrival=(submit - WINDOW_START).total_seconds() / time_scale_seconds,
+            exec_time=r["elapsed"] / time_scale_seconds,
             io_volume=0.0,
             cpu=float(r["total_cpus"]),
             mem=_parse_mem_gb(r.get("tres_req", "")),
             stor=0.0,
         ))
-    if dropped:
-        print(
-            f"  dropped {dropped}/{len(window)} window jobs whose best-case "
-            f"finish exceeds horizon (total {dropped_elapsed_h:.1f}h of runtime)",
-            file=sys.stderr,
-        )
 
     # ── running jobs (initial_state jobs already running at t0) ────────────
-    running_jobs: list[dict] = []
+    # One capacity unit = one node. Slurm packs several jobs onto a node
+    # (shared nodes), so occupancy is per *hostname*: a node is busy from t0
+    # until the last of its running jobs ends, and is emitted once.
+    node_end: dict[str, int] = {}
+    node_job: dict[str, int] = {}
     n_running_raw = 0
     n_unmapped = 0
     for r in initial:
@@ -258,20 +276,21 @@ def main() -> None:
         end = pd.Timestamp(r["@end"])
         end_slot = max(1, math.ceil((end - WINDOW_START).total_seconds() / time_scale_seconds))
         hostnames = [h.strip() for h in str(r.get("nodes", "")).split(",") if h.strip() and h.strip() != "NONE"]
-        for h_idx, h in enumerate(hostnames):
+        for h in hostnames:
             n_running_raw += 1
-            g = _group_of_hostname(h)
-            if g is None:
+            if _group_of_hostname(h) is None:
                 n_unmapped += 1
                 continue
-            running_jobs.append(dict(
-                id=int(r["jobid"]) * 100 + h_idx,
-                type_id=onprem_type_id[g],
-                end=end_slot,
-            ))
+            if end_slot > node_end.get(h, 0):
+                node_end[h] = end_slot
+                node_job[h] = int(r["jobid"])
+    running_jobs: list[dict] = [
+        dict(id=node_job[h] * 10000 + i, type_id=onprem_type_id[_group_of_hostname(h)], end=e)
+        for i, (h, e) in enumerate(sorted(node_end.items()))
+    ]
 
-    print(f"  jobs={len(jobs)}  running_jobs={len(running_jobs)}"
-          f"  (raw hostname-occupancy entries={n_running_raw}, unmapped={n_unmapped})",
+    print(f"  jobs={len(jobs)}  running_jobs={len(running_jobs)} busy nodes"
+          f"  (raw job×hostname entries={n_running_raw}, unmapped={n_unmapped})",
           file=sys.stderr)
 
     out = dict(

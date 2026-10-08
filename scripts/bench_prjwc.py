@@ -13,6 +13,8 @@ same instances, horizon and Gurobi settings:
 - ``fed_occ``   fedhpc ``OccupancyFormulation`` (≈ TI with occupancy vars w_mt).
 - ``fed_st``    fedhpc ``SpaceTimeFormulation`` (≈ AF on the full grid 0..T,
                 integer idle vars y_mt).
+- ``fed_af``    fedhpc compressed normal-pattern graph with continuous jump
+                loss arcs (the closest like-for-like implementation of AF).
 
 Instances follow the paper's §5.1 generator: p_j ~ U[1, p_max],
 w_j ~ U[1, w_max], r_j ~ U[0, ⌊α·n·(p_max+1)/2 / m⌋]; horizon T from eq. (1).
@@ -162,6 +164,9 @@ MODELS = {
     "AF": lambda p, w, r, m, T, env: build_af(p, w, r, m, T, env),
     "fed_occ": lambda p, w, r, m, T, env: build_fed(OccupancyFormulation(), p, w, r, m, T),
     "fed_st": lambda p, w, r, m, T, env: build_fed(SpaceTimeFormulation(), p, w, r, m, T),
+    "fed_af": lambda p, w, r, m, T, env: build_fed(
+        SpaceTimeFormulation(cover_ge=True, compressed_flow=True), p, w, r, m, T
+    ),
 }
 
 

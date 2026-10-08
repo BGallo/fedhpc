@@ -463,16 +463,12 @@ class TestRunningJobs:
         assert inst.rj_arrivals[(0, H)] == 1
         assert inst.occupied.get((0, H - 1), 0) == 1
 
-    def test_excess_running_jobs_capped(self, onprem_cloud_instance):
-        """More running_jobs than capacity: only capacity many are counted."""
+    def test_excess_running_jobs_rejected(self, onprem_cloud_instance):
+        """More running_jobs than capacity is an error — none are silently dropped."""
         rj0 = RunningJob(id=10, type_id=0, end=5)
-        rj1 = RunningJob(id=11, type_id=0, end=6)  # cap=1, this should be skipped
-        import warnings
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            inst = self._inst_with_running(onprem_cloud_instance, [rj0, rj1])
-        assert inst.n_running[0] == 1  # capped at capacity=1
-        assert len(w) == 1  # one warning emitted
+        rj1 = RunningJob(id=11, type_id=0, end=6)  # cap=1
+        with pytest.raises(ValueError, match="exceed capacity"):
+            self._inst_with_running(onprem_cloud_instance, [rj0, rj1])
 
     def test_cloud_running_jobs_ignored(self, onprem_cloud_instance):
         """Running jobs on cloud types (capacity=None) are silently skipped."""

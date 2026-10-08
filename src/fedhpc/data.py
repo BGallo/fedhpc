@@ -186,14 +186,27 @@ class Instance:
         # it finishes.  Jobs finishing beyond the horizon are treated as if they
         # finish at H (they permanently occupy a slot in the planning window).
         #
-        # IMPORTANT: the total count per type must not exceed its capacity.
-        # Instance JSON generation should already cap the list; ``build()``
-        # enforces this by ignoring excess entries and emitting a warning.
+        # IMPORTANT: the total count per type must not exceed its capacity —
+        # one entry is one capacity unit (e.g. one node; jobs sharing a node
+        # must be merged into a single entry by the instance generator).
+        # ``build()`` raises rather than silently dropping running jobs.
         capacity_map = {
             itype.id: itype.capacity
             for itype in self.instance_types
             if itype.capacity is not None
         }
+
+        n_listed: dict[int, int] = {}
+        for rj in self.running_jobs:
+            if rj.type_id in capacity_map:
+                n_listed[rj.type_id] = n_listed.get(rj.type_id, 0) + 1
+        over = {mid: (n, capacity_map[mid]) for mid, n in n_listed.items()
+                if n > capacity_map[mid]}
+        if over:
+            raise ValueError(
+                "Running jobs exceed capacity (type: listed/capacity): "
+                + ", ".join(f"{mid}: {n}/{cap}" for mid, (n, cap) in sorted(over.items()))
+            )
 
         for rj in self.running_jobs:
             mid = rj.type_id
@@ -203,18 +216,7 @@ class Instance:
             if cap is None:
                 continue
 
-            # Enforce capacity ceiling
-            current = self.n_running.get(mid, 0)
-            if current >= cap:
-                import warnings
-                warnings.warn(
-                    f"Running jobs for type {mid} exceed capacity {cap}; "
-                    f"excess entries are ignored.",
-                    stacklevel=2,
-                )
-                continue
-
-            self.n_running[mid] = current + 1
+            self.n_running[mid] = self.n_running.get(mid, 0) + 1
 
             # Clip end to horizon so the slot is returned within the window
             end_slot = min(rj.end, self.horizon)

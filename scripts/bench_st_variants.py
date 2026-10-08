@@ -9,6 +9,7 @@ Solvers (all single-threaded, like the paper's B&P):
 - ``st_ge``    cover_ge=True
 - ``st_np``    normal_patterns=True
 - ``st_all``   all three
+- ``st_af``    compressed normal-pattern graph with jump loss arcs
 - ``meta``     moea weighted memetic, weighted_solve defaults (pop 32, 60 gen)
 - ``meta_long`` same, pop 64 / 300 generations
 
@@ -57,10 +58,13 @@ MIP_VARIANTS = {
     "st_ge": dict(cover_ge=True),
     "st_np": dict(normal_patterns=True),
     "st_all": dict(continuous_idle=True, cover_ge=True, normal_patterns=True),
+    "st_af": dict(cover_ge=True, compressed_flow=True),
 }
 META = {
     "meta": dict(pop_size=32, n_gen=60),
     "meta_long": dict(pop_size=64, n_gen=300),
+    "meta_wspt": dict(pop_size=32, n_gen=60, decode_order=2),
+    "meta_wspt_long": dict(pop_size=64, n_gen=300, decode_order=2),
 }
 
 
@@ -125,11 +129,13 @@ def run_mip(case: Case, opts: dict, time_limit: float) -> dict:
 
 def run_meta(case: Case, kw: dict) -> dict:
     inst = case.inst
+    kw = dict(kw)
+    decode_order = kw.pop("decode_order", 1)
     t0 = time.perf_counter()
     asgn, f1, f2, _g, _ls = moea._weighted_raw(
         inst, case.w1, case.w2, case.f1_cap if case.f1_cap is not None else 1e18,
         seed=42, n_threads=1, ls_moves=8, restart_patience=6, shortlist=24,
-        xover_mode=2, decode_order=1, **kw)
+        xover_mode=2, decode_order=decode_order, **kw)
     dt = time.perf_counter() - t0
     return dict(n_vars=None, n_int=None, n_cons=None, root_bound=None,
                 obj=case.g(f1, f2), bound=None, status="heuristic", nodes=None,
