@@ -10,7 +10,7 @@ from collections import deque
 from gurobipy import GRB
 
 from .data import Instance
-from .formulations import Formulation, SpaceTimeFormulation
+from .formulations import LEX_F1, Formulation, SpaceTimeFormulation
 from .model import Solution, _apply_params, _extract, set_mip_start
 
 
@@ -107,7 +107,9 @@ def _make_lexmin_bounded(
         trusting the result for anything beyond "here's a decent point".
         """
         t0 = _time.perf_counter()
-        mdl, vars_ = fmt.build(inst)
+        # lex (f1, f2) under at most an f1 cap admits the lex reductions
+        lex = primary == "f1" and secondary == "f2" and bound in (None, "f1")
+        mdl, vars_ = fmt.build(inst, objective=LEX_F1 if lex else None)
         counters["build_time"] += _time.perf_counter() - t0
         _apply_params(mdl, params)
         if per_solve_time_limit is not None:
@@ -239,7 +241,7 @@ def _reference_points(
     keeps that state across ``optimize()`` calls on the same model instance.
     """
     fmt = formulation or SpaceTimeFormulation()
-    mdl, vars_ = fmt.build(inst)
+    mdl, vars_ = fmt.build(inst, objective=LEX_F1)
     _apply_params(mdl, params)
 
     x = vars_["x"]
@@ -264,8 +266,16 @@ def _reference_points(
     f2_T = mdl.ObjVal
 
     # Phase 3: f1_0 = min f1 s.t. f2 <= 0, reusing the same model — drop the
-    # f1_T fix and impose the zero-cost bound instead.
-    mdl.remove(mdl.getConstrByName("fix_f1"))
+    # f1_T fix and impose the zero-cost bound instead. A model pruned for the
+    # lex objective is invalid under a cost bound, so rebuild without the hint.
+    if vars_.get("objective_reduced"):
+        mdl, vars_ = fmt.build(inst)
+        _apply_params(mdl, params)
+        x = vars_["x"]
+        f1_expr = fmt.f1_expr(inst, x)
+        f2_expr = fmt.f2_expr(inst, x)
+    else:
+        mdl.remove(mdl.getConstrByName("fix_f1"))
     mdl.addConstr(f2_expr <= 0.0, name="eps_cost")
     mdl.setObjective(f1_expr, GRB.MINIMIZE)
     mdl.optimize()

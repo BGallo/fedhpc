@@ -57,8 +57,10 @@ def _gurobi_weighted(inst, lam, f1_T, f2_T, f1_0, *, time_limit, mip_gap, hint):
     """Solve model.solve_weighted_sum's scalar with a warm start; return
     (Solution, mip_gap, obj_bound, wall_s, degenerate)."""
     fmt = SpaceTimeFormulation()
+    degenerate = f1_0 <= f1_T + 1e-8 or f2_T <= 1e-8
+    weights = None if degenerate else (lam / (f1_0 - f1_T), (1 - lam) / f2_T)
     t0 = time.perf_counter()
-    mdl, vars_ = fmt.build(inst)
+    mdl, vars_ = fmt.build(inst, objective=weights)
     build_s = time.perf_counter() - t0
     mdl.setParam("OutputFlag", 0)
     mdl.setParam("TimeLimit", time_limit)
@@ -68,13 +70,10 @@ def _gurobi_weighted(inst, lam, f1_T, f2_T, f1_0, *, time_limit, mip_gap, hint):
         set_mip_start(inst, x, hint)
     f1e, f2e = fmt.f1_expr(inst, x), fmt.f2_expr(inst, x)
     mdl.addConstr(f1e <= f1_0, name="pareto_region")
-    degenerate = f1_0 <= f1_T + 1e-8 or f2_T <= 1e-8
     if degenerate:
         mdl.setObjective(f2e, GRB.MINIMIZE)
     else:
-        mdl.setObjective(
-            (lam / (f1_0 - f1_T)) * f1e + ((1 - lam) / f2_T) * f2e, GRB.MINIMIZE
-        )
+        mdl.setObjective(weights[0] * f1e + weights[1] * f2e, GRB.MINIMIZE)
     t1 = time.perf_counter()
     mdl.optimize()
     solve_s = time.perf_counter() - t1

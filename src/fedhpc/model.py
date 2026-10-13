@@ -18,7 +18,7 @@ import gurobipy as gp
 from gurobipy import GRB
 
 from .data import Instance
-from .formulations import Formulation, SpaceTimeFormulation
+from .formulations import LEX_F1, Formulation, SpaceTimeFormulation
 
 
 @dataclass
@@ -67,10 +67,11 @@ def set_mip_start(inst: Instance, x: dict, hint: Solution) -> None:
     hint (e.g. an infeasible heuristic result) are left unset — Gurobi fills
     those in on its own during the root relaxation.  This only biases the
     B&B search toward a known-good incumbent; it never changes the feasible
-    region or the proven-optimal objective.
+    region or the proven-optimal objective. Jobs whose hinted (type, start)
+    has no variable (a reduced model pruned it) are left unset as well.
     """
     for (jid, m_id, t), v in x.items():
-        if jid in hint.assignment:
+        if jid in hint.assignment and (jid, *hint.assignment[jid]) in x:
             v.Start = 1.0 if hint.assignment[jid] == (m_id, t) else 0.0
 
 
@@ -141,7 +142,7 @@ def solve_f1(
     """
     fmt = formulation or _default_formulation()
     t0 = time.perf_counter()
-    mdl, vars = fmt.build(inst)
+    mdl, vars = fmt.build(inst, objective=LEX_F1)
     build_time = time.perf_counter() - t0
     _apply_params(mdl, params)
 
@@ -244,8 +245,10 @@ def solve_weighted_sum(
     if not (0.0 <= lam <= 1.0):
         raise ValueError("lam must be in [0, 1]")
     fmt = formulation or _default_formulation()
+    degenerate = f1_0 <= f1_T + 1e-8 or f2_T <= 1e-8
+    weights = None if degenerate else (lam / (f1_0 - f1_T), (1 - lam) / f2_T)
     t0 = time.perf_counter()
-    mdl, vars = fmt.build(inst)
+    mdl, vars = fmt.build(inst, objective=weights)
     build_time = time.perf_counter() - t0
     _apply_params(mdl, params)
 
@@ -258,15 +261,11 @@ def solve_weighted_sum(
     # Restrict to Pareto-relevant region (eq. 34)
     mdl.addConstr(f1_expr <= f1_0, name="pareto_region")
 
-    degenerate = f1_0 <= f1_T + 1e-8
-    if degenerate or f2_T <= 1e-8:
+    if degenerate:
         # No turnaround/cost trade-off exists; minimise cost only
         mdl.setObjective(f2_expr, GRB.MINIMIZE)
     else:
-        obj = (
-            (lam / (f1_0 - f1_T)) * f1_expr
-            + ((1 - lam) / f2_T) * f2_expr
-        )
+        obj = weights[0] * f1_expr + weights[1] * f2_expr
         mdl.setObjective(obj, GRB.MINIMIZE)
 
     t1 = time.perf_counter()

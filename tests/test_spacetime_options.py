@@ -85,3 +85,23 @@ def test_cpp_graph_builder_matches_python_fallback(seed, monkeypatch):
     fallback = formulations._normal_pattern_graph_data(inst)
     monkeypatch.setattr(formulations, "_graph_ext", ext)
     assert compiled == fallback
+
+
+def test_python_fallback_running_completion_off_pattern(monkeypatch):
+    """A running job completing before every release is an event that no
+    allowed start or completion touches; the fallback used to drop it from
+    the node set and crash wiring the loss arc that ends there."""
+    big = 1e9
+    itype = InstanceType(id=0, kind="on-prem", perf=1.0, io_time=0.0, deploy=0.0,
+                         cost_io=0.0, cost_vm=0.0, cost_stor=0.0, cpu=big, mem=big,
+                         stor=big, capacity=2)
+    jobs = [Job(id=j, arrival=5.0, exec_time=2.0, io_volume=0.0, cpu=0.0, mem=0.0,
+                stor=0.0) for j in range(2)]
+    inst = Instance(jobs=jobs, instance_types=[itype], horizon=10, budget=1e9,
+                    running_jobs=[RunningJob(id=9, type_id=0, end=2)])
+    inst.build()
+    compiled = formulations._normal_pattern_graph_data(inst)
+    monkeypatch.setattr(formulations, "_graph_ext", None)
+    assert formulations._normal_pattern_graph_data(inst) == compiled
+    sol = solve_f1(inst, formulation=SpaceTimeFormulation(compressed_flow=True), MIPGap=0)
+    assert sol.status == "optimal"

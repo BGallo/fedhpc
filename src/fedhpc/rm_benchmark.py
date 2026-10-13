@@ -162,7 +162,7 @@ def solve_total_cost(
     """
     fmt = formulation or SpaceTimeFormulation()
     t0 = time.perf_counter()
-    mdl, vars_ = fmt.build(inst)
+    mdl, vars_ = fmt.build(inst, objective=(1.0, 1.0))
     build_time = time.perf_counter() - t0
     _apply_params(mdl, params)
     x = vars_["x"]
