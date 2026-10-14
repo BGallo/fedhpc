@@ -11,3 +11,6 @@ wheels/
 
 # Documents
 *.pdf
+
+# Local notes
+SPACETIME_REDUCTIONS.md
