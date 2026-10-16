@@ -179,7 +179,6 @@ def run(
 
     common = dict(
         n_jobs    = len(inst.jobs),
-        budget    = inst.budget,
         job_slots = _job_slots(inst),
         type_cap  = _type_cap(inst),
         type_risk = _type_risk(inst),

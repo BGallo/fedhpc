@@ -1,5 +1,5 @@
 """Diagnose EA points that appear to beat the exact true front on medium.json:
-recompute objectives from the assignment, check budget + capacity, and report
+recompute objectives from the assignment, check capacity + horizon, and report
 any EA solution that strictly dominates a true Pareto point.
 """
 import sys
@@ -43,7 +43,7 @@ def horizon_violations(sol):
 
 true_front = true_pareto_frontier(inst, verbose=False, OutputFlag=0)
 true_pts = sorted((s.f1, s.f2) for s in true_front)
-print(f"{PATH}: budget={inst.budget} horizon={inst.horizon}")
+print(f"{PATH}: horizon={inst.horizon}")
 print(f"true front ({len(true_pts)} pts):")
 for f1, f2 in true_pts:
     print(f"   f1={f1:8.2f}  f2={f2:8.2f}")
@@ -61,7 +61,6 @@ for name, fn in [
         f2_ok = abs(rf2 - s.f2) < 1e-6
         cv = capacity_violations(s)
         hv = horizon_violations(s)
-        over_budget = s.f2 > inst.budget + 1e-6
         beats = [(tf1, tf2) for tf1, tf2 in true_pts
                  if s.f1 <= tf1 and s.f2 <= tf2 and (s.f1 < tf1 or s.f2 < tf2)]
         flags = []
@@ -69,7 +68,6 @@ for name, fn in [
         if not f2_ok: flags.append(f"f2!={rf2:.3f}")
         if cv: flags.append(f"CAP{cv[:2]}")
         if hv: flags.append(f"HORIZON{hv[:2]}")
-        if over_budget: flags.append("OVERBUDGET")
         if beats: flags.append(f"DOMINATES_TRUE{beats}")
         tag = "  <-- " + " ".join(flags) if flags else ""
         print(f"   f1={s.f1:8.2f}  f2={s.f2:8.2f}{tag}")

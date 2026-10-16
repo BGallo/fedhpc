@@ -35,7 +35,6 @@ def weighted_fixed_cost_inst() -> Instance:
                          cpu=4, mem=8, stor=50, capacity=None, fixed_cost=15.0),
         ],
         horizon=25,
-        budget=1000,
     )
     inst.build()
     return inst
@@ -78,7 +77,6 @@ def known_pareto_inst() -> Instance:
                          cpu=4, mem=8, stor=50, capacity=None),
         ],
         horizon=30,
-        budget=200,
     )
     inst.build()
     return inst

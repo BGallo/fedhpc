@@ -146,7 +146,7 @@ def fed_instance(p, w, r, m, T) -> Instance:
                          cpu=big, mem=big, stor=big, capacity=m)
     jobs = [Job(id=j, arrival=float(r[j]), exec_time=float(p[j]), io_volume=0.0,
                 cpu=0.0, mem=0.0, stor=0.0, weight=float(w[j])) for j in range(len(p))]
-    inst = Instance(jobs=jobs, instance_types=[itype], horizon=T, budget=big)
+    inst = Instance(jobs=jobs, instance_types=[itype], horizon=T)
     inst.build()
     return inst
 

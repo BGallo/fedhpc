@@ -63,7 +63,6 @@ struct SgsProblem {
     int    n_jobs;
     int    n_types;
     int    horizon;   // occupancy grid length per type (== Instance.horizon)
-    double budget;
 
     std::vector<double> arrival;                     // [j]
     std::vector<std::vector<SgsCandidate>> cand;      // [j], sorted by cost ascending
@@ -179,8 +178,6 @@ inline void evaluate_sgs(Individual& ind, const SgsProblem& prob, SgsWorkspace& 
         ind.f2 += applied.cost;
         if (out_assignment) (*out_assignment)[j] = {applied.type_id, start};
     }
-
-    if (ind.f2 > prob.budget) ind.cv += (ind.f2 - prob.budget);
 }
 
 inline std::vector<std::tuple<int,int>> extract_assignment_sgs(
@@ -438,7 +435,7 @@ inline std::vector<Individual> make_heuristic_seeds_sgs(const SgsProblem& prob) 
 // ── Problem construction ──────────────────────────────────────────────────────
 
 inline SgsProblem build_sgs_problem(
-    int n_jobs, double budget, int horizon,
+    int n_jobs, int horizon,
     const std::vector<double>& arrival,
     // raw_cand[j] = (type_id, p_occ, a_min, t_max_excl, cap, cost) tuples,
     // pre-sorted by cost ascending (done in Python, mirroring job_candidates
@@ -448,7 +445,6 @@ inline SgsProblem build_sgs_problem(
 ) {
     SgsProblem prob;
     prob.n_jobs  = n_jobs;
-    prob.budget  = budget;
     prob.horizon = horizon;
     prob.arrival = arrival;
     prob.cand.resize(n_jobs);

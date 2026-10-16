@@ -13,7 +13,7 @@ from fedhpc.model import solve_epsilon_cost, solve_f1, solve_f2, solve_weighted_
 
 @pytest.fixture
 def tiny_instance() -> Instance:
-    """2 jobs, 2 instance types (capacity unlimited — budget-constrained)."""
+    """2 jobs, 2 instance types (capacity unlimited)."""
     instance_types = [
         InstanceType(id=0, kind="on-prem",
                      perf=1.0, io_time=0.0, deploy=0,
@@ -28,7 +28,7 @@ def tiny_instance() -> Instance:
         Job(id=0, arrival=0, exec_time=10, io_volume=0, cpu=4, mem=8, stor=50),
         Job(id=1, arrival=2, exec_time=8,  io_volume=0, cpu=4, mem=8, stor=50),
     ]
-    inst = Instance(jobs=jobs, instance_types=instance_types, horizon=40, budget=1000)
+    inst = Instance(jobs=jobs, instance_types=instance_types, horizon=40)
     inst.build()
     return inst
 
@@ -46,7 +46,7 @@ def concurrent_instance() -> Instance:
         Job(id=0, arrival=0, exec_time=10, io_volume=0, cpu=4, mem=8, stor=50),
         Job(id=1, arrival=0, exec_time=10, io_volume=0, cpu=4, mem=8, stor=50),
     ]
-    inst = Instance(jobs=jobs, instance_types=instance_types, horizon=30, budget=1000)
+    inst = Instance(jobs=jobs, instance_types=instance_types, horizon=30)
     inst.build()
     return inst
 
@@ -73,7 +73,7 @@ class TestInstance:
         ]
         jobs = [Job(id=0, arrival=0, exec_time=5, io_volume=0,
                     cpu=8, mem=16, stor=50)]  # cpu=8 exceeds type 0 (cpu=4)
-        inst = Instance(jobs=jobs, instance_types=instance_types, horizon=20, budget=1e6)
+        inst = Instance(jobs=jobs, instance_types=instance_types, horizon=20)
         inst.build()
         assert inst.F[0] == [1]  # only type 1 is feasible
 
@@ -83,7 +83,7 @@ class TestInstance:
                           cost_io=0.0, cost_vm=0.0, cost_stor=0.0,
                           cpu=8, mem=16, stor=100)
         j = Job(id=0, arrival=0, exec_time=10, io_volume=0, cpu=1, mem=1, stor=1)
-        inst = Instance(jobs=[j], instance_types=[it], horizon=20, budget=1e6)
+        inst = Instance(jobs=[j], instance_types=[it], horizon=20)
         inst.build()
         assert inst.p_bill[0, 0] == pytest.approx(5.0)   # 10/2 + 0 = 5
 
@@ -93,7 +93,7 @@ class TestInstance:
                           cost_io=0.0, cost_vm=0.0, cost_stor=0.0,
                           cpu=8, mem=16, stor=100)
         j = Job(id=0, arrival=0, exec_time=10, io_volume=0, cpu=1, mem=1, stor=1)
-        inst = Instance(jobs=[j], instance_types=[it], horizon=20, budget=1e6)
+        inst = Instance(jobs=[j], instance_types=[it], horizon=20)
         inst.build()
         assert inst.p_occ[0, 0] == 10   # ceil(5 + 5)
 
@@ -116,7 +116,7 @@ class TestInstance:
                           cost_io=0.0, cost_vm=2.0, cost_stor=0.0,
                           cpu=8, mem=16, stor=100)
         j = Job(id=0, arrival=0, exec_time=5, io_volume=0, cpu=1, mem=1, stor=0)
-        inst = Instance(jobs=[j], instance_types=[it], horizon=30, budget=1e6)
+        inst = Instance(jobs=[j], instance_types=[it], horizon=30)
         inst.build()
         # p_bill = 5/1 = 5 → cost = 2*5 = 10 (deploy has no monetary cost)
         assert inst.c[0, 0] == pytest.approx(10.0)
@@ -127,7 +127,7 @@ class TestInstance:
                           cost_io=0.0, cost_vm=0.0, cost_stor=0.0,
                           cpu=8, mem=16, stor=100)
         j = Job(id=0, arrival=0, exec_time=5, io_volume=0, cpu=1, mem=1, stor=1)
-        inst = Instance(jobs=[j], instance_types=[it], horizon=10, budget=1e6)
+        inst = Instance(jobs=[j], instance_types=[it], horizon=10)
         inst.build()
         # p_occ = ceil(5 + 3) = 8 → valid t: t + 8 ≤ 10 → t ∈ {0, 1, 2}
         assert list(inst.T[0, 0]) == [0, 1, 2]
@@ -151,7 +151,7 @@ class TestInstance:
                           cost_io=0.0, cost_vm=0.0, cost_stor=0.0,
                           cpu=1, mem=1, stor=1)
         j = Job(id=0, arrival=0, exec_time=5, io_volume=0, cpu=999, mem=999, stor=999)
-        inst = Instance(jobs=[j], instance_types=[it], horizon=100, budget=1e6)
+        inst = Instance(jobs=[j], instance_types=[it], horizon=100)
         with pytest.raises(ValueError, match="no feasible instance type"):
             inst.build()
 
@@ -160,7 +160,7 @@ class TestInstance:
                           cost_io=0.0, cost_vm=0.0, cost_stor=0.0,
                           cpu=8, mem=16, stor=100)
         j = Job(id=0, arrival=0, exec_time=10, io_volume=0, cpu=1, mem=1, stor=1)
-        inst = Instance(jobs=[j], instance_types=[it], horizon=5, budget=1e6)
+        inst = Instance(jobs=[j], instance_types=[it], horizon=5)
         with pytest.raises(ValueError, match="no feasible start time"):
             inst.build()
 
@@ -231,10 +231,6 @@ class TestSolveF1:
 class TestSolveF2:
     def test_optimal_status(self, tiny_instance):
         assert solve_f2(tiny_instance).status == "optimal"
-
-    def test_budget_respected(self, tiny_instance):
-        sol = solve_f2(tiny_instance)
-        assert sol.f2 <= tiny_instance.budget + 1e-6
 
     def test_f2_uses_p_bill_not_p_occ(self, tiny_instance):
         """Cost should reflect p_bill (no deploy). On type 0 (deploy=0, free),
@@ -337,7 +333,7 @@ class TestCapacity:
             Job(id=0, arrival=0, exec_time=5, io_volume=0, cpu=4, mem=8, stor=50),
             Job(id=1, arrival=0, exec_time=5, io_volume=0, cpu=4, mem=8, stor=50),
         ]
-        inst = Instance(jobs=jobs, instance_types=instance_types, horizon=20, budget=1e6)
+        inst = Instance(jobs=jobs, instance_types=instance_types, horizon=20)
         inst.build()
         return inst
 
@@ -354,7 +350,7 @@ class TestCapacity:
             Job(id=0, arrival=0, exec_time=5, io_volume=0, cpu=4, mem=8, stor=50),
             Job(id=1, arrival=0, exec_time=5, io_volume=0, cpu=4, mem=8, stor=50),
         ]
-        inst = Instance(jobs=jobs, instance_types=instance_types, horizon=20, budget=1e6)
+        inst = Instance(jobs=jobs, instance_types=instance_types, horizon=20)
         inst.build()
         return inst
 
@@ -421,7 +417,6 @@ class TestRunningJobs:
             jobs=jobs,
             instance_types=instance_types,
             horizon=30,
-            budget=1000,
         )
 
     def _inst_with_running(self, base: Instance, running_jobs: list[RunningJob]) -> Instance:
@@ -430,7 +425,6 @@ class TestRunningJobs:
             jobs=base.jobs,
             instance_types=base.instance_types,
             horizon=base.horizon,
-            budget=base.budget,
             running_jobs=running_jobs,
         )
         inst.build()
@@ -540,7 +534,7 @@ class TestRunningJobs:
         rj = RunningJob(id=99, type_id=0, end=10)
         inst = Instance(
             jobs=jobs, instance_types=instance_types,
-            horizon=20, budget=1000, running_jobs=[rj],
+            horizon=20, running_jobs=[rj],
         )
         inst.build()
         sol = solve_f1(inst, formulation=formulation)

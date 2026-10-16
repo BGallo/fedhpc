@@ -29,11 +29,16 @@ def _instance(seed: int) -> Instance:
                 weight=float(rng.randint(1, 5)))
             for j in range(9)]
     running = [RunningJob(id=100, type_id=0, end=rng.randint(1, 6))]
-    inst = Instance(jobs=jobs, instance_types=types, horizon=40, budget=12.0,
+    inst = Instance(jobs=jobs, instance_types=types, horizon=40,
                     running_jobs=running)
     inst.build()
     return inst
 
+
+# Dominance reductions off: the flow options are exercised on the full
+# network, cloud types included.
+_PLAIN = dict(collapse_unbounded=False, pareto_unbounded=False,
+              rejection_deadlines=False, lex_deadlines=False)
 
 COMBOS = [dict(zip(("continuous_idle", "cover_ge", "normal_patterns"), c))
           for c in itertools.product([False, True], repeat=3)]
@@ -44,10 +49,10 @@ COMBOS.append(dict(compressed_flow=True, cover_ge=True))
 @pytest.mark.parametrize("seed", range(4))
 def test_options_preserve_lexicographic_optimum(seed):
     inst = _instance(seed)
-    base = solve_f1(inst, formulation=SpaceTimeFormulation(), MIPGap=0)
+    base = solve_f1(inst, formulation=SpaceTimeFormulation(**_PLAIN), MIPGap=0)
     assert base.status == "optimal"
     for opts in COMBOS[1:]:
-        sol = solve_f1(inst, formulation=SpaceTimeFormulation(**opts), MIPGap=0)
+        sol = solve_f1(inst, formulation=SpaceTimeFormulation(**_PLAIN, **opts), MIPGap=0)
         assert sol.status == "optimal", opts
         assert sol.f1 == pytest.approx(base.f1), opts
         assert sol.f2 == pytest.approx(base.f2), opts
@@ -59,9 +64,9 @@ def test_options_preserve_weighted_optimum(seed):
     # reference points on the instance's own scale: a huge f1_0 shrinks the f1
     # coefficient below Gurobi's optimality tolerance and it stops a unit early
     kw = dict(lam=0.5, f1_T=150.0, f2_T=5.0, f1_0=600.0, MIPGap=0)
-    base = solve_weighted_sum(inst, formulation=SpaceTimeFormulation(), **kw)
+    base = solve_weighted_sum(inst, formulation=SpaceTimeFormulation(**_PLAIN), **kw)
     for opts in COMBOS[1:]:
-        sol = solve_weighted_sum(inst, formulation=SpaceTimeFormulation(**opts), **kw)
+        sol = solve_weighted_sum(inst, formulation=SpaceTimeFormulation(**_PLAIN, **opts), **kw)
         assert sol.objective == pytest.approx(base.objective), opts
 
 
@@ -97,7 +102,7 @@ def test_python_fallback_running_completion_off_pattern(monkeypatch):
                          stor=big, capacity=2)
     jobs = [Job(id=j, arrival=5.0, exec_time=2.0, io_volume=0.0, cpu=0.0, mem=0.0,
                 stor=0.0) for j in range(2)]
-    inst = Instance(jobs=jobs, instance_types=[itype], horizon=10, budget=1e9,
+    inst = Instance(jobs=jobs, instance_types=[itype], horizon=10,
                     running_jobs=[RunningJob(id=9, type_id=0, end=2)])
     inst.build()
     compiled = formulations._normal_pattern_graph_data(inst)

@@ -1,6 +1,6 @@
 # FED-HPC
 
-Multi-objective MIP scheduler for HPC jobs in federated multi-platform environments (on-premises + cloud). Minimizes total turnaround time and monetary cost jointly, subject to resource capacity, budget, and horizon constraints.
+Multi-objective MIP scheduler for HPC jobs in federated multi-platform environments (on-premises + cloud). Minimizes total turnaround time and monetary cost jointly, subject to resource capacity and horizon constraints.
 
 ## Problem Formulation
 
@@ -13,7 +13,7 @@ Space-time network flow MIP formulation (non-preemptive, elastic provisioning).
 3. Time is discretized: `T = {0,1,...,H}`, `T̄ = {0,...,H-1}` (elementary intervals).
 4. Deploy/provisioning adds a **time penalty only** — no monetary cost.
 5. Idle time between uses of the same type is free and allowed.
-6. Instance provisioning is elastic — any number of concurrent instances may be used, limited only by budget.
+6. Instance provisioning is elastic — any number of concurrent instances may be used (unlimited types). There is no hard budget: cost is an objective, and a cost cap is expressed as an ε-constraint on f2.
 
 ### Sets
 
@@ -41,8 +41,6 @@ Space-time network flow MIP formulation (non-preemptive, elastic provisioning).
 - `κ^S_m` — cost per unit of billable time × storage
 - `κ^IO_m` — cost per I/O unit
 - `C^cpu_m`, `C^mem_m`, `C^stor_m` — CPU, memory, storage capacities
-
-**Global:** `B` — budget.
 
 ### Derived Parameters
 
@@ -106,9 +104,6 @@ f2 = Σ_j Σ_{m∈F_j} Σ_{t∈T_jm} c^proc_jm · x_jmt
 
 3. **Redundant bound** for LP strengthening (eq. 14):
    `w_mt ≤ |{j : m ∈ F_j}|  ∀m, t∈T̄`
-
-4. **Budget** (eq. 15):
-   `Σ_j Σ_{m∈F_j} Σ_{t∈T_jm} c^proc_jm · x_jmt ≤ B`
 
 ### Multi-objective Methods
 
@@ -174,10 +169,10 @@ uv run fedhpc --instance data/small.json --method f2
 # Weighted-sum scalarisation (α controls turnaround vs cost trade-off)
 uv run fedhpc --instance data/small.json --method weighted --alpha 0.5
 
-# ε-constraint: minimise turnaround with cost budget ε
+# ε-constraint: minimise turnaround with cost cap ε
 uv run fedhpc --instance data/small.json --method epsilon --epsilon 200
 
-# ε-constraint: minimise cost with turnaround budget ε
+# ε-constraint: minimise cost with turnaround cap ε
 uv run fedhpc --instance data/small.json --method epsilon-t --epsilon 150
 
 # Pareto frontier via weighted-sum sweep
@@ -197,7 +192,6 @@ Instances are JSON files with the following structure:
 ```json
 {
   "horizon": 50,
-  "budget": 5000,
   "instance_types": [
     {
       "id": 0, "kind": "on-prem",

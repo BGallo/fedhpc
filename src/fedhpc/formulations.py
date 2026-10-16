@@ -169,7 +169,7 @@ def normal_pattern_starts(inst: Instance) -> dict[int, bytearray]:
     in a left-shifted schedule — each job as early as capacity allows — is a
     release slot or a completion slot on its type, so restricting x to these
     times loses no optimum for any objective nondecreasing in start times
-    (f1 is increasing, f2/budget are time-independent). A superset is always
+    (f1 is increasing, f2 is time-independent). A superset is always
     safe: processing times are grouped per distinct p^occ with the smallest
     release among the jobs sharing it.
     """
@@ -247,22 +247,9 @@ def _normal_pattern_graph_data(inst: Instance):
     return S, nodes, loss
 
 
-def budget_regime(inst: Instance) -> str | None:
-    """``"zero"`` if B = 0, ``"free"`` if B can never bind, else ``None``.
-
-    "Never binds" means B covers every job on its costliest feasible type plus
-    every fixed cost — the worst schedule there is.
-    """
-    if inst.budget == 0:
-        return "zero"
-    worst = sum(max(inst.c[j.id, m] for m in inst.F[j.id]) for j in inst.jobs)
-    worst += sum(m.fixed_cost for m in inst.instance_types)
-    return "free" if inst.budget >= worst else None
-
-
 def nonnegative_data(inst: Instance) -> bool:
     """Weights, costs and fixed costs all >= 0 — a hypothesis of every
-    dominance reduction (and of :func:`budget_regime`'s "never binds")."""
+    dominance reduction."""
     return (
         all(j.weight >= 0 for j in inst.jobs)
         and all(c >= 0 for c in inst.c.values())
@@ -321,7 +308,9 @@ class SpaceTimeFormulation(Formulation):
     -----------
     (18) Unique job assignment.
     (19) Flow conservation at every v ∈ T = {0, …, H}.
-    (20) Global budget.
+
+    There is no global budget row: cost enters only through the objective
+    (or an explicit ε-cap on f2 added by the caller).
 
     Options (all off by default — the plain formulation above)
     ----------------------------------------------------------
@@ -341,13 +330,10 @@ class SpaceTimeFormulation(Formulation):
 
     Dominance reductions (on by default, exact)
     -------------------------------------------
-    Active only when the budget cannot bind (:func:`budget_regime` is
-    ``"free"``, or ``"zero"``, in which case every option with a positive cost
-    or fixed cost is removed first) and weights/costs are nonnegative
-    (:func:`nonnegative_data`); otherwise all four are off and the plain
-    model is built. The budget row is omitted whenever they are
-    active. An *unbounded* type is one whose capacity never binds
-    (:func:`unbounded_types`), e.g. cloud.
+    Active only when weights/costs are nonnegative (:func:`nonnegative_data`);
+    otherwise all four are off and the plain model is built. An *unbounded*
+    type is one whose capacity never binds (:func:`unbounded_types`), e.g.
+    cloud.
 
     collapse_unbounded  (R1) : a job on an unbounded type starts at its
                       release — later starts only raise f1 and cost is
@@ -370,8 +356,8 @@ class SpaceTimeFormulation(Formulation):
                       raise f1 for them.
 
     R3 and the lex rule never raise f1, so callers may add f1 upper bounds;
-    they are invalid under an f2 upper bound (that is a budget), so callers
-    must pass ``objective=None`` then.
+    they are invalid under an f2 upper bound, so callers must pass
+    ``objective=None`` then.
     """
 
     def __init__(self, *, continuous_idle: bool = False, cover_ge: bool = False,
@@ -387,7 +373,7 @@ class SpaceTimeFormulation(Formulation):
         self.rejection_deadlines = rejection_deadlines
         self.lex_deadlines = lex_deadlines
 
-    def _reduce(self, inst: Instance, S, regime: str, objective: Objective):
+    def _reduce(self, inst: Instance, S, objective: Objective):
         """Apply R1/R2/R3/lex to the start sets; returns ``(S', applied)``
         where ``applied`` says whether an objective-specific rule ran."""
         unb = unbounded_types(inst)
@@ -400,9 +386,6 @@ class SpaceTimeFormulation(Formulation):
         out = {}
         for j in inst.jobs:
             Sj = {m: S[j.id, m] for m in inst.F[j.id] if S[j.id, m]}
-            if regime == "zero":
-                Sj = {m: ts for m, ts in Sj.items()
-                      if inst.c[j.id, m] <= 0 and not fixed[m]}
             cloud = [m for m in Sj if m in unb]
             if self.collapse_unbounded:
                 for m in cloud:
@@ -466,14 +449,14 @@ class SpaceTimeFormulation(Formulation):
             S = inst.T
         reducing = any((self.collapse_unbounded, self.pareto_unbounded,
                         self.rejection_deadlines, self.lex_deadlines))
-        regime = budget_regime(inst) if reducing and nonnegative_data(inst) else None
+        reduced = reducing and nonnegative_data(inst)
         objective_reduced = False
-        if regime is not None:
-            S, objective_reduced = self._reduce(inst, S, regime, objective)
+        if reduced:
+            S, objective_reduced = self._reduce(inst, S, objective)
         else:
             S = {(j.id, m): S[j.id, m] for j in inst.jobs for m in inst.F[j.id]}
         # Types whose flow network is dropped (R1): no x arc touches it.
-        no_flow = unbounded_types(inst) if regime is not None and self.collapse_unbounded else set()
+        no_flow = unbounded_types(inst) if reduced and self.collapse_unbounded else set()
         mdl = gp.Model("fedhpc", env=_shared_env)
         mdl.setParam("OutputFlag", 0)
 
@@ -597,11 +580,6 @@ class SpaceTimeFormulation(Formulation):
         # Fixed usage costs: z[m] linked to x (no-op without fixed costs)
         add_fixed_cost_vars(mdl, inst, x)
 
-        # (20) Global budget (includes fixed usage costs) — omitted when the
-        # reductions established that it cannot bind
-        if regime is None:
-            mdl.addConstr(self.f2_expr(inst, x) <= inst.budget, name="budget")
-
         # objective_reduced: the model is valid only for the objective hint
         # it was built with (callers must not reuse it for another problem)
         return mdl, {"x": x, "y": y, "objective_reduced": objective_reduced}
@@ -617,7 +595,7 @@ class OccupancyFormulation(Formulation):
 
     Constraints
     -----------
-    Unique assignment, occupancy equality, redundant upper bound, budget.
+    Unique assignment, occupancy equality, redundant upper bound.
     """
 
     def build(self, inst: Instance, objective: Objective = None) -> tuple[gp.Model, dict]:
@@ -695,8 +673,5 @@ class OccupancyFormulation(Formulation):
 
         # Fixed usage costs: z[m] linked to x (no-op without fixed costs)
         add_fixed_cost_vars(mdl, inst, x)
-
-        # Budget (includes fixed usage costs)
-        mdl.addConstr(self.f2_expr(inst, x) <= inst.budget, name="budget")
 
         return mdl, {"x": x, "w": w}

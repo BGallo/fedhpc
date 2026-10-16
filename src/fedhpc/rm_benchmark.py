@@ -61,7 +61,7 @@ def to_instance(data: RmData, horizon: int | list[int]) -> Instance:
     # exec_time is a placeholder: the real p_jk are injected below.
     jobs = [Job(id=j, arrival=0.0, exec_time=1.0, io_volume=0.0, cpu=0.0,
                 mem=0.0, stor=0.0, weight=float(w[j])) for j in range(len(w))]
-    inst = Instance(jobs=jobs, instance_types=types, horizon=horizon, budget=big)
+    inst = Instance(jobs=jobs, instance_types=types, horizon=horizon)
     inst.build()
     for j in range(len(w)):
         inst.F[j] = [k for k in range(len(U)) if p[j][k] <= Hk[k]]

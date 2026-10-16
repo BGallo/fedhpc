@@ -8,7 +8,7 @@ Formulation   SpaceTimeFormulation and OccupancyFormulation must agree on
 KnownAnswer   Exact f1/f2 values on the analytically solved 2×2 instance.
 Objectives    Verify that reported f1/f2 are computed by the correct formulas
               (sum of completion - arrival, and sum of c[j,m]).
-Budget        Behaviour under tight or zero budget.
+CostCap       ε-cost cap at zero (only free options remain).
 Epsilon       ε-constraint versions at boundary values.
 WeightedSum   Additional parametric behaviour beyond α=0/1.
 """
@@ -57,20 +57,7 @@ def free_inst():
                 cpu=8, mem=16, stor=100, capacity=None,
             ),
         ],
-        horizon=30, budget=1000,
-    )
-    inst.build()
-    return inst
-
-
-@pytest.fixture
-def budget_zero_inst(known_pareto_inst):
-    """Same geometry as known_pareto_inst but budget=0 → only free on-prem allowed."""
-    inst = Instance(
-        jobs=known_pareto_inst.jobs,
-        instance_types=known_pareto_inst.instance_types,
-        horizon=known_pareto_inst.horizon,
-        budget=0,
+        horizon=30,
     )
     inst.build()
     return inst
@@ -179,8 +166,8 @@ class TestKnownAnswer:
 
     @_FORMULATIONS
     def test_epsilon_cost_above_max_matches_solve_f1(self, formulation, known_pareto_inst):
-        """ε=budget (non-binding): should yield the same f1 as unconstrained solve_f1."""
-        eps = known_pareto_inst.budget
+        """ε far above any cost (non-binding): same f1 as unconstrained solve_f1."""
+        eps = 1e9
         sol_eps = solve_epsilon_cost(known_pareto_inst, eps, formulation=formulation, **_GUROBI)
         sol_f1  = solve_f1(known_pareto_inst, formulation=formulation, **_GUROBI)
         if sol_eps.f1 is not None and sol_f1.f1 is not None:
@@ -221,54 +208,22 @@ class TestObjectiveFormulas:
 
 
 # ---------------------------------------------------------------------------
-# Budget constraints
+# Zero cost cap
 # ---------------------------------------------------------------------------
 
-class TestBudget:
+class TestZeroCostCap:
     @_FORMULATIONS
-    def test_budget_zero_forces_f2_zero(self, formulation, budget_zero_inst):
-        """With budget=0 only free types are feasible, so f2=0 is the only option."""
-        sol = solve_f1(budget_zero_inst, formulation=formulation, **_GUROBI)
+    def test_zero_cap_forces_f2_zero(self, formulation, known_pareto_inst):
+        """With f2 ≤ 0 only free types are feasible, so f2=0 is the only option."""
+        sol = solve_epsilon_cost(known_pareto_inst, 0.0, formulation=formulation, **_GUROBI)
         assert sol.status == "optimal"
         assert sol.f2 == pytest.approx(0.0, abs=1e-9)
 
     @_FORMULATIONS
-    def test_budget_zero_forces_sequential_onprem(self, formulation, budget_zero_inst):
-        """Budget=0 + capacity=1 → both jobs must run sequentially on on-prem → f1=30."""
-        sol = solve_f1(budget_zero_inst, formulation=formulation, **_GUROBI)
+    def test_zero_cap_forces_sequential_onprem(self, formulation, known_pareto_inst):
+        """f2 ≤ 0 + capacity=1 → both jobs must run sequentially on on-prem → f1=30."""
+        sol = solve_epsilon_cost(known_pareto_inst, 0.0, formulation=formulation, **_GUROBI)
         assert sol.f1 == pytest.approx(30.0)
-
-    @_FORMULATIONS
-    def test_tight_budget_below_any_cloud_cost_is_infeasible(self, formulation):
-        """Budget = -1 makes every assignment infeasible."""
-        inst = Instance(
-            jobs=[Job(id=0, arrival=0, exec_time=5, io_volume=0, cpu=2, mem=4, stor=10)],
-            instance_types=[
-                InstanceType(
-                    id=0, kind="cloud", perf=1.0, io_time=0.0, deploy=0,
-                    cost_io=0.0, cost_vm=5.0, cost_stor=0.0,
-                    cpu=4, mem=8, stor=50, capacity=None,
-                ),
-            ],
-            horizon=20, budget=-1,
-        )
-        inst.build()
-        sol = solve_f1(inst, formulation=formulation, **_GUROBI)
-        assert sol.status == "infeasible"
-
-    @_FORMULATIONS
-    def test_loose_budget_does_not_constrain(self, formulation, known_pareto_inst):
-        """Budget much larger than max cost → f1 should equal unconstrained optimum."""
-        inst_loose = Instance(
-            jobs=known_pareto_inst.jobs,
-            instance_types=known_pareto_inst.instance_types,
-            horizon=known_pareto_inst.horizon,
-            budget=1e9,
-        )
-        inst_loose.build()
-        sol_loose = solve_f1(inst_loose, formulation=formulation, **_GUROBI)
-        sol_orig  = solve_f1(known_pareto_inst, formulation=formulation, **_GUROBI)
-        assert sol_loose.f1 == pytest.approx(sol_orig.f1, abs=1e-4)
 
 
 # ---------------------------------------------------------------------------
@@ -340,7 +295,7 @@ class TestRunningJobFormulation:
                     cpu=4, mem=8, stor=50, capacity=2,
                 ),
             ],
-            horizon=20, budget=1000,
+            horizon=20,
             running_jobs=[RunningJob(id=99, type_id=0, end=10)],
         )
         inst.build()
@@ -361,7 +316,7 @@ class TestRunningJobFormulation:
                     cpu=4, mem=8, stor=50, capacity=1,
                 ),
             ],
-            horizon=20, budget=1000,
+            horizon=20,
             running_jobs=[RunningJob(id=99, type_id=0, end=5)],
         )
         inst.build()

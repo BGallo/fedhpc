@@ -47,7 +47,6 @@ class TestRelaxedLowerBound:
                              cpu=4, mem=8, stor=50, capacity=2),
             ],
             horizon=20,
-            budget=1000,
         )
         inst.build()
         arcs = _build_arcs_by_type(inst)[0]
@@ -56,18 +55,18 @@ class TestRelaxedLowerBound:
         sigma = {0: 50.0, 1: 50.0, 2: 50.0}
 
         exact_best, _col = _price_type(
-            inst, 0, arcs, weight1=0.0, weight2=1.0, sigma=sigma, mu=0.0, nu1=None, nu2=None,
+            inst, 0, arcs, weight1=0.0, weight2=1.0, sigma=sigma, nu1=None, nu2=None,
             rho_m=0.0, theta={}, arrival_of=arrival_of, weight_of=weight_of, tol=1e-7,
         )
         relaxed_best = _price_type_relaxed(
-            inst, 0, arcs, weight1=0.0, weight2=1.0, sigma=sigma, mu=0.0, nu1=None, nu2=None,
+            inst, 0, arcs, weight1=0.0, weight2=1.0, sigma=sigma, nu1=None, nu2=None,
             rho_m=0.0, theta={}, arrival_of=arrival_of, weight_of=weight_of,
         )
         assert relaxed_best <= exact_best + 1e-6
 
     @pytest.mark.parametrize("seed", range(8))
     def test_relaxed_never_exceeds_exact_random_duals(self, seed, known_pareto_inst):
-        """Random sigma/mu/theta draws exercise many more dual regimes than
+        """Random sigma/nu2/theta draws exercise many more dual regimes than
         a single hand-picked example could — the 1-cycle relaxation must
         stay a valid lower bound in every one of them, per type.
         """
@@ -83,7 +82,7 @@ class TestRelaxedLowerBound:
         arrival_of = {j.id: j.arrival for j in inst.jobs}
         weight_of = {j.id: j.weight for j in inst.jobs}
         sigma = {j.id: rng.uniform(-5, 50) for j in inst.jobs}
-        mu = rng.uniform(-2, 2)
+        nu2 = rng.uniform(-2, 2)  # f2-cap dual: same arc coefficient as cost2
         theta = {
             (j.id, itype.id): rng.uniform(-5, 5)
             for j in inst.jobs for itype in _fixed_cost_types(inst)
@@ -92,14 +91,14 @@ class TestRelaxedLowerBound:
         for itype in inst.instance_types:
             arcs = arcs_by_type[itype.id]
             exact = _price_type(
-                inst, itype.id, arcs, weight1=0.3, weight2=0.7, sigma=sigma, mu=mu,
-                nu1=None, nu2=None, rho_m=0.0, theta=theta,
+                inst, itype.id, arcs, weight1=0.3, weight2=0.7, sigma=sigma,
+                nu1=None, nu2=nu2, rho_m=0.0, theta=theta,
                 arrival_of=arrival_of, weight_of=weight_of, tol=1e-7,
             )
             exact_best = exact[0] if exact is not None else float("inf")
             relaxed_best = _price_type_relaxed(
-                inst, itype.id, arcs, weight1=0.3, weight2=0.7, sigma=sigma, mu=mu,
-                nu1=None, nu2=None, rho_m=0.0, theta=theta,
+                inst, itype.id, arcs, weight1=0.3, weight2=0.7, sigma=sigma,
+                nu1=None, nu2=nu2, rho_m=0.0, theta=theta,
                 arrival_of=arrival_of, weight_of=weight_of,
             )
             assert relaxed_best <= exact_best + 1e-6, (

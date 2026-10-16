@@ -68,7 +68,6 @@ def build(n_jobs: int, cap0: int, cap3: int, slack: int, src: dict) -> dict:
 
     return {
         "horizon": horizon,
-        "budget": src["budget"],
         "instance_types": types,
         "jobs": new_jobs,
         "running_jobs": [],

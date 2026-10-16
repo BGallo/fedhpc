@@ -5,7 +5,7 @@ Validates ``solve_f1_bpc``/``solve_f2_bpc``/``solve_weighted_sum_bpc``
 directly with Gurobi (``model.solve_f1``/``model.solve_f2`` and a raw
 weighted-sum MIP solve). Unlike Phase 1's root-LP-bound check, the root
 relaxation here can genuinely be fractional (the linking constraints — job
-coverage across types, budget — aren't part of any single type's own
+coverage across types, fixed-cost links — aren't part of any single type's own
 integral subproblem), so these tests exercise the branching path, not just
 pricing. Assignments may differ under ties; only f1/f2 need match.
 
@@ -145,7 +145,6 @@ class TestRyanFosterMechanics:
                              cpu=4, mem=8, stor=50, capacity=2),
             ],
             horizon=20,
-            budget=1000,
         )
         inst.build()
         return inst
@@ -160,7 +159,7 @@ class TestRyanFosterMechanics:
         sigma = {0: 100.0, 1: 100.0, 2: 100.0}  # every job individually very attractive
 
         result = _price_type(
-            inst, 0, arcs, weight1=0.0, weight2=1.0, sigma=sigma, mu=0.0, nu1=None, nu2=None,
+            inst, 0, arcs, weight1=0.0, weight2=1.0, sigma=sigma, nu1=None, nu2=None,
             rho_m=0.0, theta={}, arrival_of=arrival_of, weight_of=weight_of,
             tol=1e-7, differ_pairs=frozenset({(0, 1)}),
         )
@@ -183,7 +182,7 @@ class TestRyanFosterMechanics:
         sigma = {0: 100.0, 1: -5.0, 2: 100.0}
 
         result = _price_type(
-            inst, 0, arcs, weight1=0.0, weight2=1.0, sigma=sigma, mu=0.0, nu1=None, nu2=None,
+            inst, 0, arcs, weight1=0.0, weight2=1.0, sigma=sigma, nu1=None, nu2=None,
             rho_m=0.0, theta={}, arrival_of=arrival_of, weight_of=weight_of,
             tol=1e-7, same_pairs=frozenset({(0, 1)}),
         )
@@ -230,7 +229,7 @@ class TestRyanFosterMechanics:
 class TestBoundRowFixedCostInteraction:
     """Regression coverage for two real bugs found during Phase 4 validation
     (see bpc.py's module docstring): (1) z_m's fixed-cost contribution was
-    missing from the budget/bound2 rows entirely, and (2) even after fixing
+    missing from the bound2 row entirely, and (2) even after fixing
     that, the loose (1e-5) tolerance used to decide "is this job/z_m settled"
     let a tiny residual — worth a disproportionate amount of real f2 once
     multiplied by fixed_cost or a cost difference between placements — slip

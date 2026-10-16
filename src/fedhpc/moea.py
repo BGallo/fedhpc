@@ -5,7 +5,7 @@ guarantees for much lower wall-clock time than exact MIP-based methods.
 
 Both algorithms encode solutions as a direct assignment vector (one (m, t)
 slot per job) and evaluate f1 / f2 identically to the MIP formulations.
-Constraint violations (capacity, budget) are handled via constrained-dominance
+Constraint violations (capacity) are handled via constrained-dominance
 ranking (NSGA-II) or a large Tchebycheff penalty (MOEA/D).
 
 The returned ``list[Solution]`` is drop-in compatible with
@@ -345,7 +345,6 @@ def nsga2_frontier(
     _require_ext()
     raw, prof = _ext.nsga2(
         n_jobs         = len(inst.jobs),
-        budget         = inst.budget,
         job_slots      = _job_slots_ext(inst),
         type_cap       = _type_cap(inst),
         type_risk      = _type_risk(inst),
@@ -434,7 +433,6 @@ def nsga3_frontier(
     _require_ext()
     raw, prof = _ext.nsga3(
         n_jobs         = len(inst.jobs),
-        budget         = inst.budget,
         job_slots      = _job_slots_ext(inst),
         type_cap       = _type_cap(inst),
         type_risk      = _type_risk(inst),
@@ -553,7 +551,6 @@ def moead_frontier(
     _require_ext()
     raw, prof = _ext.moead(
         n_jobs            = len(inst.jobs),
-        budget            = inst.budget,
         job_slots         = _job_slots_ext(inst),
         type_cap          = _type_cap(inst),
         type_risk         = _type_risk(inst),
@@ -685,7 +682,6 @@ def _weighted_raw(
     _require_ext()
     return _ext.weighted(
         n_jobs          = len(inst.jobs),
-        budget          = inst.budget,
         job_slots       = _job_slots_ext(inst),
         type_cap        = _type_cap(inst),
         type_risk       = _type_risk(inst),
@@ -904,7 +900,6 @@ def weighted_solve_brkga(
 
     asgn, f1, f2, _g, _dec = _ext.weighted_brkga(
         n_jobs       = len(inst.jobs),
-        budget       = inst.budget,
         job_slots    = _job_slots_ext(inst),
         type_cap     = _type_cap(inst),
         type_risk    = _type_risk(inst),
@@ -989,7 +984,6 @@ def nsga2_sgs_frontier(
     _require_ext()
     raw, prof = _ext.nsga2_sgs(
         n_jobs   = len(inst.jobs),
-        budget   = inst.budget,
         horizon  = inst.horizon,
         arrival  = [float(j.arrival) for j in inst.jobs],
         cand     = _sgs_candidates(inst),
@@ -1033,7 +1027,6 @@ def nsga3_sgs_frontier(
     _require_ext()
     raw, prof = _ext.nsga3_sgs(
         n_jobs   = len(inst.jobs),
-        budget   = inst.budget,
         horizon  = inst.horizon,
         arrival  = [float(j.arrival) for j in inst.jobs],
         cand     = _sgs_candidates(inst),
@@ -1080,7 +1073,6 @@ def moead_sgs_frontier(
     _require_ext()
     raw, prof = _ext.moead_sgs(
         n_jobs   = len(inst.jobs),
-        budget   = inst.budget,
         horizon  = inst.horizon,
         arrival  = [float(j.arrival) for j in inst.jobs],
         cand     = _sgs_candidates(inst),
@@ -1121,7 +1113,6 @@ def time_seeds(inst: Instance) -> list[dict]:
     _require_ext()
     return _ext.time_seeds(
         n_jobs    = len(inst.jobs),
-        budget    = inst.budget,
         job_slots = _job_slots_ext(inst),
         type_cap  = _type_cap(inst),
         type_risk = _type_risk(inst),

@@ -34,7 +34,6 @@ instances of type ``m`` follow pattern ``p``. Rows:
   at all times, including idle ones. A canonical **null column** (no jobs,
   cost 0) is seeded per type so idle capacity is never something pricing has
   to discover.
-- budget (inequality, dual ``mu``): ``sum c^proc_jm * lambda <= B``.
 - up to two optional bound rows (inequality, duals ``nu1``/``nu2``), capping
   the aggregate f1 and/or f2 contribution — both may be active
   *simultaneously* (see ``make_bpc_lexmin_bounded``: ``pareto.py``'s box
@@ -156,22 +155,22 @@ combination (a genuinely binding bound row, not just a loose one as in every
 Phase 1-3 test) surfaced two real, previously-latent bugs together, both
 around ``InstanceType.fixed_cost``:
 
-1. **``z_m`` was missing from the budget and bound rows.** Its fixed-cost
+1. **``z_m`` was missing from the f2 bound row.** Its fixed-cost
    contribution to f2 only ever appeared in the RMP's *objective*
    (``obj=weight2*U_m``) — its ``gp.Column`` never gave it a coefficient in
-   the budget row or either bound row, unlike the compact model's own budget
-   row, which is built from ``f2_expr`` and so already includes it (see
-   ``formulations.add_fixed_cost_vars``). Every prior test used a budget
-   loose enough (or no bound row at all) to never actually bind on this, so
-   it went uncaught through the whole of Phases 1-3. Fixed by giving ``z_m``
-   a coefficient of ``U_m`` in the budget row always, and in ``bound2``
-   (never ``bound1`` — a fixed cost never contributes to f1) whenever active.
+   either bound row, unlike the compact model's f2 expression, which is built
+   from ``f2_expr`` and so already includes it (see
+   ``formulations.add_fixed_cost_vars``). Every prior test used either no
+   bound row or one loose enough to never actually bind on this, so it went
+   uncaught through the whole of Phases 1-3. Fixed by giving ``z_m`` a coefficient of ``U_m``
+   in ``bound2`` (never ``bound1`` — a fixed cost never contributes to f1)
+   whenever active.
 
 2. **``z_m`` is not structurally guaranteed integral, and the acceptance
    tolerance was too loose to catch it.** Geoffrion's integrality property
    covers the coverage/fleet-size rows (arising from each type's own
    integral network-flow subproblem) — it says nothing about a variable that
-   exists purely for the budget/bound rows. A node could have every job's
+   exists purely for the bound rows and the objective. A node could have every job's
    placement fully resolved while ``z_m`` sat at, say, ``0.9999971`` — "close
    enough" under the 1e-5 tolerance used elsewhere for column-generation tie-
    breaking, but multiplied by a ``fixed_cost`` of 15 that residual is a real
@@ -361,7 +360,7 @@ Pricing
 -------
 Reduced cost decomposes additively over a path's processing arcs (wait arcs
 cost 0, so they never affect it): arc reduced cost = weighted (cost1, cost2)
-coefficient minus the job's coverage dual minus the budget/bound duals' share
+coefficient minus the job's coverage dual minus the bound duals' share
 of that arc's cost2/cost1 contribution, minus the fixed-cost linking dual
 ``theta_{j,m}`` when the type has a fixed cost. The fleet-size dual ``rho_m``
 applies once per whole column (its row has coefficient 1 for every column of
@@ -504,7 +503,7 @@ def _heuristic_seed_columns(inst: Instance) -> list[Column]:
     minute. A handful of real starting columns keeps early duals
     differentiated enough that dominance actually prunes.
 
-    Uses ``baselines.greedy_earliest_completion`` (ignores budget/fixed-cost/
+    Uses ``baselines.greedy_earliest_completion`` (ignores fixed-cost/
     weight1/weight2 — irrelevant here, this only needs to be *valid*, column
     generation refines everything from here), split per type into
     non-overlapping chains via the standard greedy interval-partitioning
@@ -575,7 +574,6 @@ def _price_type(
     weight1: float,
     weight2: float,
     sigma: dict[int, float],
-    mu: float,
     nu1: float | None,
     nu2: float | None,
     rho_m: float,
@@ -663,7 +661,7 @@ def _price_type(
             if arc.job_id in same_pair_jobs or arc.job_id in cut_jobs:
                 pruned.append(arc)
                 continue
-            reduced_job = weight2 * arc.raw_cost2 - sigma.get(arc.job_id, 0.0) - mu * arc.raw_cost2
+            reduced_job = weight2 * arc.raw_cost2 - sigma.get(arc.job_id, 0.0)
             reduced_job -= theta.get((arc.job_id, type_id), 0.0)
             if nu2 is not None:
                 reduced_job -= nu2 * arc.raw_cost2
@@ -869,7 +867,6 @@ def _price_type(
                 reduced_arc = (
                     weight1 * raw_cost1 + weight2 * arc.raw_cost2
                     - sigma.get(arc.job_id, 0.0)
-                    - mu * arc.raw_cost2
                     - theta.get((arc.job_id, type_id), 0.0)
                 )
                 if nu1 is not None:
@@ -948,7 +945,6 @@ def _price_type_relaxed(
     weight1: float,
     weight2: float,
     sigma: dict[int, float],
-    mu: float,
     nu1: float | None,
     nu2: float | None,
     rho_m: float,
@@ -1039,7 +1035,6 @@ def _price_type_relaxed(
             reduced_arc = (
                 weight1 * raw_cost1 + weight2 * arc.raw_cost2
                 - sigma.get(arc.job_id, 0.0)
-                - mu * arc.raw_cost2
                 - theta.get((arc.job_id, type_id), 0.0)
             )
             if nu1 is not None:
@@ -1061,7 +1056,6 @@ def _price_type_relaxed(
 class _RmpState:
     coverage: dict[int, gp.Constr]
     fleet: dict[int, gp.Constr]
-    budget: gp.Constr
     bound1: gp.Constr | None   # optional f1-cap row (pareto.py's box boundary / lex-min tie-break)
     bound2: gp.Constr | None   # optional f2-cap row — both may be active simultaneously
     art: dict[int, gp.Var]
@@ -1089,8 +1083,6 @@ def _add_column_var(
         if link is not None:
             coeffs.append(1.0)
             constrs.append(link)
-    coeffs.append(col.cost2)
-    constrs.append(state.budget)
     if state.bound1 is not None:
         coeffs.append(col.cost1)
         constrs.append(state.bound1)
@@ -1159,8 +1151,6 @@ def _build_rmp(
         itype.id: mdl.addConstr(gp.LinExpr() == float(N[itype.id]), name=f"fleet[{itype.id}]")
         for itype in inst.instance_types
     }
-    budget = mdl.addConstr(gp.LinExpr() <= inst.budget, name="budget")
-
     bound1 = mdl.addConstr(gp.LinExpr() <= bound1_value, name="bound1") if bound1_value is not None else None
     bound2 = mdl.addConstr(gp.LinExpr() <= bound2_value, name="bound2") if bound2_value is not None else None
 
@@ -1204,19 +1194,14 @@ def _build_rmp(
         rows = [c for (jid, mid), c in fixed_link.items() if mid == itype.id]
         coeffs = [-1.0] * len(rows)
         constrs = list(rows)
-        # z_m's own contribution to every row that sums f2 (monetary cost):
-        # the budget row always (matches the compact model's own budget row,
-        # which is built from f2_expr — z_m included, see
-        # formulations.add_fixed_cost_vars) and the f2-cap bound row when one
-        # is active. Missing this was a real bug found during Phase 4
-        # validation: with no coefficient here, z_m's fixed cost only ever
-        # showed up in the *objective*, so the budget/bound rows silently
-        # undercounted f2 by exactly U_m whenever a fixed-cost type got
-        # activated — every prior test happened to use a budget loose enough
-        # (or no f2-cap at all) that this never got exercised or caught.
-        # z_m contributes nothing to f1, so bound1 never needs it.
-        coeffs.append(itype.fixed_cost)
-        constrs.append(budget)
+        # z_m's own contribution to the f2-cap bound row when one is active
+        # (matches the compact model's f2_expr — z_m included, see
+        # formulations.add_fixed_cost_vars). Missing this was a real bug
+        # found during Phase 4 validation: with no coefficient here, z_m's
+        # fixed cost only ever showed up in the *objective*, so the bound row
+        # silently undercounted f2 by exactly U_m whenever a fixed-cost type
+        # got activated. z_m contributes nothing to f1, so bound1 never
+        # needs it.
         if bound2 is not None:
             coeffs.append(itype.fixed_cost)
             constrs.append(bound2)
@@ -1224,7 +1209,7 @@ def _build_rmp(
         # itself (see _solve_node) — z_m is not guaranteed integral by the
         # rest of the master's structure the way job placements are
         # (Geoffrion's property covers the coverage/fleet-size rows, not
-        # this budget/bound-row-only variable), so it needs its own
+        # this bound-row/objective-only variable), so it needs its own
         # fix/forbid mechanism once found fractional. ub=0 forces z_m=0,
         # which (via the linking rows above) also forces every job-carrying
         # column's lambda on this type to 0 — no separate arc filtering
@@ -1238,7 +1223,7 @@ def _build_rmp(
             name=f"z[{itype.id}]",
         )
 
-    state = _RmpState(coverage=coverage, fleet=fleet, budget=budget, bound1=bound1, bound2=bound2,
+    state = _RmpState(coverage=coverage, fleet=fleet, bound1=bound1, bound2=bound2,
                        art=art, fixed_link=fixed_link, z=z, cuts=cut_rows)
 
     for itype in inst.instance_types:
@@ -1259,7 +1244,7 @@ def _build_rmp(
 
 
 class _RmpInfeasible(Exception):
-    """Raised when an RMP LP is infeasible outright (e.g. a bound/budget row
+    """Raised when an RMP LP is infeasible outright (e.g. a bound row
     too tight for even the all-idle solution) — distinct from the ordinary
     "some job not yet covered" case, which the big-M artificials absorb
     instead of ever making the LP infeasible.
@@ -1305,7 +1290,6 @@ def _run_column_generation(
 
         sigma = {jid: c.Pi for jid, c in state.coverage.items()}
         rho = {mid: c.Pi for mid, c in state.fleet.items()}
-        mu = state.budget.Pi
         nu1 = state.bound1.Pi if state.bound1 is not None else None
         nu2 = state.bound2.Pi if state.bound2 is not None else None
         theta = {key: c.Pi for key, c in state.fixed_link.items()}
@@ -1317,14 +1301,14 @@ def _run_column_generation(
             if use_relaxed_prescreen:
                 relaxed_best = _price_type_relaxed(
                     inst, mid, arcs_by_type[mid], weight1, weight2,
-                    sigma, mu, nu1, nu2, rho[mid], theta,
+                    sigma, nu1, nu2, rho[mid], theta,
                     arrival_of, weight_of, forbidden, pinned,
                 )
                 if relaxed_best >= -tol:
                     continue
             result = _price_type(
                 inst, mid, arcs_by_type[mid], weight1, weight2,
-                sigma, mu, nu1, nu2, rho[mid], theta,
+                sigma, nu1, nu2, rho[mid], theta,
                 arrival_of, weight_of, tol, forbidden, pinned,
                 differ_pairs, same_pairs, cut_duals,
             )
@@ -1502,7 +1486,7 @@ def _solve_node(
     # *different*, cheaper (m,t) for the same job (e.g. mostly on paid cloud,
     # a sliver on free on-prem) — `per_job_max >= 1 - tol` at the loose
     # tol=1e-5 called that job "settled" and the extracted clean assignment
-    # silently dropped the residual, but the RMP's own bound/budget rows had
+    # silently dropped the residual, but the RMP's own bound rows had
     # already banked that residual's (lower) cost — so a bound row that was
     # only just barely satisfied by the *fractional* solution came back
     # violated once cleanly assigned. Same root cause, same fix, as z_m's
@@ -1523,7 +1507,7 @@ def _solve_node(
         # z_m (the fixed-activation-cost variable) is not structurally
         # guaranteed integral just because every job is placed — Geoffrion's
         # integrality property covers the coverage/fleet-size rows, not a
-        # variable that exists purely for the budget/bound rows. See the
+        # variable that exists purely for the bound rows and the objective. See the
         # tolerance comment above; the same tight bound applies here for the
         # same reason (fixed_cost can be large, amplifying any residual).
         frac_z = [

@@ -79,7 +79,7 @@ def build_type_cap_and_init_occ(inst: Instance):
     return type_cap, capacitated, init_occ
 
 
-def decode(order_keys, type_keys, job_candidates, init_occ, budget,
+def decode(order_keys, type_keys, job_candidates, init_occ,
            arrivals, return_assignment=False):
     n_jobs = len(job_candidates)
     order = np.argsort(order_keys)
@@ -150,9 +150,6 @@ def decode(order_keys, type_keys, job_candidates, init_occ, budget,
         if return_assignment:
             assignment[i] = (chosen.type_id, start, chosen.p_occ)
 
-    if f2 > budget:
-        cv += (f2 - budget)
-
     if return_assignment:
         return f1, f2, cv, assignment
     return f1, f2, cv
@@ -165,7 +162,6 @@ class SGSScheduleProblem(ElementwiseProblem):
         self.job_candidates = build_candidates(inst)
         _, _, self.init_occ = build_type_cap_and_init_occ(inst)
         self.arrivals = [j.arrival for j in inst.jobs]
-        self.budget = inst.budget
         # NOTE: n_constr=0 — every job in this instance has at least one
         # feasible unlimited-capacity ("cloud") instance type, so decode()'s
         # cost-order wraparound fallback always finds a capacity-feasible
@@ -181,14 +177,14 @@ class SGSScheduleProblem(ElementwiseProblem):
         order_keys = x[:self.n_jobs]
         type_keys = x[self.n_jobs:]
         f1, f2, cv = decode(order_keys, type_keys, self.job_candidates,
-                             self.init_occ, self.budget, self.arrivals)
+                             self.init_occ, self.arrivals)
         out["F"] = [f1, f2]
 
     def decode_full(self, x):
         order_keys = x[:self.n_jobs]
         type_keys = x[self.n_jobs:]
         return decode(order_keys, type_keys, self.job_candidates,
-                       self.init_occ, self.budget, self.arrivals,
+                       self.init_occ, self.arrivals,
                        return_assignment=True)
 
 

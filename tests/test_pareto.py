@@ -84,11 +84,6 @@ class TestWeightedSumFrontier:
         for s in self._front(known_pareto_inst):
             assert s.status == "optimal"
 
-    def test_all_solutions_respect_budget(self, known_pareto_inst):
-        inst = known_pareto_inst
-        for s in self._front(inst):
-            assert s.f2 <= inst.budget + 1e-6
-
     def test_all_solutions_all_jobs_assigned(self, known_pareto_inst):
         inst = known_pareto_inst
         job_ids = {j.id for j in inst.jobs}
@@ -154,11 +149,6 @@ class TestEpsilonConstraintFrontier:
     def test_all_solutions_have_status_optimal(self, known_pareto_inst):
         for s in self._front(known_pareto_inst):
             assert s.status == "optimal"
-
-    def test_all_solutions_respect_budget(self, known_pareto_inst):
-        inst = known_pareto_inst
-        for s in self._front(inst):
-            assert s.f2 <= inst.budget + 1e-6
 
     def test_all_solutions_all_jobs_assigned(self, known_pareto_inst):
         inst = known_pareto_inst

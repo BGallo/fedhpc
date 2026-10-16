@@ -6,7 +6,7 @@ Unit        Python-layer encoding helpers (_job_slots, _type_cap, _init_occ).
 Validity    Structural invariants every returned Solution must satisfy.
 KnownAnswer Exact Pareto-front recovery on the analytically solved 2×2 instance.
 Reproducibility  Same seed → identical output.
-EdgeCases   Infeasible instances, running jobs, tight budget.
+EdgeCases   Infeasible instances, running jobs.
 MipComparison  MOEA output not dominated by MIP optima; agrees on extreme points.
 """
 import math
@@ -71,7 +71,7 @@ def single_job_inst():
                 cpu=4, mem=8, stor=50, capacity=None,
             ),
         ],
-        horizon=20, budget=1000,
+        horizon=20,
     )
     inst.build()
     return inst
@@ -94,7 +94,7 @@ def blocked_onprem_inst():
                 cpu=4, mem=8, stor=50, capacity=None,
             ),
         ],
-        horizon=20, budget=1000,
+        horizon=20,
         running_jobs=[RunningJob(id=99, type_id=0, end=20)],
     )
     inst.build()
@@ -113,7 +113,7 @@ def partial_block_inst():
                 cpu=4, mem=8, stor=50, capacity=1,
             ),
         ],
-        horizon=20, budget=1000,
+        horizon=20,
         running_jobs=[RunningJob(id=99, type_id=0, end=5)],
     )
     inst.build()
@@ -302,12 +302,6 @@ class TestOutputValidity:
             assert s.f2 >= -1e-9
 
     @_BOTH
-    def test_budget_respected(self, frontier_fn, kwargs, known_pareto_inst):
-        inst = known_pareto_inst
-        for s in frontier_fn(inst, **kwargs):
-            assert s.f2 <= inst.budget + 1e-6, f"f2={s.f2} exceeds budget={inst.budget}"
-
-    @_BOTH
     def test_no_capacity_violations(self, frontier_fn, kwargs, known_pareto_inst):
         inst = known_pareto_inst
         for s in frontier_fn(inst, **kwargs):
@@ -453,7 +447,7 @@ class TestEdgeCases:
                     cpu=4, mem=8, stor=50, capacity=2,
                 ),
             ],
-            horizon=10, budget=1e6,
+            horizon=10,
         )
         inst.build()
         sols = nsga2_frontier(inst, pop_size=50, n_gen=100, seed=0)
@@ -472,7 +466,7 @@ class TestEdgeCases:
                     cpu=4, mem=8, stor=50, capacity=2,
                 ),
             ],
-            horizon=10, budget=1e6,
+            horizon=10,
         )
         inst.build()
         sols = moead_frontier(inst, n_weights=50, n_gen=100, seed=0)
@@ -499,24 +493,6 @@ class TestEdgeCases:
         for s in sols:
             viols = capacity_violations(inst, s)
             assert viols == [], f"Capacity violated: {viols}"
-
-    @_BOTH
-    def test_tight_budget_eliminates_costly_solutions(self, frontier_fn, kwargs,
-                                                       known_pareto_inst):
-        """Budget=40 < cheapest cloud option (50) → only f2=0 solutions allowed."""
-        inst = Instance(
-            jobs=known_pareto_inst.jobs,
-            instance_types=known_pareto_inst.instance_types,
-            horizon=known_pareto_inst.horizon,
-            budget=40,
-        )
-        inst.build()
-        sols = frontier_fn(inst, **kwargs)
-        assert len(sols) > 0
-        for s in sols:
-            assert s.f2 == pytest.approx(0.0, abs=1e-6), (
-                f"Budget=40 but got f2={s.f2}"
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -548,7 +524,6 @@ class TestMipComparison:
         sols = nsga2_frontier(inst, pop_size=100, n_gen=200, seed=42)
         assert len(sols) > 0
         for s in sols:
-            assert s.f2 <= inst.budget + 1e-6
             assert capacity_violations(inst, s) == []
             assert recompute_f1(inst, s) == pytest.approx(s.f1, abs=1e-6)
             assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
@@ -559,7 +534,6 @@ class TestMipComparison:
         sols = moead_frontier(inst, n_weights=100, n_gen=200, seed=42)
         assert len(sols) > 0
         for s in sols:
-            assert s.f2 <= inst.budget + 1e-6
             assert capacity_violations(inst, s) == []
             assert recompute_f1(inst, s) == pytest.approx(s.f1, abs=1e-6)
             assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
@@ -600,7 +574,6 @@ class TestMoeadMaxReplace:
         assert is_non_dominated_set(sols)
         for s in sols:
             assert set(s.assignment.keys()) == {j.id for j in inst.jobs}
-            assert s.f2 <= inst.budget + 1e-6
             assert capacity_violations(inst, s) == []
             assert recompute_f1(inst, s) == pytest.approx(s.f1, abs=1e-6)
             assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
@@ -654,7 +627,6 @@ class TestMoeadMaxReplace:
         assert len(sols) > 0
         assert is_non_dominated_set(sols)
         for s in sols:
-            assert s.f2 <= inst.budget + 1e-6
             assert capacity_violations(inst, s) == []
 
 
@@ -684,7 +656,6 @@ class TestMoeadScalarLS:
         assert is_non_dominated_set(sols)
         for s in sols:
             assert set(s.assignment.keys()) == {j.id for j in inst.jobs}
-            assert s.f2 <= inst.budget + 1e-6
             assert capacity_violations(inst, s) == []
             assert recompute_f1(inst, s) == pytest.approx(s.f1, abs=1e-6)
             assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
@@ -777,7 +748,6 @@ class TestMutationAnnealing:
         assert is_non_dominated_set(sols)
         for s in sols:
             assert set(s.assignment.keys()) == {j.id for j in inst.jobs}
-            assert s.f2 <= inst.budget + 1e-6
             assert capacity_violations(inst, s) == []
             assert recompute_f1(inst, s) == pytest.approx(s.f1, abs=1e-6)
             assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
@@ -828,7 +798,6 @@ class TestCrossoverKind:
         assert is_non_dominated_set(sols)
         for s in sols:
             assert set(s.assignment.keys()) == {j.id for j in inst.jobs}
-            assert s.f2 <= inst.budget + 1e-6
             assert capacity_violations(inst, s) == []
             assert recompute_f1(inst, s) == pytest.approx(s.f1, abs=1e-6)
             assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
@@ -891,7 +860,6 @@ class TestTournamentK:
         assert is_non_dominated_set(sols)
         for s in sols:
             assert set(s.assignment.keys()) == {j.id for j in inst.jobs}
-            assert s.f2 <= inst.budget + 1e-6
             assert capacity_violations(inst, s) == []
             assert recompute_f1(inst, s) == pytest.approx(s.f1, abs=1e-6)
             assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
@@ -944,7 +912,6 @@ class TestMoeadArchiveSize:
         assert is_non_dominated_set(sols)
         for s in sols:
             assert set(s.assignment.keys()) == {j.id for j in inst.jobs}
-            assert s.f2 <= inst.budget + 1e-6
             assert capacity_violations(inst, s) == []
             assert recompute_f1(inst, s) == pytest.approx(s.f1, abs=1e-6)
             assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
@@ -996,7 +963,6 @@ class TestMoeadArchiveSize:
         assert len(sols) > 0
         assert is_non_dominated_set(sols)
         for s in sols:
-            assert s.f2 <= inst.budget + 1e-6
             assert capacity_violations(inst, s) == []
 
 
@@ -1031,7 +997,6 @@ class TestSchedRepair:
         assert is_non_dominated_set(sols)
         for s in sols:
             assert set(s.assignment.keys()) == {j.id for j in inst.jobs}
-            assert s.f2 <= inst.budget + 1e-6
             assert capacity_violations(inst, s) == []
             assert recompute_f1(inst, s) == pytest.approx(s.f1, abs=1e-6)
             assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
@@ -1079,7 +1044,6 @@ class TestSchedRepair:
             assert len(sols) > 0
             assert is_non_dominated_set(sols)
             for s in sols:
-                assert s.f2 <= inst.budget + 1e-6
                 assert capacity_violations(inst, s) == []
 
 
@@ -1109,7 +1073,6 @@ class TestWeightedSolve:
         s = weighted_solve(inst, lam, pop_size=12, n_gen=15)
         assert s.status == "heuristic"
         assert set(s.assignment.keys()) == {j.id for j in inst.jobs}
-        assert s.f2 <= inst.budget + 1e-6
         assert capacity_violations(inst, s) == []
         assert recompute_f1(inst, s) == pytest.approx(s.f1, abs=1e-6)
         assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
@@ -1138,7 +1101,6 @@ class TestWeightedSolve:
         he = weighted_solve(inst, lam, f1_T=f1_T, f2_T=f2_T, f1_0=f1_0)
 
         assert capacity_violations(inst, he) == []
-        assert he.f2 <= inst.budget + 1e-6
 
         if f1_0 > f1_T + 1e-8 and f2_T > 1e-8:
             def g(s):
@@ -1194,7 +1156,6 @@ class TestAblate:
         assert len(a) > 0
         assert is_non_dominated_set(a)
         for s in a:
-            assert s.f2 <= inst.budget + 1e-6
             assert capacity_violations(inst, s) == []
             assert recompute_f1(inst, s) == pytest.approx(s.f1, abs=1e-6)
             assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
@@ -1215,7 +1176,6 @@ class TestAblate:
         b = weighted_solve(inst, 0.5, pop_size=12, n_gen=15, ablate=ablate)
         assert (a.f1, a.f2) == (b.f1, b.f2)
         assert capacity_violations(inst, a) == []
-        assert a.f2 <= inst.budget + 1e-6
         assert recompute_f1(inst, a) == pytest.approx(a.f1, abs=1e-6)
 
     def test_weighted_ablate_zero_matches_omitted(self, known_pareto_inst):
@@ -1255,7 +1215,6 @@ class TestExtraSeeds:
         assert unique_front_points(a) == unique_front_points(b)
         assert len(a) > 0 and is_non_dominated_set(a)
         for s in a:
-            assert s.f2 <= inst.budget + 1e-6
             assert capacity_violations(inst, s) == []
             assert recompute_f1(inst, s) == pytest.approx(s.f1, abs=1e-6)
 
@@ -1292,7 +1251,6 @@ class TestWeightedXoverMode:
         b = weighted_solve(inst, lam, pop_size=12, n_gen=15, xover_mode=xm)
         assert (a.f1, a.f2) == (b.f1, b.f2)
         assert capacity_violations(inst, a) == []
-        assert a.f2 <= inst.budget + 1e-6
         assert recompute_f1(inst, a) == pytest.approx(a.f1, abs=1e-6)
 
     def test_default_is_msxf(self, known_pareto_inst):
@@ -1341,7 +1299,6 @@ class TestWeightedDecodeOptions:
         b = weighted_solve(inst, lam, pop_size=12, n_gen=15, **kw)
         assert (a.f1, a.f2) == (b.f1, b.f2)
         assert capacity_violations(inst, a) == []
-        assert a.f2 <= inst.budget + 1e-6
         assert recompute_f1(inst, a) == pytest.approx(a.f1, abs=1e-6)
 
     def test_default_is_decode_order_1(self, known_pareto_inst):
@@ -1383,7 +1340,6 @@ class TestWeightedBrkga:
         b = self._brkga(inst, lam, pop_size=20, n_gen=25, use_delay=use_delay)
         assert (a.f1, a.f2) == (b.f1, b.f2)
         assert capacity_violations(inst, a) == []
-        assert a.f2 <= inst.budget + 1e-6
         assert recompute_f1(inst, a) == pytest.approx(a.f1, abs=1e-6)
         assert recompute_f2(inst, a) == pytest.approx(a.f2, abs=1e-6)
 

@@ -112,7 +112,6 @@ class TestPriceTypeCutDual:
                              cpu=4, mem=8, stor=50, capacity=2),
             ],
             horizon=20,
-            budget=1000,
         )
         inst.build()
         arcs = _build_arcs_by_type(inst)[0]
@@ -123,7 +122,7 @@ class TestPriceTypeCutDual:
         sigma = {0: 50.0, 1: 50.0, 2: 50.0}
 
         no_cut = _price_type(
-            inst, 0, arcs, weight1=0.0, weight2=1.0, sigma=sigma, mu=0.0, nu1=None, nu2=None,
+            inst, 0, arcs, weight1=0.0, weight2=1.0, sigma=sigma, nu1=None, nu2=None,
             rho_m=0.0, theta={}, arrival_of=arrival_of, weight_of=weight_of, tol=1e-7,
         )
         assert no_cut is not None
@@ -133,7 +132,7 @@ class TestPriceTypeCutDual:
 
         cut_dual = 5.0
         with_cut = _price_type(
-            inst, 0, arcs, weight1=0.0, weight2=1.0, sigma=sigma, mu=0.0, nu1=None, nu2=None,
+            inst, 0, arcs, weight1=0.0, weight2=1.0, sigma=sigma, nu1=None, nu2=None,
             rho_m=0.0, theta={}, arrival_of=arrival_of, weight_of=weight_of, tol=1e-7,
             cut_duals={frozenset({0, 1, 2}): cut_dual},
         )

@@ -127,7 +127,7 @@ def run_fedhpc(p, w, U, L, *, horizon: int, pop_size: int, n_gen: int,
                 sl.append((k, t, pk, float(w[j] * (t + pk)), c))
         job_slots.append(sl)
     asgn, f1, f2, _g, _ls = _ext.weighted(
-        n_jobs=n, budget=1e18, job_slots=job_slots,
+        n_jobs=n, job_slots=job_slots,
         type_cap=[1] * m, type_risk=[0.0] * m, init_occ=[],
         w1=1.0, w2=1.0, f1_cap=1e18,
         pop_size=pop_size, n_gen=n_gen, seed=seed, n_threads=n_threads,

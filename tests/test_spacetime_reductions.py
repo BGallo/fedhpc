@@ -1,12 +1,12 @@
 """SpaceTimeFormulation dominance reductions (R1/R2/R3/lex) must leave every
-optimum unchanged, and must switch off under a budget that can bind."""
+optimum unchanged, and must switch off on negative data."""
 import random
 
 import pytest
 
 from fedhpc import formulations
 from fedhpc.data import Instance, InstanceType, Job, RunningJob
-from fedhpc.formulations import LEX_F1, SpaceTimeFormulation, budget_regime, unbounded_types
+from fedhpc.formulations import LEX_F1, SpaceTimeFormulation, unbounded_types
 from fedhpc.model import (
     solve_epsilon_cost,
     solve_epsilon_turnaround,
@@ -29,7 +29,7 @@ def _type(id, kind, perf, deploy, cost_vm, capacity, fixed_cost=0.0):
                         mem=big, stor=big, capacity=capacity, fixed_cost=fixed_cost)
 
 
-def _instance(seed: int, budget: float = 1e9, fixed: bool = False) -> Instance:
+def _instance(seed: int, fixed: bool = False) -> Instance:
     """Two congested on-prem types (one with a running job), a large on-prem
     type that never binds, and three cloud types trading speed for cost."""
     rng = random.Random(seed)
@@ -46,7 +46,7 @@ def _instance(seed: int, budget: float = 1e9, fixed: bool = False) -> Instance:
                 weight=float(rng.randint(1, 4)))
             for j in range(8)]
     running = [RunningJob(id=100, type_id=0, end=rng.randint(1, 5))]
-    inst = Instance(jobs=jobs, instance_types=types, horizon=45, budget=budget,
+    inst = Instance(jobs=jobs, instance_types=types, horizon=45,
                     running_jobs=running)
     inst.build()
     return inst
@@ -58,24 +58,11 @@ def _same(a, b):
     assert a.f2 == pytest.approx(b.f2)
 
 
-def test_regimes_and_unbounded_types():
-    assert budget_regime(_instance(0)) == "free"
-    assert budget_regime(_instance(0, budget=0.0)) == "zero"
-    assert budget_regime(_instance(0, budget=5.0)) is None
+def test_unbounded_types():
     assert unbounded_types(_instance(0)) == {2, 3, 4, 5}
 
 
-def test_finite_budget_builds_plain_model():
-    inst = _instance(0, budget=5.0)
-    m_red, v_red = SpaceTimeFormulation().build(inst, objective=LEX_F1)
-    m_pln, _ = SpaceTimeFormulation(**PLAIN).build(inst, objective=LEX_F1)
-    m_red.update(), m_pln.update()
-    assert (m_red.NumVars, m_red.NumConstrs) == (m_pln.NumVars, m_pln.NumConstrs)
-    assert m_red.getConstrByName("budget") is not None
-    assert not v_red["objective_reduced"]
-
-
-def test_free_budget_shrinks_model():
+def test_reductions_shrink_model():
     inst = _instance(0)
     sizes = []
     for objective in (None, (1.0, 1.0), LEX_F1):
@@ -85,6 +72,7 @@ def test_free_budget_shrinks_model():
         assert mdl.getConstrByName("budget") is None
     plain, _ = SpaceTimeFormulation(**PLAIN).build(inst)
     plain.update()
+    assert plain.getConstrByName("budget") is None
     assert plain.NumVars > sizes[0] > max(sizes[1:])
 
 
@@ -136,10 +124,10 @@ def test_reference_points_unchanged(seed):
 
 
 @pytest.mark.parametrize("seed", range(3))
-def test_zero_budget_optimum_unchanged(seed):
-    inst = _instance(seed, budget=0.0, fixed=True)
-    _same(solve_f1(inst, formulation=SpaceTimeFormulation(), MIPGap=0),
-          solve_f1(inst, formulation=SpaceTimeFormulation(**PLAIN), MIPGap=0))
+def test_zero_cost_cap_optimum_unchanged(seed):
+    inst = _instance(seed, fixed=True)
+    _same(solve_epsilon_cost(inst, 0.0, formulation=SpaceTimeFormulation(), MIPGap=0),
+          solve_epsilon_cost(inst, 0.0, formulation=SpaceTimeFormulation(**PLAIN), MIPGap=0))
 
 
 @pytest.mark.parametrize("opts", [dict(normal_patterns=True),
@@ -162,7 +150,7 @@ def test_lex_rule_exempts_zero_weight_jobs():
     types = [_type(0, "on-prem", 1.0, 0.0, 0.0, 1), _type(1, "cloud", 1.0, 0.0, 1.0, None)]
     jobs = [Job(id=j, arrival=0.0, exec_time=4.0, io_volume=0.0, cpu=0.0, mem=0.0,
                 stor=0.0, weight=w) for j, w in enumerate((1.0, 0.0))]
-    inst = Instance(jobs=jobs, instance_types=types, horizon=20, budget=1e9)
+    inst = Instance(jobs=jobs, instance_types=types, horizon=20)
     inst.build()
     sol = solve_f1(inst, formulation=SpaceTimeFormulation(), MIPGap=0)
     assert (sol.f1, sol.f2) == pytest.approx((4.0, 0.0))
@@ -176,4 +164,3 @@ def test_negative_data_builds_plain_model():
     pln, _ = SpaceTimeFormulation(**PLAIN).build(inst, objective=LEX_F1)
     red.update(), pln.update()
     assert red.NumVars == pln.NumVars and not v["objective_reduced"]
-    assert red.getConstrByName("budget") is not None

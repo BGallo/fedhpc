@@ -23,7 +23,7 @@
  * BRKGA population management: elite / mutant / biased-uniform-crossover.
  * Every crossover child is a valid key vector, so no repair is needed on the
  * genotype. The decoded schedule is made feasible by the SGS (capacity) plus
- * the same soft penalty as weighted.hpp for the budget / Pareto-cap.
+ * the same soft penalty as weighted.hpp for the Pareto-cap.
  *
  * Determinism: bit-for-bit stable for a fixed (seed, n_threads). Per-thread
  * RNGs seeded from the master RNG before every parallel region.

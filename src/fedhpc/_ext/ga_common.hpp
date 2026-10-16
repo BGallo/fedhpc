@@ -102,7 +102,6 @@ struct Problem {
     int    n_jobs;
     int    n_types;   // number of distinct type ids
     int    max_slot;  // max(start + p_occ) over all job_slots — exclusive upper bound
-    double budget;
 
     std::vector<std::vector<SlotInfo>> job_slots;  // [j] = feasible slots for job j
     std::vector<int> type_cap;        // type_cap[m]: capacity, -1 = unlimited
@@ -200,7 +199,6 @@ inline void evaluate(Individual& ind, const Problem& prob, EvalWorkspace& ws) {
         const int exc   = total - cap;
         if (exc > 0) ind.cv += exc;
     }
-    if (ind.f2 > prob.budget) ind.cv += ind.f2 - prob.budget;
 }
 
 // ── Genetic operators ─────────────────────────────────────────────────────────
@@ -1341,7 +1339,6 @@ inline std::vector<std::tuple<int,int>> extract_assignment(const Individual& ind
 
 inline Problem build_problem(
     int    n_jobs,
-    double budget,
     const std::vector<std::vector<std::tuple<int,int,int,double,double,double>>>& raw_slots,
     const std::vector<int>& type_cap,
     const std::vector<double>& type_risk,
@@ -1350,7 +1347,6 @@ inline Problem build_problem(
 ) {
     Problem prob;
     prob.n_jobs    = n_jobs;
-    prob.budget    = budget;
     prob.type_cap  = type_cap;
     prob.type_risk = type_risk;
     prob.n_types   = static_cast<int>(type_cap.size());

@@ -99,7 +99,7 @@ def score(ea_pts, true_pts, ideal, span):
 def run_instance(path: str):
     inst = Instance.from_file(path)
     print(f"\n{'=' * 78}\n{path}  —  {len(inst.jobs)} jobs, "
-          f"{len(inst.instance_types)} types, H={inst.horizon}, B={inst.budget}\n{'=' * 78}")
+          f"{len(inst.instance_types)} types, H={inst.horizon}\n{'=' * 78}")
 
     t0 = time.time()
     true_front = true_pareto_frontier(

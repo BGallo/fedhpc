@@ -83,7 +83,6 @@ class Instance:
     jobs: list[Job]
     instance_types: list[InstanceType]
     horizon: int         # H  (integer — discrete time steps 0..H)
-    budget: float        # B
 
     # Pre-assigned jobs already running at t=0 (optional; default: empty cluster).
     running_jobs: list[RunningJob] = field(default_factory=list)
@@ -268,7 +267,6 @@ class Instance:
             jobs=jobs,
             instance_types=instance_types,
             horizon=int(data["horizon"]),
-            budget=data["budget"],
             running_jobs=running_jobs,
             slot_size_seconds=slot_size_seconds,
         )

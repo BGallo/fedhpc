@@ -16,7 +16,7 @@ from gurobipy import GRB
 from fedhpc import formulations
 from fedhpc.data import Instance, InstanceType, Job, RunningJob
 from fedhpc.formulations import LEX_F1, SpaceTimeFormulation
-from fedhpc.model import solve_f1, solve_f2, solve_true_pareto_step
+from fedhpc.model import solve_epsilon_cost, solve_f1, solve_f2, solve_true_pareto_step
 
 formulations.configure_env()
 
@@ -33,7 +33,7 @@ def _type(id, perf, deploy, cost_vm, capacity, fixed_cost=0.0):
                         capacity=capacity, fixed_cost=fixed_cost)
 
 
-def _instance(seed: int, budget: float = 1e9, n_jobs: int = 4) -> Instance:
+def _instance(seed: int, n_jobs: int = 4) -> Instance:
     """Two capacitated on-prem types, one on-prem type sized exactly at the
     unbounded threshold, and two or three cloud types with deliberate ties."""
     rng = random.Random(seed)
@@ -55,14 +55,14 @@ def _instance(seed: int, budget: float = 1e9, n_jobs: int = 4) -> Instance:
             for j in range(n_jobs)]
     running = [RunningJob(id=100, type_id=1, end=rng.randint(1, 4)),
                RunningJob(id=101, type_id=2, end=rng.randint(1, 4))]
-    inst = Instance(jobs=jobs, instance_types=types, horizon=11, budget=budget,
+    inst = Instance(jobs=jobs, instance_types=types, horizon=11,
                     running_jobs=running)
     inst.build()
     return inst
 
 
-def _enumerate(inst: Instance) -> dict[float, float]:
-    """``{f1: min f2}`` over every feasible schedule within the budget."""
+def _enumerate(inst: Instance, f2_cap: float = math.inf) -> dict[float, float]:
+    """``{f1: min f2}`` over every feasible schedule with f2 <= ``f2_cap``."""
     H = inst.horizon
     cap = {m.id: m.capacity for m in inst.instance_types if m.capacity is not None}
     fixed = {m.id: m.fixed_cost for m in inst.instance_types}
@@ -79,7 +79,7 @@ def _enumerate(inst: Instance) -> dict[float, float]:
     def dfs(k: int, f1: float, f2: float) -> None:
         if k == len(options):
             total = f2 + sum(fixed[m] for m in set(used))
-            if total <= inst.budget + 1e-9:
+            if total <= f2_cap + 1e-9:
                 key = round(f1, 9)
                 best[key] = min(best.get(key, math.inf), total)
             return
@@ -190,15 +190,14 @@ def test_lex_under_f1_cap(case):
 
 
 @pytest.mark.parametrize("seed", range(6))
-@pytest.mark.parametrize("budget", [0.0, 2.0])
-def test_other_budgets(seed, budget):
-    """B = 0 (reductions on, costly options filtered) and a binding finite
-    budget (reductions off): lex optimum must still match the oracle."""
-    inst = _instance(seed, budget=budget)
-    outcomes = _enumerate(inst)
-    sol = solve_f1(inst, formulation=SpaceTimeFormulation(), MIPGap=0)
+@pytest.mark.parametrize("cap", [0.0, 2.0])
+def test_cost_caps(seed, cap):
+    """An ε-cap f2 <= cap on top of the reduced model (objective=None, so
+    only R1/R2 run): min f1 must still match the oracle."""
+    inst = _instance(seed)
+    outcomes = _enumerate(inst, f2_cap=cap)
+    sol = solve_epsilon_cost(inst, cap, formulation=SpaceTimeFormulation(), MIPGap=0)
     if not outcomes:
         assert sol.status == "infeasible"
         return
-    f1_star = min(outcomes)
-    assert (sol.f1, sol.f2) == pytest.approx((f1_star, outcomes[f1_star]))
+    assert sol.f1 == pytest.approx(min(outcomes))

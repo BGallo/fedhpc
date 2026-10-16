@@ -47,7 +47,7 @@ def main():
     known = cmkf.load_known_front()
     kpts = cmkf._pts(known)
     print(f"{cmkf.INSTANCE}\n  {len(inst.jobs)} jobs, {len(inst.instance_types)} types, "
-          f"H={inst.horizon}, B={inst.budget}")
+          f"H={inst.horizon}")
     print(f"  known exact front: {len(kpts)} proven-optimal points")
     print(f"    f1 in [{kpts[:,0].min():.2f}, {kpts[:,0].max():.2f}]   "
           f"f2 in [{kpts[:,1].min():.2f}, {kpts[:,1].max():.2f}]")

@@ -19,7 +19,7 @@ CONTEXT
   Python wrappers in src/fedhpc/moea.py.
 - Encoding: integer vector, gene j indexes job_slots[j] = feasible (type,start)
   slots. Objectives f1 = total turnaround (slots), f2 = total cost. Single
-  scalar constraint violation cv (capacity grid + budget); feasible iff cv==0.
+  scalar constraint violation cv (capacity grid); feasible iff cv==0.
 - Exact reference: src/fedhpc/pareto.py true_pareto_frontier / map_pareto_frontier
   (exact box-splitting, one proven-optimal MIP point per solve).
 
