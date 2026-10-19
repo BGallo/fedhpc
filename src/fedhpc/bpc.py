@@ -1412,6 +1412,57 @@ class _NodeResult:
     branch_pair: tuple[int, int] | None = None          # Ryan-Foster (job_j, job_k)
     branch_var: tuple[int, int, int] | None = None       # Phase-2 fallback (job_id, type_id, start)
     branch_type: int | None = None                       # fractional z_m — see _solve_node
+    incumbent: tuple[float, dict[int, tuple[int, int]]] | None = None  # see _rmp_integer_heuristic
+
+
+def _rmp_integer_heuristic(
+    mdl: gp.Model,
+    state: _RmpState,
+    inst: Instance,
+    weight1: float,
+    weight2: float,
+    bound1_value: float | None,
+    bound2_value: float | None,
+    time_limit: float,
+) -> tuple[float, dict[int, tuple[int, int]]] | None:
+    """Restricted-master IP heuristic ("price-and-branch"): solve the node's
+    RMP with integer column variables over the columns generated so far.
+
+    Any integer RMP solution with no artificial mass is a feasible schedule
+    (each job covered once, at most N_m timelines per type, bound rows
+    respected), so its objective is a valid incumbent for pruning. Without
+    one, depth-first search prunes nothing until it reaches an integral leaf
+    — on tiny_large's lex-min (f2, f1) phase 2 that took > 15 min although
+    the root bound already equals the optimum. Changes the model in place:
+    call after every LP value has been read.
+
+    Returns ``(objective, assignment)`` recomputed from the assignment, as an
+    integral node does, or None when no feasible integer solution was found.
+    """
+    for var in state.vars:
+        var.VType = GRB.INTEGER
+    for var in state.z.values():
+        var.VType = GRB.BINARY
+    mdl.setParam("TimeLimit", time_limit)
+    mdl.optimize()
+    if mdl.SolCount == 0 or sum(v.X for v in state.art.values()) > 1e-6:
+        return None
+    assignment: dict[int, tuple[int, int]] = {}
+    for col, var in zip(state.columns, state.vars):
+        if var.X > 0.5:
+            for job_id, start in col.jobs:
+                if job_id in assignment:
+                    return None
+                assignment[job_id] = (col.type_id, start)
+    if len(assignment) != len(inst.jobs):
+        return None
+    completion = {jid: t + inst.p_occ[jid, mid] for jid, (mid, t) in assignment.items()}
+    f1, f2 = inst.f1_of(completion), inst.f2_of(assignment)
+    if bound1_value is not None and f1 > bound1_value + 1e-6:
+        return None
+    if bound2_value is not None and f2 > bound2_value + 1e-6:
+        return None
+    return weight1 * f1 + weight2 * f2, assignment
 
 
 def _solve_node(
@@ -1435,7 +1486,14 @@ def _solve_node(
     tol: float,
     big_m: float,
     use_relaxed_prescreen: bool = False,
+    heuristic_time_limit: float | None = None,
 ) -> _NodeResult:
+    """Column generation at one node, then its status and branching choice.
+
+    ``heuristic_time_limit`` — when set and the node is fractional, also run
+    :func:`_rmp_integer_heuristic` with that limit; its result is the
+    returned ``incumbent``.
+    """
     valid_seed = [
         c for c in seed_pool
         if _column_allowed(c, forbidden, pinned, differ_pairs, same_pairs)
@@ -1556,16 +1614,22 @@ def _solve_node(
     ]
     if pair_candidates:
         _dist, branch_j, branch_k = min(pair_candidates)
-        return _NodeResult(status="fractional", objective=mdl.ObjVal, columns=state.columns,
-                            branch_pair=(branch_j, branch_k))
-
-    _dist, branch_j, branch_m, branch_t = min(
-        (abs(v - 0.5), jid, mid, t)
-        for (jid, mid, t), v in agg.items()
-        if jid in unsettled
-    )
-    return _NodeResult(status="fractional", objective=mdl.ObjVal, columns=state.columns,
-                        branch_var=(branch_j, branch_m, branch_t))
+        result = _NodeResult(status="fractional", objective=mdl.ObjVal, columns=state.columns,
+                             branch_pair=(branch_j, branch_k))
+    else:
+        _dist, branch_j, branch_m, branch_t = min(
+            (abs(v - 0.5), jid, mid, t)
+            for (jid, mid, t), v in agg.items()
+            if jid in unsettled
+        )
+        result = _NodeResult(status="fractional", objective=mdl.ObjVal, columns=state.columns,
+                             branch_var=(branch_j, branch_m, branch_t))
+    if heuristic_time_limit is not None:
+        result.incumbent = _rmp_integer_heuristic(
+            mdl, state, inst, weight1, weight2, bound1_value, bound2_value,
+            heuristic_time_limit,
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1695,6 +1759,7 @@ def _branch_and_price(
     max_cuts_per_round: int = 2,
     max_total_cuts: int = 5,
     use_relaxed_prescreen: bool = False,
+    heuristic_time_limit: float = 5.0,
 ) -> tuple[float, dict[int, tuple[int, int]] | None]:
     """Exact branch-and-price. Returns ``(objective, assignment)``, or
     ``(inf, None)`` if the instance (restricted to any bound row) is
@@ -1734,9 +1799,26 @@ def _branch_and_price(
     2020" section) and skip the exact call whenever the relaxed one already
     finds nothing; provably safe (never changes which columns are found),
     intended for the same tightly-pinned scheduling cases cuts didn't help.
+
+    ``heuristic_time_limit`` — seconds for :func:`_rmp_integer_heuristic`,
+    run at each fractional node (the node's grown column pool often holds
+    a better schedule than the last incumbent); ``0`` disables it. It only supplies incumbents, so the optimum
+    is unchanged.
+
+    Pruning uses objective integrality when it holds: with ``weight2 == 0``
+    and integer job weights, f1 = Σ w_j C_j − Σ w_j a_j over integer
+    completions C_j, so two schedules' objectives differ by a multiple of
+    ``weight1``. A node then holds a strictly better schedule only if its
+    bound is at most ``best − weight1``; the 1e-3 margin absorbs the column
+    generation's ``tol``-level bound error. Without it, bounds within that
+    error of the optimum (e.g. 187.51663 vs 187.516667 on tiny_large) never
+    prune.
     """
     if big_m is None:
         big_m = _big_m_for(inst)
+    prune_gap = tol
+    if weight2 == 0 and weight1 > 0 and all(float(j.weight).is_integer() for j in inst.jobs):
+        prune_gap = max(tol, weight1 - 1e-3)
     arcs_by_type = _build_arcs_by_type(inst)
     arrival_of = {j.id: j.arrival for j in inst.jobs}
     weight_of = {j.id: j.weight for j in inst.jobs}
@@ -1778,8 +1860,11 @@ def _branch_and_price(
             cuts, pool,
             arcs_by_type, arrival_of, weight_of, max_iters_per_node, tol, big_m,
             use_relaxed_prescreen,
+            heuristic_time_limit if heuristic_time_limit > 0 else None,
         )
-        if node.status == "infeasible" or node.objective >= best_obj - tol:
+        if node.incumbent is not None and node.incumbent[0] < best_obj:
+            best_obj, best_assignment = node.incumbent
+        if node.status == "infeasible" or node.objective >= best_obj - prune_gap:
             continue
 
         if node.status == "integral":

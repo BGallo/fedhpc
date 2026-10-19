@@ -53,7 +53,7 @@ def concurrent_instance() -> Instance:
 
 @pytest.fixture
 def small_instance() -> Instance:
-    return Instance.from_file("data/small.json")
+    return Instance.from_file("data/tiny_small.json")
 
 
 # ---------------------------------------------------------------------------

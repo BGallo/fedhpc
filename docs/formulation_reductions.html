@@ -1,0 +1,454 @@
+<title>FED-HPC Reductions</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,600;1,7..72,400&family=Schibsted+Grotesk:wght@500;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a single reading column (~70ch) with a sticky contents rail on wide screens; results are framed blocks with a provenance chip. */
+:root {
+  --paper: #f5f6f8;
+  --sheet: #ffffff;
+  --ink: #1b2129;
+  --muted: #5a6573;
+  --rule: #d9dee5;
+  --accent: #1d5c70;
+  --accent-soft: #e3eef2;
+  --lean: #2c6e49;
+  --lean-soft: #e2f0e7;
+  --paperproof: #8a5a12;
+  --paperproof-soft: #f6ecd9;
+  --tested: #55606e;
+  --tested-soft: #e8ebef;
+  --warn: #9b2c2c;
+  --warn-soft: #f7e3e3;
+  --code-bg: #eef1f4;
+  --f-body: "Literata", "Iowan Old Style", Georgia, serif;
+  --f-head: "Schibsted Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --f-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --paper: #12161b; --sheet: #181d23; --ink: #e2e6eb; --muted: #9aa5b2; --rule: #2c343e;
+  --accent: #7cc0d4; --accent-soft: #1d2f37; --lean: #7fcf9f; --lean-soft: #1b2e23;
+  --paperproof: #e2b56a; --paperproof-soft: #33291a; --tested: #aab4c0; --tested-soft: #252b33;
+  --warn: #f09b9b; --warn-soft: #3a2222; --code-bg: #212830; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --paper: #12161b; --sheet: #181d23; --ink: #e2e6eb; --muted: #9aa5b2; --rule: #2c343e;
+  --accent: #7cc0d4; --accent-soft: #1d2f37; --lean: #7fcf9f; --lean-soft: #1b2e23;
+  --paperproof: #e2b56a; --paperproof-soft: #33291a; --tested: #aab4c0; --tested-soft: #252b33;
+  --warn: #f09b9b; --warn-soft: #3a2222; --code-bg: #212830; color-scheme: dark }
+
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body { background: var(--paper); color: var(--ink); font-family: var(--f-body); font-size: 17px; line-height: 1.62;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 0 64px; }
+.wrap { max-width: 1180px; margin: 0 auto; display: grid; grid-template-columns: minmax(0, 1fr); gap: 40px; }
+@media (min-width: 1060px) { .wrap { grid-template-columns: 240px minmax(0, 1fr); } }
+nav.toc { display: none; }
+@media (min-width: 1060px) {
+  nav.toc { display: block; position: sticky; top: calc(env(safe-area-inset-top, 0px) + 24px); align-self: start; max-height: calc(100vh - 48px); overflow-y: auto; padding-top: 40px; font-family: var(--f-head); font-size: 13.5px; }
+}
+nav.toc ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+nav.toc a { color: var(--muted); text-decoration: none; display: block; padding: 3px 8px; border-radius: 4px; }
+nav.toc a:hover, nav.toc a:focus-visible { color: var(--accent); background: var(--accent-soft); outline: none; }
+nav.toc .num { display: inline-block; width: 1.8em; font-variant-numeric: tabular-nums; color: var(--accent); }
+main { min-width: 0; max-width: 46rem; }
+header.top { padding-block: 48px 24px; border-bottom: 1px solid var(--rule); margin-bottom: 8px; }
+.eyebrow { font-family: var(--f-mono); font-size: 12.5px; letter-spacing: .06em; color: var(--accent); text-transform: uppercase; }
+h1 { font-family: var(--f-head); font-weight: 700; font-size: clamp(1.9rem, 4.2vw, 2.6rem); line-height: 1.12; margin: 10px 0 14px; text-wrap: balance; letter-spacing: -0.01em; }
+.lede { color: var(--muted); font-size: 1.04rem; margin: 0; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-top: 18px; font-family: var(--f-head); font-size: 13px; color: var(--muted); align-items: center; }
+h2 { font-family: var(--f-head); font-weight: 700; font-size: 1.5rem; margin: 56px 0 12px; text-wrap: balance; scroll-margin-top: 20px; }
+h2 .sec { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: .4em; }
+h3 { font-family: var(--f-head); font-weight: 500; font-size: 1.13rem; margin: 32px 0 8px; text-wrap: balance; }
+p { margin: 0 0 14px; }
+a { color: var(--accent); }
+code, .mono { font-family: var(--f-mono); font-size: .84em; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+.lean-name { font-family: var(--f-mono); font-size: .82em; color: var(--lean); }
+ul, ol { padding-left: 1.3em; margin: 0 0 14px; }
+li { margin-bottom: 4px; }
+.math-display { overflow-x: auto; overflow-y: hidden; margin: 10px 0 16px; }
+
+.res { background: var(--sheet); border: 1px solid var(--rule); border-radius: 6px; padding: 14px 18px 6px; margin: 18px 0; }
+.res > .hd { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; margin-bottom: 6px; }
+.res .kind { font-family: var(--f-head); font-weight: 700; font-size: .95rem; }
+.res .ttl { font-family: var(--f-head); font-weight: 500; color: var(--muted); font-size: .95rem; }
+.res .chip { margin-left: auto; }
+.res.def { background: transparent; border-style: dashed; }
+.res.rule { border-color: var(--accent); background: var(--accent-soft); }
+.res.ex { background: var(--warn-soft); border-color: transparent; }
+.proof { border-top: 1px solid var(--rule); margin-top: 8px; padding-top: 10px; }
+.proof > .lbl { font-style: italic; margin-right: .3em; }
+.qed { float: right; color: var(--muted); }
+.proof::after { content: ""; display: block; clear: both; }
+
+.chip { font-family: var(--f-head); font-size: 11.5px; font-weight: 500; letter-spacing: .03em; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.chip.lean { color: var(--lean); background: var(--lean-soft); }
+.chip.paper { color: var(--paperproof); background: var(--paperproof-soft); }
+.chip.tested { color: var(--tested); background: var(--tested-soft); }
+.chip.gap { color: var(--warn); background: var(--warn-soft); }
+
+.tbl { overflow-x: auto; margin: 14px 0 20px; }
+table { border-collapse: collapse; width: 100%; font-size: .93rem; }
+th, td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--rule); }
+th { font-family: var(--f-head); font-weight: 500; color: var(--muted); font-size: .85rem; letter-spacing: .02em; }
+
+figure { margin: 18px 0; }
+figure .svgbox { overflow-x: auto; }
+figure svg { display: block; min-width: 520px; width: 100%; height: auto; }
+figcaption { color: var(--muted); font-size: .9rem; margin-top: 6px; }
+.svg-ink { stroke: var(--ink); fill: var(--ink); }
+.svg-muted { fill: var(--muted); }
+.gaps li { margin-bottom: 10px; }
+footer { margin-top: 56px; border-top: 1px solid var(--rule); padding-top: 16px; color: var(--muted); font-size: .9rem; }
+</style>
+
+<script>
+window.MathJax = {
+  tex: {
+    inlineMath: [['\\(', '\\)']], displayMath: [['\\[', '\\]']],
+    macros: {
+      J: '\\mathcal{J}', M: '\\mathcal{M}', U: '\\mathcal{U}', Mcap: '\\mathcal{M}^{\\mathrm{cap}}',
+      Sched: '\\mathfrak{S}', Rep: '\\operatorname{Rep}', Run: '\\operatorname{run}', Busy: '\\operatorname{busy}',
+      St: '\\operatorname{st}', En: '\\operatorname{en}', Rc: '\\operatorname{rc}', Idle: '\\operatorname{idle}',
+      Nxt: '\\operatorname{nxt}', Cut: '\\operatorname{cut}', Z: '\\mathbb{Z}', N: '\\mathbb{N}', R: '\\mathbb{R}',
+      pP: '\\preceq_{\\mathrm{P}}', pW: '\\preceq_{\\alpha,\\beta}', pL: '\\preceq_{\\mathrm{L}}',
+      ind: ['\\mathbf{1}[#1]', 1], bN: '\\bar N'
+    }
+  },
+  svg: { fontCache: 'global' },
+  startup: { typeset: true }
+};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg-full.js"></script>
+
+<div class="wrap">
+<nav class="toc" aria-label="Contents">
+  <ol>
+    <li><a href="#problem"><span class="num">1</span>The problem</a></li>
+    <li><a href="#covering"><span class="num">2</span>Coverings</a></li>
+    <li><a href="#model"><span class="num">3</span>The space-time model</a></li>
+    <li><a href="#leftshift"><span class="num">4</span>Left shifts &amp; patterns</a></li>
+    <li><a href="#n1"><span class="num">5</span>N1 Normal patterns</a></li>
+    <li><a href="#n2"><span class="num">6</span>N2 Compressed graph</a></li>
+    <li><a href="#r1r2"><span class="num">7</span>R1, R2 Unbounded types</a></li>
+    <li><a href="#r3"><span class="num">8</span>R3 Weighted deadlines</a></li>
+    <li><a href="#lx"><span class="num">9</span>LX Lex deadlines</a></li>
+    <li><a href="#main"><span class="num">10</span>Main theorem</a></li>
+    <li><a href="#status"><span class="num">11</span>State of the proofs</a></li>
+  </ol>
+</nav>
+
+<main>
+<header class="top">
+  <div class="eyebrow">fedhpc · SpaceTimeFormulation · 16 Oct 2026</div>
+  <h1>The FED-HPC space-time formulation and its exact reductions</h1>
+  <p class="lede">The scheduling problem, the flow model in <code>src/fedhpc/formulations.py</code>, and a proof of each of the six model reductions: N1 normal patterns, N2 compressed graph, R1 collapse, R2 Pareto filter, R3 weighted deadlines and LX lex deadlines. Every exactness proof uses the same two tools: coverings of the feasible set, and the <em>remove-then-left-shift</em> lemma. The LaTeX source of the same text is <code>docs/formulation_reductions.tex</code>.</p>
+  <div class="legend"><span>Provenance of each result:</span>
+    <span class="chip lean">Lean-checked</span><span class="chip paper">paper proof here</span><span class="chip tested">tested only</span><span class="chip gap">open</span></div>
+</header>
+
+<!-- ============================================================ -->
+<h2 id="problem"><span class="sec">1</span>The problem</h2>
+
+<h3>Data</h3>
+<ul>
+<li><strong>Jobs</strong> \(\J\). Job \(j\) has arrival \(a_j\in\R\), execution time \(e_j\gt 0\), I/O volume \(\iota_j\ge 0\), demands \((q^{\mathrm{cpu}}_j,q^{\mathrm{mem}}_j,q^{\mathrm{stor}}_j)\) and weight \(w_j\in\R\) (default 1).</li>
+<li><strong>Instance types</strong> \(\M\). Type \(m\) has performance \(P_m\), I/O time \(\tau^{\mathrm{IO}}_m\), deploy time \(\pi_m\), prices \(\kappa^{\mathrm{IO}}_m,\kappa^{\mathrm{VM}}_m,\kappa^{\mathrm S}_m\), sizes \(C^{\cdot}_m\), capacity \(N_m\in\N\cup\{\infty\}\) (<code>capacity=None</code> is \(\infty\)) and fixed usage cost \(U_m\) (<code>fixed_cost</code>).</li>
+<li><strong>Horizon</strong> \(H\ge 1\). A <em>slot</em> \(u\in\{0,\dots,H-1\}\) is \([u,u+1)\); a <em>time</em> or <em>node</em> \(v\in\{0,\dots,H\}\) is an instant.</li>
+<li><strong>Running jobs</strong>: \(\rho\) occupies one unit of a finite-capacity type from 0 until \(e_\rho\ge 1\).</li>
+</ul>
+
+<h3>Derived parameters (<code>Instance.build</code>)</h3>
+<div class="math-display">\[
+\begin{aligned}
+F_j &= \{m : q^{\mathrm{cpu}}_j\le C^{\mathrm{cpu}}_m,\ q^{\mathrm{mem}}_j\le C^{\mathrm{mem}}_m,\ q^{\mathrm{stor}}_j\le C^{\mathrm{stor}}_m\} &&\text{(eq. 1)}\\
+p^{\mathrm{bill}}_{jm} &= e_j/P_m+\tau^{\mathrm{IO}}_m\iota_j &&\text{(eq. 2)}\\
+p_{jm} := p^{\mathrm{occ}}_{jm} &= \max\bigl(1,\lceil p^{\mathrm{bill}}_{jm}+\pi_m\rceil\bigr)\in\Z_{\ge 1} &&\text{(eq. 3)}\\
+c_{jm} &= \kappa^{\mathrm{IO}}_m\iota_j+\kappa^{\mathrm{VM}}_m p^{\mathrm{bill}}_{jm}+\kappa^{\mathrm S}_m q^{\mathrm{stor}}_j p^{\mathrm{bill}}_{jm} &&\text{(eq. 4)}\\
+r_j := \max(0,\lceil a_j\rceil),\quad T_{jm} &= [\,r_j,\ H-p_{jm}\,]_\Z &&\text{(eq. 5)}
+\end{aligned}\]</div>
+<p>The release \(r_j\) is the same on every type. <code>build</code> rejects empty \(F_j\) and empty \(T_{jm}\). Running jobs on unlimited types are discarded. Ends are clipped to \(\min(e_\rho,H)\), and \(R_m\le N_m\) is enforced. For a finite-capacity type:</p>
+<div class="math-display">\[\Run_m(u)=|\{\rho\in\mathcal R_m:e_\rho\gt u\}|,\qquad \Rc_m(v)=|\{\rho\in\mathcal R_m:e_\rho=v\}|.\]</div>
+
+<h3>Schedules, feasibility, objectives</h3>
+<div class="res def"><div class="hd"><span class="kind">Definition 1.1</span><span class="ttl">Schedule</span></div>
+<p>A schedule \(\sigma=(\mu,s)\) has \(\mu_j\in F_j\), \(s_j\in T_{j\mu_j}\), and completions \(C_j=s_j+p_{j\mu_j}\). For a type \(m\), with \(\J_m=\{j:\mu_j=m\}\):</p>
+<div class="math-display">\[\Busy_m(u)=|\{j\in\J_m:s_j\le u\lt C_j\}|,\quad \St_m(v)=|\{j\in\J_m:s_j=v\}|,\quad \En_m(v)=|\{j\in\J_m:C_j=v\}|.\]</div>
+<p>\(\sigma\) is <em>feasible</em> if \(\Run_m(u)+\Busy_m(u)\le N_m\) for every type and slot. \(\Sched\) denotes the finite set of feasible schedules.</p></div>
+
+<div class="math-display">\[f_1(\sigma)=\sum_j w_j(C_j-a_j),\qquad f_2(\sigma)=\sum_j c_{j\mu_j}+\sum_{m\in\mu(\J)}U_m.\]</div>
+
+<div class="res def"><div class="hd"><span class="kind">Assumption 1.2</span><span class="ttl">Nonnegative data, <code>nonnegative_data</code></span></div>
+<p>\(w\ge 0\), \(c\ge 0\), \(U\ge 0\). Then \(f_1\) is nondecreasing in every completion and \(f_2\) does not depend on start times. Also \(C_j-a_j\ge 1\) always, since \(s_j\ge r_j\ge a_j\) and \(p\ge 1\).</p></div>
+
+<p>The code solves three problem families over \(\Sched\):</p>
+<ul>
+<li><strong>Weighted sum</strong> \(\mathrm W(\alpha,\beta,\varepsilon)\): \(\min\alpha f_1+\beta f_2\) s.t. \(f_1\le\varepsilon\), with \(\alpha,\beta\ge 0\).</li>
+<li><strong>Lexicographic</strong> \(\mathrm L(\varepsilon)\): lex-min \((f_1,f_2)\) s.t. \(f_1\le\varepsilon\).</li>
+<li><strong>Monotone</strong> \(\mathrm M(\Phi,K)\): \(\min\Phi(f_1,f_2)\) s.t. \((f_1,f_2)\in K\), with \(\Phi\) nondecreasing in each argument and \(K\) down-closed. This covers f2 caps (<code>solve_epsilon_cost</code>), box searches and the Pareto front \(\mathrm{ND}(\Sched)\).</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2 id="covering"><span class="sec">2</span>Coverings: the tool behind every exactness proof</h2>
+<div class="res def"><div class="hd"><span class="kind">Definition 2.1</span><span class="ttl">Preorders on schedules</span></div>
+<div class="math-display">\[\begin{aligned}
+\sigma'\pP\sigma &\iff f_1'\le f_1\ \wedge\ f_2'\le f_2\\
+\sigma'\pW\sigma &\iff f_1'\le f_1\ \wedge\ \alpha f_1'+\beta f_2'\le\alpha f_1+\beta f_2\\
+\sigma'\pL\sigma &\iff f_1'\lt f_1\ \vee\ (f_1'=f_1\wedge f_2'\le f_2)
+\end{aligned}\]</div>
+<p>All three are reflexive and transitive. \(\pP\) implies the other two, and each implies \(f_1'\le f_1\). A set \(\hat\Sched\subseteq\Sched\) is a <strong>\(\preceq\)-covering</strong> if every \(\sigma\in\Sched\) has some \(\hat\sigma\in\hat\Sched\) with \(\hat\sigma\preceq\sigma\).</p></div>
+
+<div class="res"><div class="hd"><span class="kind">Lemma 2.2</span><span class="ttl">Coverings preserve optima</span><span class="chip paper">paper proof here</span></div>
+<p>Let \(\hat\Sched\subseteq\Sched\). (a) A \(\pP\)-covering preserves the optimal value of every monotone problem and the Pareto front: \(\mathrm{ND}(\hat\Sched)=\mathrm{ND}(\Sched)\). (b) A \(\pW\)-covering preserves \(\mathrm W(\alpha,\beta,\varepsilon)\) for all \(\varepsilon\). (c) A \(\pL\)-covering preserves \(\mathrm L(\varepsilon)\) for all \(\varepsilon\). In each case an optimum over \(\hat\Sched\) is an optimum over \(\Sched\).</p>
+<div class="proof"><span class="lbl">Proof.</span> \(\Sched\) is finite, so optima exist, and \(\hat\Sched\subseteq\Sched\) can only be worse. Take an optimum \(\sigma^\star\) and its cover \(\hat\sigma\).
+(a) \(f(\hat\sigma)\le f(\sigma^\star)\in K\), so \(f(\hat\sigma)\in K\) and \(\Phi(f(\hat\sigma))\le\Phi(f(\sigma^\star))\).
+For fronts: if \(y=f(\sigma)\) is nondominated, its cover has \(f(\hat\sigma)\le y\), hence \(=y\), so \(y\in f(\hat\Sched)\).
+If \(y\in\mathrm{ND}(\hat\Sched)\) were dominated by some \(f(\sigma')\), then the cover of \(\sigma'\) would dominate \(y\) inside \(f(\hat\Sched)\), a contradiction.
+(b), (c) The cover keeps \(f_1\le\varepsilon\) and is no worse in the target order. <span class="qed">∎</span></div></div>
+<p>Coverings compose by transitivity. Every proof below transforms \(\sigma\) through a finite chain of feasible schedules, each \(\preceq\) the one before.</p>
+
+<!-- ============================================================ -->
+<h2 id="model"><span class="sec">3</span>The space-time model</h2>
+
+<h3>Single-type bookkeeping</h3>
+<div class="res"><div class="hd"><span class="kind">Lemma 3.1</span><span class="ttl">Slot recurrences</span><span class="chip lean">Lean: <span class="lean-name">run_succ, busy_succ, …</span></span></div>
+<p>For \(0\le u\lt H-1\): \(\Run(u+1)=\Run(u)-\Rc(u+1)\) and \(\Busy(u+1)=\Busy(u)-\En(u+1)+\St(u+1)\). At the boundaries: \(\Rc(0)=0\), \(\Run(0)=R\), \(\En(0)=0\), \(\Busy(0)=\St(0)\); \(\Run(H-1)=\Rc(H)\), \(\Busy(H-1)=\En(H)\), \(\St(H)=0\).</p>
+<div class="proof"><span class="lbl">Proof.</span> A job occupies \(u+1\) but not \(u\) iff it starts at \(u+1\), and \(u\) but not \(u+1\) iff it completes at \(u+1\); likewise for running jobs. At 0, \(e_\rho\ge 1\) and \(C_j\ge 1\). At \(H\), everything ends by \(H\), and \(s_j\le H-1\). <span class="qed">∎</span></div></div>
+<p>With \(\Idle(u):=N-\Run(u)-\Busy(u)\), capacity feasibility is \(\Idle\ge 0\), and</p>
+<div class="math-display">\[\Idle(0)=N-R-\St(0),\qquad \Idle(u+1)=\Idle(u)+\Rc(u+1)+\En(u+1)-\St(u+1).\tag{I}\]</div>
+
+<h3>The model</h3>
+<p>Allowed starts are \(S_{jm}\subseteq T_{jm}\) (equal to \(T_{jm}\) in the plain model), and \(X=\{(j,m,t):m\in F_j,\ t\in S_{jm}\}\). An unlimited type uses \(\bN_m=|\J|\); otherwise \(\bN_m=N_m\).</p>
+<ul>
+<li>\(x_{jmt}\in\{0,1\}\): job \(j\) starts on \(m\) at \(t\) (eq. 21).</li>
+<li>\(y_{mt}\ge 0\): idle units of \(m\) in slot \(t\), integer unless <code>continuous_idle</code> (eq. 22).</li>
+<li>\(z_m\in\{0,1\}\) for each \(m\) with \(U_m\gt 0\).</li>
+</ul>
+<div class="math-display">\[\begin{aligned}
+&\textstyle\sum_{m,t}x_{jmt}=1 && j\in\J &&\text{(A)}\\
+&y_{m,v-1}+\textstyle\sum_{j}x_{j,m,v-p_{jm}}+\Rc_m(v)=y_{m,v}+\textstyle\sum_j x_{jmv} && v\in[0,H]_\Z &&\text{(F)}\\
+&\textstyle\sum_{t}x_{jmt}\le z_m && U_m\gt 0 &&\text{(Z)}
+\end{aligned}\]</div>
+<p>The boundary constants are \(y_{m,-1}=\bN_m-R_m\) and \(y_{m,H}=\bN_m\) (eq. 14). The code's \(\max(0,\cdot)\) is inactive because \(R_m\le N_m\). The objectives are \(f_1=\sum w_j(t+p_{jm}-a_j)x_{jmt}\) and \(f_2=\sum c_{jm}x_{jmt}+\sum U_mz_m\). Both iterate over the model's own \(X\), so they stay correct when \(X\) shrinks. \(\Rep(\mathcal M)\) is the set of schedules whose incidence vector extends to a feasible \((x,y,z)\).</p>
+
+<div class="res"><div class="hd"><span class="kind">Theorem 3.2</span><span class="ttl">Flow conservation ⇔ capacity</span><span class="chip paper">paper proof here</span></div>
+<p>For a fixed schedule, the rows (F) of type \(m\) have exactly one solution, \(y_{m,u}=\Idle_m(u)\). So \(x^\sigma\) extends to \(y\ge 0\) iff \(\sigma\) is capacity-feasible on \(m\), and then \(y\) is integral. In particular, <code>continuous_idle</code> is exact.</p>
+<div class="proof"><span class="lbl">Proof.</span> Row 0 gives \(y_0=\bN-R+\Rc(0)-\St(0)=\Idle(0)\). Rows \(1..H-1\) give \(y_v=y_{v-1}+\En(v)+\Rc(v)-\St(v)\), which is \(\Idle(v)\) by (I). Row \(H\) reads \(\Idle(H-1)+\En(H)+\Rc(H)=\bN\); this holds by Lemma 3.1. <span class="qed">∎</span></div></div>
+
+<div class="res"><div class="hd"><span class="kind">Lemma 3.3</span><span class="ttl">Fixed costs</span><span class="chip paper">paper proof here</span></div>
+<p>With \(U\ge 0\), (Z) for binary \(x^\sigma\) reads \(z_m\ge\ind{m\in\mu(\J)}\). The least such \(z\) gives \(f_2(x,z)=f_2(\sigma)\), so every problem nondecreasing in \(f_2\) is solved correctly. The aggregated per-\((j,m)\) row is LP-tighter than \(x_{jmt}\le z_m\). With \(U_m\lt 0\) the plain model would set \(z_m=1\) on unused types.</p></div>
+
+<p><strong>The occupancy formulation</strong> uses \(w_{mt}=\Busy_m(t)\le\max(0,\bN_m-\Run_m(t))\). It represents \(\Sched\) by definition, and no reduction is applied to it.</p>
+
+<div class="res"><div class="hd"><span class="kind">Proposition 3.4</span><span class="ttl"><code>cover_ge</code> (Σx ≥ 1)</span><span class="chip paper">paper proof here</span></div>
+<p>Under nonnegative data, the optimal values are unchanged: deleting a surplus copy lowers occupancy and changes the objective by \(-\alpha w_j(C-a_j)-\beta c_{jm}\le 0\). In N2, the repair also needs Theorem 6.6. An optimum <em>can</em> still duplicate a job when that copy contributes 0, which happens iff \(\alpha w_j=0\) and \(\beta c_{jm}=0\) (for example \(w_j=0\) on a free on-prem type). The class docstring's claim that no optimum duplicates a job therefore needs \(\alpha w_j\gt 0\).</p></div>
+
+<!-- ============================================================ -->
+<h2 id="leftshift"><span class="sec">4</span>Left shifts and normal patterns (one type)</h2>
+<p>Fix a finite-capacity type and jobs \(J\) on it with starts \(s_j\in[r_j,H-p_j]\). \((J,s)\) is <strong>left-shifted</strong> if every \(j\) with \(s_j\gt r_j\) has the slot \(s_j-1\) full: \(\Run+\Busy=N\) there.</p>
+
+<div class="res"><div class="hd"><span class="kind">Theorem 4.1</span><span class="ttl">Existence of a left shift</span><span class="chip lean">Lean: <span class="lean-name">exists_leftShift</span></span></div>
+<p>Every feasible \((J,s)\) has a feasible left-shifted \(s'\) with \(r_j\le s'_j\le s_j\).</p>
+<div class="proof"><span class="lbl">Proof.</span> Induction on \(\sum_j s_j\). If some \(j\) has \(s_j\gt r_j\) and slot \(s_j-1\) not full, start \(j\) one slot earlier. Occupancy rises by 1 only in that non-full slot, so it stays \(\le N\), and the sum drops by 1. <span class="qed">∎</span></div></div>
+
+<div class="res def"><div class="hd"><span class="kind">Definition 4.2</span><span class="ttl">Pattern set</span></div>
+<p>\(P\subseteq\N\) is a pattern set if (P1) \(r_j\in P\) for every job feasible on the type; (P2) \(e_\rho\in P\) for every running end; (P3) \(q\in P,\ q\ge r_j,\ q+p_j\le H\Rightarrow q+p_j\in P\). The least pattern set is the set of normal patterns \(P^\star\) (Kramer et al. 2020, Alg. 1).</p></div>
+
+<div class="res"><div class="hd"><span class="kind">Theorem 4.3</span><span class="ttl">Left-shifted starts are patterns</span><span class="chip lean">Lean: <span class="lean-name">leftShifted_mem_pattern</span></span></div>
+<p>If \((J,s)\) is feasible and left-shifted, then \(s_j\in P\) for every pattern set \(P\).</p>
+<div class="proof"><span class="lbl">Proof.</span> Strong induction on \(s_j\). If \(s_j=r_j\), use (P1). Otherwise slot \(v-1\) is full, where \(v=s_j\). Slot \(v\) is within capacity and contains a start, so Lemma 3.1 gives \(\Rc(v)+\En(v)\ge\St(v)\ge 1\). Either a running job ends at \(v\) (P2), or some \(k\) with \(s_k\lt v\) ends at \(v\): \(s_k\in P\) by induction, and \(v=s_k+p_k\in P\) by (P3). <span class="qed">∎</span></div></div>
+
+<div class="res"><div class="hd"><span class="kind">Lemma 4.4</span><span class="ttl">The computed mask is a pattern set</span><span class="chip paper">paper proof here</span></div>
+<p><code>normal_pattern_starts</code> and <code>_ext/graph.cpp</code> seed the releases and running ends, then sweep \(q=0..H\) upward. For each distinct \(p\) they mark \(q+p\) when \(q\ge a_{\min}(p)\), the smallest release among jobs with that \(p\). Marks only go to larger indices, so \(q\)'s mark is final when it is visited. Since \(a_{\min}(p_j)\le r_j\), (P3) holds. The result is generally a strict superset of \(P^\star\), which is safe.</p></div>
+
+<!-- ============================================================ -->
+<h2 id="n1"><span class="sec">5</span>N1: normal-pattern starts</h2>
+<div class="res rule"><div class="hd"><span class="kind">Rule</span><span class="ttl"><code>normal_patterns=True</code></span></div>
+<p>\(S_{jm}:=T_{jm}\cap P_m\). The full time grid of \(y\) and the rows (F) are kept.</p></div>
+<div class="res"><div class="hd"><span class="kind">Theorem 5.1</span><span class="ttl">N1 is a \(\pP\)-covering (needs \(w\ge 0\))</span><span class="chip paper">composes Lean results</span></div>
+<div class="proof"><span class="lbl">Proof.</span> Soundness is Theorem 3.2. Given \(\sigma\), left-shift each flow type separately (Theorem 4.1). The new starts lie in \(P\) (Theorem 4.3 and Lemma 4.4) and still satisfy \(s'+p\le H\). \(\mu\) is unchanged, so \(f_2\) is unchanged, and \(f_1\) does not rise. <span class="qed">∎</span></div></div>
+
+<!-- ============================================================ -->
+<h2 id="n2"><span class="sec">6</span>N2: the compressed arc-flow graph</h2>
+<div class="res rule"><div class="hd"><span class="kind">Rule</span><span class="ttl"><code>compressed_flow=True</code></span></div>
+<ul>
+<li>Events \(E=\{0,H\}\cup\{r_j\}\cup\{e_\rho\}\); nodes \(V=P_m\cup\{0,H\}\supseteq E\).</li>
+<li>One loss arc per node \(q\lt H\), from \(q\) to \(\Nxt(q)=\min\{e\in E:e\gt q\}\), carrying a continuous flow \(\ell_q\in[0,\bN]\).</li>
+<li>Job arcs \((t,t+p)\) for \(t\in T\cap P\). Both ends are nodes by (P3).</li>
+</ul>
+<div class="math-display">\[\ind{v=0}(\bN-R)+\ind{v\gt 0}\!\!\sum_{\Nxt(q)=v}\!\!\ell_q+\En(v)+\Rc(v)=\ind{v=H}\bN+\ind{v\lt H}\ell_v+\St(v)\qquad(v\in V)\tag{CF}\]</div>
+<p>The grid model is the special case \(E=V=[0,H]\). Let \(\Lambda(u)=\sum_{q\le u\lt\Nxt(q)}\ell_q\) be the idle flow spanning slot \(u\) (<span class="lean-name">arcIdle</span>).</p></div>
+
+<div class="res"><div class="hd"><span class="kind">Lemma 6.1</span><span class="ttl">Arc bookkeeping</span><span class="chip lean">Lean: <span class="lean-name">arc_succ, inLoss_of_mem_E, …</span></span></div>
+<p>(a) \(\Lambda(0)=\ell_0\). (b) \(\Lambda(u+1)=\Lambda(u)-\sum_{\Nxt(q)=u+1}\ell_q+\ind{u+1\in V}\ell_{u+1}\). (c) No arc ends at a time \(v\notin E\). (d) For \(v\in E\), \(v\gt 0\): \(\sum_{\Nxt(q)=v}\ell_q=\Lambda(v-1)\), because every arc spanning \(v-1\) must stop at the event \(v\).</p></div>
+
+<div class="res"><div class="hd"><span class="kind">Theorem 6.2</span><span class="ttl">Soundness</span><span class="chip lean">Lean: <span class="lean-name">invariant, sound, soundR</span></span></div>
+<p>If all job arcs lie on nodes and \(\ell\ge 0\) (real) satisfies (CF), then \(\Lambda(u)+\Run(u)+\Busy(u)=\bN\) for every slot. In particular, capacity holds.</p>
+<div class="proof"><span class="lbl">Proof.</span> Induction on \(u\). Base: row 0. Step to \(v=u+1\): if \(v\in V\), row \(v\) and Lemma 6.1(b) change \(\Lambda\) by \(\En+\Rc-\St\) at \(v\), exactly offsetting Lemma 3.1. If \(v\notin V\), then \(v\notin E\), and nothing starts, ends or is released at \(v\), so all terms are unchanged. <span class="qed">∎</span></div></div>
+
+<div class="res"><div class="hd"><span class="kind">Lemma 6.3</span><span class="ttl">Idle never drops at non-events</span><span class="chip lean">Lean: <span class="lean-name">idle_mono</span></span></div>
+<p>For a feasible left-shifted schedule and \(0\lt v\lt H\) with \(v\notin E\): \(\Idle(v-1)\le\Idle(v)\). If some job starts at \(v\), it is not at its release (\(v\notin E\)), so slot \(v-1\) is full and \(\Idle(v-1)=0\). Otherwise \(\Idle(v)-\Idle(v-1)=\En(v)\ge 0\).</p></div>
+
+<div class="res"><div class="hd"><span class="kind">Theorem 6.4</span><span class="ttl">Completeness for left-shifted schedules</span><span class="chip lean">Lean: <span class="lean-name">lossOf, arcIdle_lossOf, complete</span></span></div>
+<p>For a feasible left-shifted schedule with arcs on nodes, \(\ell_q=\Idle(q)\) for \(q\in E\) and \(\ell_q=\Idle(q)-\Idle(q-1)\) otherwise. This flow satisfies \(0\le\ell\le\bN\), \(\Lambda=\Idle\), and every row (CF).</p>
+<div class="proof"><span class="lbl">Proof.</span> Nonnegativity comes from Lemma 6.3. \(\Lambda=\Idle\) by induction: at an event, the arcs into \(v\) carry exactly \(\Lambda(v-1)\) (Lemma 6.1d), which is replaced by \(\ell_v=\Idle(v)\). At a non-event node the increment is added. At a non-node nothing changes. Each row then reduces to (I). <span class="qed">∎</span></div></div>
+
+<div class="res ex"><div class="hd"><span class="kind">Example 6.5</span><span class="ttl">Removal alone is unsound</span></div>
+<p>Take \(N=1\), \(H=10\), and jobs \(A\) (\(p=3\)) and \(B\) (\(p=2\)), both released at 0. Then \(E=\{0,10\}\) and every loss arc jumps to 10. \(A@0,B@3\) has the flow \(\ell_0=\ell_3=0\), \(\ell_5=1\). Now move \(A\) to the cloud. Row 0 forces \(\ell_0=1\), which leaves along \(0\to 10\), and row 3 then needs \(\ell_3=-1\). So \(B@3\) is no longer representable, although it is capacity-feasible. Shifting \(B\) to 0 repairs it.</p>
+<figure>
+<div class="svgbox">
+<svg viewBox="0 0 640 150" role="img" aria-label="Timeline 0 to 10; job A arc from 0 to 3, job B arc from 3 to 5, dashed loss arc from 0 to 10.">
+  <line x1="40" y1="70" x2="600" y2="70" class="svg-ink" stroke-width="1" />
+  <g font-family="JetBrains Mono, monospace" font-size="12" text-anchor="middle">
+    <text x="40" y="92" class="svg-muted">0</text><text x="96" y="92" class="svg-muted">1</text><text x="152" y="92" class="svg-muted">2</text><text x="208" y="92" class="svg-muted">3</text><text x="264" y="92" class="svg-muted">4</text><text x="320" y="92" class="svg-muted">5</text><text x="376" y="92" class="svg-muted">6</text><text x="432" y="92" class="svg-muted">7</text><text x="488" y="92" class="svg-muted">8</text><text x="544" y="92" class="svg-muted">9</text><text x="600" y="92" class="svg-muted">10</text>
+  </g>
+  <g class="svg-ink">
+    <circle cx="40" cy="70" r="4"/><circle cx="152" cy="70" r="4"/><circle cx="208" cy="70" r="4"/><circle cx="264" cy="70" r="4"/><circle cx="320" cy="70" r="4"/><circle cx="376" cy="70" r="4"/><circle cx="432" cy="70" r="4"/><circle cx="488" cy="70" r="4"/><circle cx="544" cy="70" r="4"/><circle cx="600" cy="70" r="4"/>
+  </g>
+  <circle cx="96" cy="70" r="4" fill="none" stroke="var(--muted)" stroke-width="1.2"/>
+  <path d="M40 64 Q124 8 208 64" fill="none" stroke="var(--accent)" stroke-width="2.2"/>
+  <text x="124" y="28" font-family="Schibsted Grotesk, sans-serif" font-size="13" fill="var(--accent)" text-anchor="middle">A</text>
+  <path d="M208 64 Q264 22 320 64" fill="none" stroke="var(--lean)" stroke-width="2.2"/>
+  <text x="264" y="36" font-family="Schibsted Grotesk, sans-serif" font-size="13" fill="var(--lean)" text-anchor="middle">B</text>
+  <path d="M40 100 Q320 160 600 100" fill="none" stroke="var(--warn)" stroke-width="1.6" stroke-dasharray="6 5"/>
+  <text x="320" y="142" font-family="Schibsted Grotesk, sans-serif" font-size="12" fill="var(--warn)" text-anchor="middle">loss arc 0 → nxt(0) = 10</text>
+</svg>
+</div>
+<figcaption>Filled dots are nodes. Time 1 is not a pattern. The only loss arc out of 0 skips node 3.</figcaption>
+</figure></div>
+
+<div class="res"><div class="hd"><span class="kind">Theorem 6.6</span><span class="ttl">Represent; remove then left-shift</span><span class="chip lean">Lean: <span class="lean-name">represent, remove_then_leftShift</span></span></div>
+<p>(a) Every capacity-feasible \((J,s)\) has \(s'\) with \(r_j\le s'_j\le s_j\), \(s'_j\in P\), and a compressed flow. (b) If \((J,s)\) has a compressed flow and \(J'\subseteq J\), the remaining jobs may lose their flow, but after a left shift they have one, with starts in \(P\) and no later than before.</p>
+<div class="proof"><span class="lbl">Proof.</span> (a) Theorems 4.1, 4.3 and 6.4, with (P3) placing the arc ends on nodes. (b) Theorem 6.2 gives capacity; removing jobs keeps it; then apply (a). <span class="qed">∎</span></div></div>
+
+<div class="res"><div class="hd"><span class="kind">Theorem 6.7</span><span class="ttl">N2 is a \(\pP\)-covering (needs \(w\ge 0\))</span><span class="chip paper">composes Lean results</span></div>
+<p>Soundness comes from Theorem 6.2 per type, and the covering from Theorem 6.6(a) per type.</p></div>
+
+<!-- ============================================================ -->
+<h2 id="r1r2"><span class="sec">7</span>Unbounded types, R1 and R2</h2>
+<p>From here on nonnegative data is assumed. If it fails, <code>_reduce</code> is skipped.</p>
+<div class="res def"><div class="hd"><span class="kind">Definition 7.1</span><span class="ttl">Unbounded type, <code>unbounded_types</code></span></div>
+<p>\(m\in\U\) iff \(N_m=\infty\) or \(N_m-R_m\ge n_m:=|\{j:m\in F_j\}|\). Then \(\Run+\Busy\le R_m+n_m\le N_m\), so every assignment to \(m\) is feasible (Lemma 7.2). \(\Mcap=\M\setminus\U\).</p></div>
+
+<div class="res"><div class="hd"><span class="kind">Lemma 7.3</span><span class="ttl">Relocation</span><span class="chip paper">paper proof here</span></div>
+<p>Moving job \(j\) from a feasible \(\sigma\) to \((k,r_j)\) with \(k\in\U\cap F_j\) gives a feasible \(\sigma'\) with</p>
+<div class="math-display">\[f_1(\sigma')-f_1(\sigma)=w_j(r_j+p_{jk}-C_j),\qquad f_2(\sigma')-f_2(\sigma)\le c_{jk}-c_{j\mu_j}+U_k,\]</div>
+<p>and without the \(U_k\) term if \(U_k=0\). The proof uses \(\mu'(\J)\subseteq\mu(\J)\cup\{k\}\) and \(U\ge 0\); the source type only loses occupancy.</p></div>
+<p>Write \(C_{jk}:=\min S_{jk}+p_{jk}=r_j+p_{jk}\) for the earliest completion on \(k\). The release is in \(T\) and is a pattern seed, so \(\min S_{jk}=r_j\) in every configuration.</p>
+
+<div class="res rule"><div class="hd"><span class="kind">Rule R1</span><span class="ttl"><code>collapse_unbounded</code></span></div>
+<p>For \(k\in\U\): \(S_{jk}:=\{r_j\}\), and \(k\) gets no flow network.</p></div>
+<div class="res"><div class="hd"><span class="kind">Lemma 7.4</span><span class="ttl">R1</span><span class="chip paper">paper proof here</span></div>
+<p>Moving every job on an unbounded type to its release is feasible by Lemma 7.2, leaves \(f_2\) unchanged and does not raise \(f_1\): \(\pP\). Without a flow network, only (A) and (Z) mention \(k\).</p></div>
+
+<div class="res rule"><div class="hd"><span class="kind">Rule R2</span><span class="ttl"><code>pareto_unbounded</code></span></div>
+<p>Scan the unbounded options \(K^0_j\) by the key \((C_{jk},c_{jk},\ind{U_k\gt 0},k)\), tracking \(b=\min\{c_{jd}:d\text{ kept},U_d=0\}\). Keep \(k\) iff \(c_{jk}\lt b\). The kept options form \(K^2_j\).</p></div>
+<div class="res"><div class="hd"><span class="kind">Lemma 7.5</span><span class="ttl">R2</span><span class="chip paper">paper proof here</span></div>
+<p>Each rejected \(k\) has a kept \(d\), scanned earlier, with \(U_d=0\), \(C_{jd}\le C_{jk}\) and \(c_{jd}\le c_{jk}\). Relocating to \(d\) is \(\pP\). The first option scanned is always kept, so \(\min_{K^2}C=\min_{K^0}C\). Options with a fixed cost never act as dominators, because their marginal cost depends on the other jobs.</p></div>
+
+<!-- ============================================================ -->
+<h2 id="r3"><span class="sec">8</span>R3: rejection deadlines for weighted sums</h2>
+<p>Hint <code>objective=(α, β)</code> with \(\alpha,\beta\ge 0\). Target problems: \(\mathrm W(\alpha,\beta,\varepsilon)\).</p>
+<div class="math-display">\[\varphi_j(m,t)=\alpha w_j(t+p_{jm}-a_j)+\beta c_{jm}\ \ (\text{nondecreasing in }t),\qquad \rho_{jk}=\varphi_j(k,r_j)+\beta U_k .\]</div>
+<p>\(\varphi_j(m,t)\) is the job's own contribution to the scalar objective, and \(\rho_{jk}\) bounds what placing \(j\) on \(k\) adds, fixed cost included.</p>
+<div class="res rule"><div class="hd"><span class="kind">Rule R3</span><span class="ttl"><code>rejection_deadlines</code></span></div>
+<p><strong>Unbounded options.</strong> Scan \(K^2_j\) by \((\rho,C,k)\). Keep \(k\) unless an already-kept \(d\) has \(C_{jd}\le C_{jk}\) and \(\rho_{jd}\le\varphi_j(k,r_j)\). The kept options form \(K^3_j\).</p>
+<p><strong>Capacitated types.</strong></p>
+<div class="math-display">\[\tau_{jmk}=\min\{t\ge \min S_{jm}:\varphi_j(m,t)\ge\rho_{jk}\},\quad \theta_{jmk}=\max(C_{jk}-p_{jm},\tau_{jmk}),\quad \Cut_{jm}=\min_{k\in K^3_j}\theta_{jmk},\]</div>
+<p>and only starts \(t\lt\Cut_{jm}\) are kept (<code>_first_start_reaching</code>, <code>_truncate</code>).</p></div>
+
+<div class="res"><div class="hd"><span class="kind">Lemma 8.1</span><span class="ttl">Shape of the deadline</span><span class="chip paper">paper proof here</span></div>
+<p>\(t\) is removed iff some \(k\in K^3_j\) has \(t+p_{jm}\ge C_{jk}\) and \(\varphi_j(m,t)\ge\rho_{jk}\). Both conditions only become true as \(t\) grows, so their union over \(k\) is the up-set \(\{t\ge\Cut_{jm}\}\).</p></div>
+
+<div class="res"><div class="hd"><span class="kind">Lemma 8.2</span><span class="ttl">R3 moves</span><span class="chip paper">paper proof here</span></div>
+<p>If \(j\) sits on a removed option \((m_0,t_0)\), there is \(d\in K^3_j\) with \(C_{jd}\le C_j\) and \(\rho_{jd}\le\varphi_j(m_0,t_0)\). No chain is needed, because rejection compares only against kept options. Relocating \(j\) to \(d\) gives</p>
+<div class="math-display">\[\Delta f_1=w_j(C_{jd}-C_j)\le 0,\qquad \alpha\Delta f_1+\beta\Delta f_2\le\rho_{jd}-\varphi_j(m_0,t_0)\le 0,\]</div>
+<p>that is, \(\pW\). The source's fixed cost is never credited and the target's is always charged in full, so the rule holds whatever the other jobs do.</p></div>
+
+<div class="res ex"><div class="hd"><span class="kind">Example 8.3</span><span class="ttl">Invalid under an f2 cap</span></div>
+<p>One job with \(a_j=0\) and \((\alpha,\beta)=(1,1)\). On-prem it completes at 10 with \(c=0\); on the cloud it completes at 2 with \(c=1\). The on-prem score is \(10\ge\rho=3\), so R3 removes it. Under \(f_2\le\tfrac12\) the reduced model is then infeasible while the full model is not. Callers with an f2 cap must pass <code>objective=None</code>. The same example breaks LX.</p></div>
+
+<!-- ============================================================ -->
+<h2 id="lx"><span class="sec">9</span>LX: deadlines for the lexicographic objective</h2>
+<div class="res rule"><div class="hd"><span class="kind">Rule LX</span><span class="ttl"><code>lex_deadlines</code>, hint <code>LEX_F1</code></span></div>
+<p>For \(w_j\gt 0\) and \(K^2_j\ne\emptyset\), let \(c^\star_j=\min_{K^2_j}C_{jk}\). Keep only the unbounded options with \(C_{jk}=c^\star_j\), and on capacitated types only the starts with \(t+p_{jm}\le c^\star_j\). Jobs with \(w_j=0\) are exempt.</p></div>
+
+<div class="res"><div class="hd"><span class="kind">Lemma 9.1</span><span class="ttl">LX moves</span><span class="chip paper">paper proof here</span></div>
+<p>If \(w_j\gt 0\) and \(C_j\gt c^\star_j\), relocating \(j\) to a fastest kept option lowers \(f_1\) by \(w_j(C_j-c^\star_j)\ge w_j\). Both completions are integers, so the gap is at least 1. The move is strictly \(\pL\).</p></div>
+<div class="res"><div class="hd"><span class="kind">Proposition 9.2</span><span class="ttl">LX keeps every f1-optimum</span><span class="chip paper">paper proof here</span></div>
+<p>Every f1-optimal schedule, with or without an f1 cap, meets all LX deadlines. Otherwise Lemma 9.1 would improve it.</p></div>
+<div class="res"><div class="hd"><span class="kind">Proposition 9.3</span><span class="ttl">The δ = 10⁻⁶ of the second phase</span><span class="chip paper">paper proof here</span></div>
+<p>The second phase minimises \(f_2\) s.t. \(f_1\le f_1^\star+\delta\). If \(\delta\lt w_{\min}=\min\{w_j:w_j\gt 0\}\), no schedule in that band violates a deadline: one that did would give \(f_1\lt f_1^\star\). So the reduced and full models agree.</p></div>
+
+<!-- ============================================================ -->
+<h2 id="main"><span class="sec">10</span>The main theorem</h2>
+<div class="res"><div class="hd"><span class="kind">Theorem 10.1</span><span class="ttl">Exactness of the reduced model</span><span class="chip paper">paper proof here</span></div>
+<p>Assume nonnegative data. Let \(\mathcal M_h\) be built with hint \(h\), and let \(\preceq_h\) be \(\pP\) for <code>None</code>, \(\pW\) for \((\alpha,\beta)\) and \(\pL\) for <code>LEX_F1</code>. Then \(\Rep(\mathcal M_h)\subseteq\Sched\), and \(\Rep(\mathcal M_h)\) is a \(\preceq_h\)-covering of \(\Sched\). Hence:</p>
+<ul>
+<li>\(\mathcal M_{\texttt{None}}\) is exact for every monotone problem, including f2 caps and the Pareto front.</li>
+<li>\(\mathcal M_{(\alpha,\beta)}\) is exact for \(\mathrm W(\alpha,\beta,\varepsilon)\).</li>
+<li>\(\mathcal M_{\texttt{LEX\_F1}}\) is exact for \(\mathrm L(\varepsilon)\).</li>
+</ul>
+<div class="proof"><span class="lbl">Proof.</span> <em>Soundness</em> follows from Theorem 3.2 or 6.2 on flow types, Lemma 7.2 on types without a flow network, and Lemma 3.3. <em>Covering</em>: starting from \(\sigma\in\Sched\),
+<ol>
+<li><strong>R1.</strong> Move jobs on unbounded types to their releases (\(\pP\)).</li>
+<li><strong>R2.</strong> Relocate jobs on R2-removed options to their dominators (\(\pP\)).</li>
+<li><strong>Hint-specific.</strong> Relocate jobs on R3-removed options (\(\pW\)), or LX violators (\(\pL\)). Relocations only <em>remove</em> jobs from capacitated types. The remaining jobs there keep their original starts, which satisfy the deadline.</li>
+<li><strong>Representation.</strong> In the grid nothing more is needed. For N1/N2, left-shift each capacitated type (Theorem 6.6a). Every deadline is an upper bound on the start, so moving earlier preserves it, and the step is \(\pP\).</li>
+</ol>
+Transitivity of \(\preceq_h\) finishes the proof. <span class="qed">∎</span></div></div>
+<p>Each flag can be turned off independently. Without R1, unbounded types keep their flow network and stage 4 also runs on them. The comparisons use \(C_{jk}=r_j+p_{jk}\), which lower-bounds every completion on \(k\). Stage 4 is necessary because of Example 6.5, and it is also why every deadline in R3 and LX bounds the start from above.</p>
+
+<div class="tbl"><table>
+<thead><tr><th>Problem</th><th>Hint to pass</th><th>Active rules</th></tr></thead>
+<tbody>
+<tr><td>\(\min\alpha f_1+\beta f_2\), optional \(f_1\le\varepsilon\)</td><td><code>(α, β)</code>, α, β ≥ 0</td><td>N1/N2, R1, R2, R3</td></tr>
+<tr><td>lex \((f_1,f_2)\), optional \(f_1\le\varepsilon\)</td><td><code>LEX_F1</code></td><td>N1/N2, R1, R2, LX</td></tr>
+<tr><td>f2 cap, Pareto front, box search</td><td><code>None</code></td><td>N1/N2, R1, R2</td></tr>
+</tbody></table></div>
+<p>The current callers respect this table. <code>pareto.py</code> passes <code>LEX_F1</code> only when the bound is absent or on f1. <code>solve_epsilon_cost</code> and the Pareto steps pass <code>None</code>, and <code>rm_benchmark</code> passes <code>(1, 1)</code>. No caller maximises.</p>
+
+<!-- ============================================================ -->
+<h2 id="status"><span class="sec">11</span>State of the proofs</h2>
+
+<h3>Machine-checked: <code>proofs/Proofs/CompressedFlow.lean</code></h3>
+<p>The file has 650 lines, builds with <code>lake build</code>, contains no <code>sorry</code>, and <code>#print axioms Fedhpc.Graph.remove_then_leftShift</code> lists only <code>propext</code>, <code>Classical.choice</code> and <code>Quot.sound</code>. All three were re-checked on 16 Oct 2026. The model covers one finite-capacity type and one compressed graph.</p>
+<div class="tbl"><table>
+<thead><tr><th>Here</th><th>Lean</th></tr></thead>
+<tbody>
+<tr><td>Lemma 3.1</td><td class="lean-name">run_succ, busy_succ, run_zero, busy_zero, ends_zero, run_last, busy_last, starts_last</td></tr>
+<tr><td>Theorem 4.1</td><td class="lean-name">exists_leftShift</td></tr>
+<tr><td>Theorem 4.3</td><td class="lean-name">leftShifted_mem_pattern</td></tr>
+<tr><td>Lemma 6.1</td><td class="lean-name">arcIdle_zero, arc_succ, inLoss_of_not_mem_E, inLoss_of_mem_E</td></tr>
+<tr><td>Theorem 6.2</td><td class="lean-name">invariant, sound (ℓ ∈ ℕ), invariantR, soundR (ℓ ∈ ℝ≥0)</td></tr>
+<tr><td>Lemma 6.3</td><td class="lean-name">idle_mono</td></tr>
+<tr><td>Theorem 6.4</td><td class="lean-name">lossOf, arcIdle_lossOf, complete</td></tr>
+<tr><td>Theorem 6.6</td><td class="lean-name">represent, remove_then_leftShift</td></tr>
+</tbody></table></div>
+
+<h3>Proved on paper only (this page)</h3>
+<ul>
+<li>Lemma 2.2 (coverings) and Theorem 3.2 (grid ⇔ capacity). Lean's <span class="lean-name">sound</span> with \(E=V=[0,H]\) gives grid soundness. Lean's <span class="lean-name">complete</span> assumes a left-shifted schedule, so grid completeness for arbitrary schedules is not machine-checked.</li>
+<li>Lemmas 3.3, 7.2 and 7.3 (fixed costs, unbounded types, relocation).</li>
+<li>R1, R2, R3 and LX (Lemmas 7.4, 7.5, 8.1, 8.2, 9.1; Propositions 9.2, 9.3) and the composition in Theorem 10.1, including the multi-type and assignment bookkeeping.</li>
+<li>Lemma 4.4 (the grouped closure is a pattern set), and the upper bound \(\ell\le\bN\), which Lean's <span class="lean-name">Conserve</span> omits.</li>
+</ul>
+
+<h3>Tested, not proved</h3>
+<ul>
+<li>That the code implements these rules: scan orders and tie-breaks in <code>_reduce</code>, <code>_first_start_reaching</code>, <code>_truncate</code>, and the C++ graph builder against the Python fallback.</li>
+<li>The brute-force oracle, <code>tests/test_spacetime_oracle.py</code>. It uses 12 random instances (4 jobs, \(H=11\), two capacitated types, a type at exactly the unbounded threshold, cloud ties, a fixed cost on one cloud type, running jobs, \(w\in\{0,1,2,3\}\)) and enumerates every schedule without a flow model. It checks lex and six weight pairs on the grid, N1 and N2, f1 caps, the Pareto front and f2 caps. It caught all three seeded mutations. With the reduction and option suites, 168 tests passed on 16 Oct 2026.</li>
+</ul>
+
+<h3>Open points</h3>
+<ol class="gaps">
+<li><span class="chip gap">G1</span> <strong>Floating point in R3.</strong> \(\varphi,\rho,\tau\) are computed in double precision with no margin, so a start below \(\rho\) by a rounding error can be removed. R3 is exact up to rounding (≈10⁻¹⁵ relative). R1, R2 and LX compare integers or Gurobi's own floats, so they are exact.</li>
+<li><span class="chip gap">G2</span> <strong>N1/N2 need \(w\ge 0\) but are not gated on it.</strong> They are applied even when <code>nonnegative_data</code> is false. With a negative weight, a left shift raises \(f_1\) and the restriction can cut the optimum.</li>
+<li><span class="chip gap">G3</span> <strong>LX tolerance.</strong> It is exact only while \(\delta=10^{-6}\lt w_{\min}\), an implicit assumption.</li>
+<li><span class="chip gap">G4</span> <strong><code>cover_ge</code> docstring.</strong> It overclaims; see Proposition 3.4.</li>
+<li><span class="chip gap">G5</span> <strong>Oracle coverage.</strong> No fixed cost on a capacitated type, \(H\le 11\), and no adversarial float ties for R3.</li>
+<li><span class="chip gap">G6</span> <strong>Formalisation.</strong> The paper-only items above remain. The hard combinatorial step (stage 4) is already in Lean. What is left is per-job inequalities and bookkeeping across types, a moderate extension of <code>CompressedFlow.lean</code>.</li>
+</ol>
+
+<footer>Source: <code>src/fedhpc/formulations.py</code>, <code>src/fedhpc/data.py</code>, <code>src/fedhpc/_ext/graph.cpp</code>, <code>proofs/Proofs/CompressedFlow.lean</code>. LaTeX version: <code>docs/formulation_reductions.tex</code> (15 pp.).</footer>
+</main>
+</div>

@@ -105,8 +105,9 @@ def _extract(
     assignment: dict[int, tuple[int, int]] = {}
     completion: dict[int, int] = {}
 
-    for (jid, m_id, t), v in x.items():
-        if v.X > 0.5:
+    # One bulk attribute query: per-variable .X costs ~3x more on large models.
+    for (jid, m_id, t), val in zip(x, mdl.getAttr("X", list(x.values()))):
+        if val > 0.5:
             assignment[jid] = (m_id, t)
             completion[jid] = t + inst.p_occ[jid, m_id]
 
@@ -122,6 +123,56 @@ def _extract(
         build_time=build_time,
         solve_time=solve_time,
     )
+
+
+def _solve(
+    inst: Instance,
+    formulation: Formulation | None,
+    hint: Solution | None,
+    params: dict,
+    primary,
+    secondary: str | None = None,
+    *,
+    hint_objective=None,
+    bound: tuple[str, float, str] | None = None,
+) -> Solution:
+    """Build a fresh model and minimise ``primary``; with ``secondary``, then
+    fix primary at its optimum (+1e-6) and minimise secondary (lex-min).
+
+    ``primary``/``secondary`` are ``"f1"``/``"f2"``; ``primary`` may also be a
+    callable ``(f1_expr, f2_expr) -> expr``. ``bound=(expr, value, name)``
+    adds ``expr <= value``. ``hint_objective`` is passed to
+    :meth:`Formulation.build` (it must be valid for the problem solved).
+    """
+    fmt = formulation or _default_formulation()
+    t0 = time.perf_counter()
+    mdl, vars = fmt.build(inst, objective=hint_objective)
+    build_time = time.perf_counter() - t0
+    _apply_params(mdl, params)
+
+    x = vars["x"]
+    if hint is not None:
+        set_mip_start(inst, x, hint)
+    exprs = {"f1": fmt.f1_expr(inst, x), "f2": fmt.f2_expr(inst, x)}
+    if bound is not None:
+        which, value, name = bound
+        mdl.addConstr(exprs[which] <= value, name=name)
+
+    primary_expr = primary(exprs["f1"], exprs["f2"]) if callable(primary) else exprs[primary]
+    mdl.setObjective(primary_expr, GRB.MINIMIZE)
+    t1 = time.perf_counter()
+    mdl.optimize()
+
+    if secondary is not None and mdl.Status in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
+        # f1 = Σ(t + p_occ − arrival) has float arrivals, and costs are
+        # floats: a small tolerance keeps the fixing row from cutting the
+        # optimum on rounding noise.
+        mdl.addConstr(primary_expr <= mdl.ObjVal + 1e-6, name=f"fix_{primary}")
+        mdl.setObjective(exprs[secondary], GRB.MINIMIZE)
+        mdl.optimize()
+
+    return _extract(inst, mdl, vars, build_time=build_time,
+                    solve_time=time.perf_counter() - t1)
 
 
 # ---------------------------------------------------------------------------
@@ -140,37 +191,7 @@ def solve_f1(
     seed Gurobi's MIP start. Purely a search-order hint: it cannot change the
     proven-optimal result, only how fast the solver finds it.
     """
-    fmt = formulation or _default_formulation()
-    t0 = time.perf_counter()
-    mdl, vars = fmt.build(inst, objective=LEX_F1)
-    build_time = time.perf_counter() - t0
-    _apply_params(mdl, params)
-
-    x = vars["x"]
-    if hint is not None:
-        set_mip_start(inst, x, hint)
-    f1_expr = fmt.f1_expr(inst, x)
-    f2_expr = fmt.f2_expr(inst, x)
-
-    # Phase 1: minimise turnaround
-    mdl.setObjective(f1_expr, GRB.MINIMIZE)
-    t1 = time.perf_counter()
-    mdl.optimize()
-
-    if mdl.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
-        solve_time = time.perf_counter() - t1
-        return _extract(inst, mdl, vars, build_time=build_time, solve_time=solve_time)
-
-    # Phase 2: fix turnaround at optimal, minimise cost.
-    # f1 = Σ(t + p_occ − arrival); arrival is float, so ObjVal is float.
-    # Use a small tolerance to avoid rounding the float constraint too tight.
-    f1_star = mdl.ObjVal
-    mdl.addConstr(f1_expr <= f1_star + 1e-6, name="fix_f1")
-    mdl.setObjective(f2_expr, GRB.MINIMIZE)
-    mdl.optimize()
-    solve_time = time.perf_counter() - t1
-
-    return _extract(inst, mdl, vars, build_time=build_time, solve_time=solve_time)
+    return _solve(inst, formulation, hint, params, "f1", "f2", hint_objective=LEX_F1)
 
 
 def solve_f2(
@@ -186,36 +207,12 @@ def solve_f2(
     ``hint`` — an optional prior/heuristic Solution used to seed Gurobi's MIP
     start; see :func:`solve_f1`.
     """
-    fmt = formulation or _default_formulation()
-    t0 = time.perf_counter()
-    mdl, vars = fmt.build(inst)
-    build_time = time.perf_counter() - t0
-    _apply_params(mdl, params)
+    return _solve(inst, formulation, hint, params, "f2", "f1")
 
-    x = vars["x"]
-    if hint is not None:
-        set_mip_start(inst, x, hint)
-    f1_expr = fmt.f1_expr(inst, x)
-    f2_expr = fmt.f2_expr(inst, x)
 
-    # Phase 1: minimise cost
-    mdl.setObjective(f2_expr, GRB.MINIMIZE)
-    t1 = time.perf_counter()
-    mdl.optimize()
-
-    if mdl.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
-        solve_time = time.perf_counter() - t1
-        return _extract(inst, mdl, vars, build_time=build_time, solve_time=solve_time)
-
-    # Phase 2: fix cost at optimal, minimise turnaround.
-    # Use a small absolute tolerance to guard against floating-point noise.
-    f2_star = mdl.ObjVal
-    mdl.addConstr(f2_expr <= f2_star + 1e-6, name="fix_f2")
-    mdl.setObjective(f1_expr, GRB.MINIMIZE)
-    mdl.optimize()
-    solve_time = time.perf_counter() - t1
-
-    return _extract(inst, mdl, vars, build_time=build_time, solve_time=solve_time)
+def weighted_sum_degenerate(f1_T: float, f2_T: float, f1_0: float, f2_0: float = 0.0) -> bool:
+    """Whether the weighted sum has no turnaround/cost trade-off (fedhpc.pdf Section 1.11)."""
+    return f1_0 <= f1_T + 1e-8 or f2_T - f2_0 <= 1e-8
 
 
 def solve_weighted_sum(
@@ -226,6 +223,8 @@ def solve_weighted_sum(
     f1_0: float,
     formulation: Formulation | None = None,
     hint: Solution | None = None,
+    *,
+    f2_0: float = 0.0,
     **params,
 ) -> Solution:
     """Minimise λ·f̂1 + (1−λ)·f̂2 with f1 ≤ f1^0 (fedhpc.pdf eq. 34, 38).
@@ -234,44 +233,30 @@ def solve_weighted_sum(
         f1_T  — f1^T: lexicographic minimum turnaround.
         f2_T  — f2^T: minimum cost at f1^T.
         f1_0  — f1^0: minimum turnaround at zero cost.
+        f2_0  — the cost at f1^0: 0 (the default), as in the paper, or the
+                minimum cost when no schedule is free (see
+                ``pareto.weighted_sum_reference``). f̂2 = (f2 − f2_0)/(f2_T − f2_0)
+                differs from f2/(f2_T − f2_0) by a constant only.
 
-    Degenerate cases (Section 1.11):
+    Degenerate cases (Section 1.11, :func:`weighted_sum_degenerate`):
         f1_0 == f1_T  → no turnaround trade-off; minimise f2 subject to f1 ≤ f1_0.
-        f2_T == 0     → implied by the above; same handling.
+        f2_T == f2_0  → implied by the above; same handling.
 
     ``hint`` — an optional prior/heuristic Solution used to seed Gurobi's MIP
     start; see :func:`solve_f1`.
     """
     if not (0.0 <= lam <= 1.0):
         raise ValueError("lam must be in [0, 1]")
-    fmt = formulation or _default_formulation()
-    degenerate = f1_0 <= f1_T + 1e-8 or f2_T <= 1e-8
-    weights = None if degenerate else (lam / (f1_0 - f1_T), (1 - lam) / f2_T)
-    t0 = time.perf_counter()
-    mdl, vars = fmt.build(inst, objective=weights)
-    build_time = time.perf_counter() - t0
-    _apply_params(mdl, params)
-
-    x = vars["x"]
-    if hint is not None:
-        set_mip_start(inst, x, hint)
-    f1_expr = fmt.f1_expr(inst, x)
-    f2_expr = fmt.f2_expr(inst, x)
-
-    # Restrict to Pareto-relevant region (eq. 34)
-    mdl.addConstr(f1_expr <= f1_0, name="pareto_region")
-
-    if degenerate:
+    if weighted_sum_degenerate(f1_T, f2_T, f1_0, f2_0):
         # No turnaround/cost trade-off exists; minimise cost only
-        mdl.setObjective(f2_expr, GRB.MINIMIZE)
+        weights, primary = None, "f2"
     else:
-        obj = weights[0] * f1_expr + weights[1] * f2_expr
-        mdl.setObjective(obj, GRB.MINIMIZE)
-
-    t1 = time.perf_counter()
-    mdl.optimize()
-    solve_time = time.perf_counter() - t1
-    return _extract(inst, mdl, vars, build_time=build_time, solve_time=solve_time)
+        weights = (lam / (f1_0 - f1_T), (1 - lam) / (f2_T - f2_0))
+        def primary(f1, f2):
+            return weights[0] * f1 + weights[1] * f2
+    # Restrict to Pareto-relevant region (eq. 34)
+    return _solve(inst, formulation, hint, params, primary, hint_objective=weights,
+                  bound=("f1", f1_0, "pareto_region"))
 
 
 def solve_epsilon_cost(
@@ -286,19 +271,7 @@ def solve_epsilon_cost(
     ``hint`` — an optional prior/heuristic Solution used to seed Gurobi's MIP
     start; see :func:`solve_f1`.
     """
-    fmt = formulation or _default_formulation()
-    t0 = time.perf_counter()
-    mdl, vars = fmt.build(inst)
-    build_time = time.perf_counter() - t0
-    _apply_params(mdl, params)
-    if hint is not None:
-        set_mip_start(inst, vars["x"], hint)
-    mdl.addConstr(fmt.f2_expr(inst, vars["x"]) <= epsilon, name="eps_cost")
-    mdl.setObjective(fmt.f1_expr(inst, vars["x"]), GRB.MINIMIZE)
-    t1 = time.perf_counter()
-    mdl.optimize()
-    solve_time = time.perf_counter() - t1
-    return _extract(inst, mdl, vars, build_time=build_time, solve_time=solve_time)
+    return _solve(inst, formulation, hint, params, "f1", bound=("f2", epsilon, "eps_cost"))
 
 
 def solve_epsilon_turnaround(
@@ -313,19 +286,7 @@ def solve_epsilon_turnaround(
     ``hint`` — an optional prior/heuristic Solution used to seed Gurobi's MIP
     start; see :func:`solve_f1`.
     """
-    fmt = formulation or _default_formulation()
-    t0 = time.perf_counter()
-    mdl, vars = fmt.build(inst)
-    build_time = time.perf_counter() - t0
-    _apply_params(mdl, params)
-    if hint is not None:
-        set_mip_start(inst, vars["x"], hint)
-    mdl.addConstr(fmt.f1_expr(inst, vars["x"]) <= epsilon, name="eps_turnaround")
-    mdl.setObjective(fmt.f2_expr(inst, vars["x"]), GRB.MINIMIZE)
-    t1 = time.perf_counter()
-    mdl.optimize()
-    solve_time = time.perf_counter() - t1
-    return _extract(inst, mdl, vars, build_time=build_time, solve_time=solve_time)
+    return _solve(inst, formulation, hint, params, "f2", bound=("f1", epsilon, "eps_turnaround"))
 
 
 def solve_true_pareto_step(
@@ -347,34 +308,4 @@ def solve_true_pareto_step(
     ``hint`` — an optional prior/heuristic Solution used to seed Gurobi's MIP
     start; see :func:`solve_f1`.
     """
-    fmt = formulation or _default_formulation()
-    t0 = time.perf_counter()
-    mdl, vars = fmt.build(inst)
-    build_time = time.perf_counter() - t0
-    _apply_params(mdl, params)
-
-    x = vars["x"]
-    if hint is not None:
-        set_mip_start(inst, x, hint)
-    f1_expr = fmt.f1_expr(inst, x)
-    f2_expr = fmt.f2_expr(inst, x)
-
-    mdl.addConstr(f1_expr <= f1_bound, name="eps_f1")
-
-    # Phase 1: min cost within the turnaround budget
-    mdl.setObjective(f2_expr, GRB.MINIMIZE)
-    t1 = time.perf_counter()
-    mdl.optimize()
-
-    if mdl.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
-        return _extract(inst, mdl, vars, build_time=build_time,
-                        solve_time=time.perf_counter() - t1)
-
-    # Phase 2: fix cost, minimise turnaround (breaks f2 ties toward lower f1)
-    f2_star = mdl.ObjVal
-    mdl.addConstr(f2_expr <= f2_star + 1e-6, name="fix_f2")
-    mdl.setObjective(f1_expr, GRB.MINIMIZE)
-    mdl.optimize()
-
-    return _extract(inst, mdl, vars, build_time=build_time,
-                    solve_time=time.perf_counter() - t1)
+    return _solve(inst, formulation, hint, params, "f2", "f1", bound=("f1", f1_bound, "eps_f1"))

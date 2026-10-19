@@ -519,8 +519,8 @@ class TestMipComparison:
         assert min(s.f2 for s in sols) == pytest.approx(mip_f2, abs=1e-4)
 
     def test_small_json_nsga2_all_constraints_satisfied(self):
-        """All NSGA-II solutions on small.json must be feasible."""
-        inst = Instance.from_file("data/small.json")
+        """All NSGA-II solutions on tiny_small.json must be feasible."""
+        inst = Instance.from_file("data/tiny_small.json")
         sols = nsga2_frontier(inst, pop_size=100, n_gen=200, seed=42)
         assert len(sols) > 0
         for s in sols:
@@ -529,8 +529,8 @@ class TestMipComparison:
             assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
 
     def test_small_json_moead_all_constraints_satisfied(self):
-        """All MOEA/D solutions on small.json must be feasible."""
-        inst = Instance.from_file("data/small.json")
+        """All MOEA/D solutions on tiny_small.json must be feasible."""
+        inst = Instance.from_file("data/tiny_small.json")
         sols = moead_frontier(inst, n_weights=100, n_gen=200, seed=42)
         assert len(sols) > 0
         for s in sols:
@@ -539,12 +539,12 @@ class TestMipComparison:
             assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
 
     def test_nsga2_output_non_dominated_on_small_json(self):
-        inst = Instance.from_file("data/small.json")
+        inst = Instance.from_file("data/tiny_small.json")
         sols = nsga2_frontier(inst, pop_size=100, n_gen=200, seed=42)
         assert is_non_dominated_set(sols)
 
     def test_moead_output_non_dominated_on_small_json(self):
-        inst = Instance.from_file("data/small.json")
+        inst = Instance.from_file("data/tiny_small.json")
         sols = moead_frontier(inst, n_weights=100, n_gen=200, seed=42)
         assert is_non_dominated_set(sols)
 
@@ -621,7 +621,7 @@ class TestMoeadMaxReplace:
         assert unique_front_points(r1) == unique_front_points(r2)
 
     def test_valid_on_small_json(self):
-        inst = Instance.from_file("data/small.json")
+        inst = Instance.from_file("data/tiny_small.json")
         sols = moead_frontier(inst, n_weights=100, n_gen=200,
                               neighborhood_size=20, max_replace=5, seed=42)
         assert len(sols) > 0
@@ -957,7 +957,7 @@ class TestMoeadArchiveSize:
                 )
 
     def test_valid_on_small_json(self):
-        inst = Instance.from_file("data/small.json")
+        inst = Instance.from_file("data/tiny_small.json")
         sols = moead_frontier(inst, n_weights=100, n_gen=200, neighborhood_size=20,
                               max_replace=5, archive_size=30, seed=42)
         assert len(sols) > 0
@@ -1034,7 +1034,7 @@ class TestSchedRepair:
                 )
 
     def test_valid_on_small_json(self):
-        inst = Instance.from_file("data/small.json")
+        inst = Instance.from_file("data/tiny_small.json")
         for fn, kw in [
             (nsga2_frontier, {"pop_size": 100, "n_gen": 200, "seed": 42}),
             (nsga3_frontier, {"pop_size": 100, "n_divisions": 99, "n_gen": 200, "seed": 42}),
@@ -1092,7 +1092,7 @@ class TestWeightedSolve:
         assert turn.f1 == pytest.approx(10.0, abs=1e-6)
         assert cost.f2 == pytest.approx(0.0, abs=1e-6)
 
-    @pytest.mark.parametrize("path", ["data/small.json", "data/large.json"])
+    @pytest.mark.parametrize("path", ["data/tiny_small.json", "data/tiny_large.json"])
     @pytest.mark.parametrize("lam", [0.25, 0.5, 0.75])
     def test_matches_exact_mip_scalar_on_bundled_instances(self, path, lam):
         inst = Instance.from_file(path)

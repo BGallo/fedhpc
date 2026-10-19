@@ -22,6 +22,7 @@ from typing import NamedTuple
 import numpy as np
 
 from .data import Instance
+from .metrics import _hv2d
 from .model import Solution
 
 _ALGORITHMS = ("nsga2", "nsga3", "moead")
@@ -31,16 +32,6 @@ _N_IGD      = 200      # points on diagonal reference front for IGD
 
 
 # ── Quality indicators (cross-normalised) ────────────────────────────────────
-
-def _hv2d(pts: np.ndarray, ref: np.ndarray) -> float:
-    order = np.argsort(pts[:, 0])
-    s     = pts[order]
-    hv    = 0.0
-    for i in range(len(s)):
-        f1_next = ref[0] if i == len(s) - 1 else s[i + 1, 0]
-        hv += (f1_next - s[i, 0]) * (ref[1] - s[i, 1])
-    return max(hv, 0.0)
-
 
 def _quality(
     solutions: list[Solution],

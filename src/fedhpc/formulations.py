@@ -89,6 +89,8 @@ def add_fixed_cost_vars(mdl: gp.Model, inst: Instance, x: XVars) -> None:
     pair: one row per pair instead of one per start time, and at least as
     tight in the LP as the disaggregated ``x[j,m,t] ≤ z[m]``.
     """
+    if not any(itype.fixed_cost for itype in inst.instance_types):
+        return
     by_pair: dict[tuple[int, int], list[gp.Var]] = {}
     for (jid, mid, _t), v in x.items():
         by_pair.setdefault((jid, mid), []).append(v)
@@ -138,9 +140,11 @@ class Formulation(ABC):
         """Weighted turnaround: Σ_{j,m,t} w_j (t + p^occ_jm − a_j) x_jmt  (eq. 11;
         w_j = 1 by default)."""
         job = {j.id: j for j in inst.jobs}
-        return gp.quicksum(
-            job[jid].weight * (t + inst.p_occ[jid, m_id] - job[jid].arrival) * v
-            for (jid, m_id, t), v in x.items()
+        p_occ = inst.p_occ
+        return gp.LinExpr(
+            [job[jid].weight * (t + p_occ[jid, m_id] - job[jid].arrival)
+             for (jid, m_id, t) in x],
+            list(x.values()),
         )
 
     def f2_expr(self, inst: Instance, x: dict) -> gp.LinExpr:
@@ -154,9 +158,11 @@ class Formulation(ABC):
                 "build it with a Formulation that calls add_fixed_cost_vars"
             )
         fixed = {m.id: m.fixed_cost for m in inst.instance_types}
-        return gp.quicksum(
-            inst.c[jid, m_id] * v for (jid, m_id, _t), v in x.items()
-        ) + gp.quicksum(fixed[mid] * zm for mid, zm in z.items())
+        c = inst.c
+        expr = gp.LinExpr([c[jid, m_id] for (jid, m_id, _t) in x], list(x.values()))
+        if z:
+            expr.addTerms([fixed[mid] for mid in z], list(z.values()))
+        return expr
 
 
 def normal_pattern_starts(inst: Instance) -> dict[int, bytearray]:
@@ -469,15 +475,14 @@ class SpaceTimeFormulation(Formulation):
 
         # ---- Decision variables -------------------------------------------
 
-        # x[j,m,t] ∈ {0,1}
-        x = XVars(
-            ((j.id, m_id, t), mdl.addVar(
-                vtype=GRB.BINARY, name=f"x[{j.id},{m_id},{t}]"
-            ))
-            for j in inst.jobs
-            for m_id in inst.F[j.id] if (j.id, m_id) in S
-            for t in S[j.id, m_id]
-        )
+        # x[j,m,t] ∈ {0,1} — one batched addVars call (named x[j,m,t])
+        x = XVars(mdl.addVars(
+            [(j.id, m_id, t)
+             for j in inst.jobs
+             for m_id in inst.F[j.id] if (j.id, m_id) in S
+             for t in S[j.id, m_id]],
+            vtype=GRB.BINARY, name="x",
+        ))
         flow_types = [m for m in inst.instance_types if m.id not in no_flow]
 
         if self.compressed_flow:
@@ -517,13 +522,23 @@ class SpaceTimeFormulation(Formulation):
 
         # ---- Constraints --------------------------------------------------
 
+        # One pass over x buckets every arc by job, and on flow types by its
+        # (type, start) and (type, completion) node, so each row below is a
+        # lookup instead of a scan over the type's jobs. x is keyed job-major,
+        # so every bucket lists jobs in instance order, as the rows did.
+        flow_ids = {m.id for m in flow_types}
+        by_job: dict[int, list[gp.Var]] = {j.id: [] for j in inst.jobs}
+        starting_at: dict[tuple[int, int], list[gp.Var]] = {}
+        arriving_at: dict[tuple[int, int], list[gp.Var]] = {}
+        for (jid, mid, t), var in x.items():
+            by_job[jid].append(var)
+            if mid in flow_ids:
+                starting_at.setdefault((mid, t), []).append(var)
+                arriving_at.setdefault((mid, t + inst.p_occ[jid, mid]), []).append(var)
+
         # (18) Unique assignment: each job processed exactly once
         for j in inst.jobs:
-            cover = gp.quicksum(
-                x[j.id, m_id, t]
-                for m_id in inst.F[j.id] if (j.id, m_id) in S
-                for t in S[j.id, m_id]
-            )
+            cover = gp.quicksum(by_job[j.id])
             mdl.addConstr(
                 cover >= 1 if self.cover_ge else cover == 1,
                 name=f"assign[{j.id}]",
@@ -535,20 +550,11 @@ class SpaceTimeFormulation(Formulation):
         # Boundary: y_{m,−1} = N_m − n_running[m]  (reduced by pre-occupied slots)
         #           y_{m,H}  = N_m                  (terminal: all slots idle again)
         # rj_arrivals[m,v]: running jobs that complete at v (ghost completions).
-        #
-        # jobs_by_type[mid] is hoisted out of the v-loop so "mid in F[j]" is
-        # tested once per (job, type) instead of once per (job, type, v) — a
-        # factor-of-H reduction in membership checks on large instances.
-        jobs_by_type = {
-            itype.id: [j for j in inst.jobs if (j.id, itype.id) in S]
-            for itype in flow_types
-        }
         for itype in flow_types:
             mid = itype.id
             nm = N[mid]
             # Slots available to new jobs at the very start of the horizon
             nm_available = max(0, nm - inst.n_running.get(mid, 0))
-            jobs_mid = jobs_by_type[mid]
             flow_nodes = sorted(nodes[mid]) if self.compressed_flow else range(H + 1)
             for v in flow_nodes:
                 if self.compressed_flow:
@@ -560,18 +566,10 @@ class SpaceTimeFormulation(Formulation):
                     lhs_wait = nm_available if v == 0 else y[mid, v - 1]
                     rhs_wait = nm if v == H else y[mid, v]
                 arriving = (
-                    gp.quicksum(
-                        x[j.id, mid, v - inst.p_occ[j.id, mid]]
-                        for j in jobs_mid
-                        if (v - inst.p_occ[j.id, mid]) in S[j.id, mid]
-                    )
+                    gp.quicksum(arriving_at.get((mid, v), ()))
                     + inst.rj_arrivals.get((mid, v), 0)  # ghost completions
                 )
-                starting = gp.quicksum(
-                    x[j.id, mid, v]
-                    for j in jobs_mid
-                    if v in S[j.id, mid]
-                )
+                starting = gp.quicksum(starting_at.get((mid, v), ()))
                 mdl.addConstr(
                     lhs_wait + arriving == rhs_wait + starting,
                     name=f"flow[{mid},{v}]",
@@ -604,14 +602,13 @@ class OccupancyFormulation(Formulation):
         mdl.setParam("OutputFlag", 0)
 
         # x[j,m,t] ∈ {0,1}
-        x = XVars(
-            ((j.id, m_id, t), mdl.addVar(
-                vtype=GRB.BINARY, name=f"x[{j.id},{m_id},{t}]"
-            ))
-            for j in inst.jobs
-            for m_id in inst.F[j.id]
-            for t in inst.T[j.id, m_id]
-        )
+        x = XVars(mdl.addVars(
+            [(j.id, m_id, t)
+             for j in inst.jobs
+             for m_id in inst.F[j.id]
+             for t in inst.T[j.id, m_id]],
+            vtype=GRB.BINARY, name="x",
+        ))
 
         # w[m,t] ∈ Z≥0 — occupied instances during [t, t+1)
         w = {

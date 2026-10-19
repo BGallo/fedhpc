@@ -11,14 +11,19 @@ _N_WEIGHTS = 101                    # weight-vector count for R2
 
 
 def _hv2d(pts: np.ndarray, ref: np.ndarray) -> float:
-    """2-D hypervolume via sweep-line (minimisation sense)."""
-    order = np.argsort(pts[:, 0])
-    s = pts[order]
-    hv = 0.0
+    """2-D hypervolume via sweep-line (minimisation sense).
+
+    Dominated points and points beyond ``ref`` add nothing: each strip is
+    bounded by the best f2 seen so far, and only points inside the box count.
+    """
+    s = pts[(pts[:, 0] < ref[0]) & (pts[:, 1] < ref[1])]
+    s = s[np.lexsort((s[:, 1], s[:, 0]))]
+    hv, best_f2 = 0.0, ref[1]
     for i in range(len(s)):
+        best_f2 = min(best_f2, s[i, 1])
         f1_next = ref[0] if i == len(s) - 1 else s[i + 1, 0]
-        hv += (f1_next - s[i, 0]) * (ref[1] - s[i, 1])
-    return max(hv, 0.0)
+        hv += (f1_next - s[i, 0]) * (ref[1] - best_f2)
+    return hv
 
 
 def pareto_metrics(solutions: list[Solution]) -> dict:

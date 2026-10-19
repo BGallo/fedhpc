@@ -1,0 +1,43 @@
+\contentsline {section}{\numberline {1}Scope and conventions}{2}{section.1}%
+\contentsline {section}{\numberline {2}The problem}{2}{section.2}%
+\contentsline {subsection}{\numberline {2.1}Data}{2}{subsection.2.1}%
+\contentsline {subsection}{\numberline {2.2}Derived parameters}{2}{subsection.2.2}%
+\contentsline {subsection}{\numberline {2.3}Schedules, feasibility and objectives}{3}{subsection.2.3}%
+\contentsline {subsection}{\numberline {2.4}The problems solved}{3}{subsection.2.4}%
+\contentsline {subsection}{\numberline {2.5}Coverings: the single tool behind every exactness proof}{3}{subsection.2.5}%
+\contentsline {section}{\numberline {3}The space-time formulation}{4}{section.3}%
+\contentsline {subsection}{\numberline {3.1}Single-type bookkeeping}{4}{subsection.3.1}%
+\contentsline {subsection}{\numberline {3.2}The model}{5}{subsection.3.2}%
+\contentsline {paragraph}{Variables.}{5}{section*.12}%
+\contentsline {paragraph}{Constraints.}{5}{section*.13}%
+\contentsline {paragraph}{Objectives.}{5}{section*.20}%
+\contentsline {subsection}{\numberline {3.3}Correctness of the plain model}{5}{subsection.3.3}%
+\contentsline {subsection}{\numberline {3.4}Two option flags that are not reductions}{6}{subsection.3.4}%
+\contentsline {paragraph}{The occupancy formulation.}{6}{section*.21}%
+\contentsline {paragraph}{\texttt {cover\_ge}.}{6}{section*.22}%
+\contentsline {section}{\numberline {4}Left shifts and normal patterns (one type)}{6}{section.4}%
+\contentsline {section}{\numberline {5}N1: normal-pattern starts}{7}{section.5}%
+\contentsline {paragraph}{Rule.}{7}{section*.23}%
+\contentsline {section}{\numberline {6}N2: the compressed arc-flow graph}{8}{section.6}%
+\contentsline {subsection}{\numberline {6.1}Definition}{8}{subsection.6.1}%
+\contentsline {subsection}{\numberline {6.2}Soundness}{8}{subsection.6.2}%
+\contentsline {subsection}{\numberline {6.3}Completeness for left-shifted schedules}{9}{subsection.6.3}%
+\contentsline {subsection}{\numberline {6.4}Removal needs a left shift}{9}{subsection.6.4}%
+\contentsline {section}{\numberline {7}Unbounded types, R1 and R2}{10}{section.7}%
+\contentsline {subsection}{\numberline {7.1}R1: collapse unbounded types}{10}{subsection.7.1}%
+\contentsline {paragraph}{Rule.}{10}{section*.24}%
+\contentsline {subsection}{\numberline {7.2}R2: Pareto filter on unbounded options}{10}{subsection.7.2}%
+\contentsline {paragraph}{Rule.}{10}{section*.25}%
+\contentsline {section}{\numberline {8}R3: rejection deadlines for weighted sums}{11}{section.8}%
+\contentsline {paragraph}{Scores.}{11}{section*.26}%
+\contentsline {paragraph}{Rule, unbounded part.}{11}{section*.27}%
+\contentsline {paragraph}{Rule, capacitated part.}{11}{section*.28}%
+\contentsline {section}{\numberline {9}LX: deadlines for the lexicographic objective}{12}{section.9}%
+\contentsline {paragraph}{Rule.}{12}{section*.29}%
+\contentsline {section}{\numberline {10}The main theorem}{12}{section.10}%
+\contentsline {subsection}{\numberline {10.1}Validity per hint and caller contract}{13}{subsection.10.1}%
+\contentsline {section}{\numberline {11}State of the proofs}{14}{section.11}%
+\contentsline {subsection}{\numberline {11.1}Machine-checked (Lean 4 + Mathlib)}{14}{subsection.11.1}%
+\contentsline {subsection}{\numberline {11.2}Proved on paper only (this document)}{14}{subsection.11.2}%
+\contentsline {subsection}{\numberline {11.3}Tested, not proved}{14}{subsection.11.3}%
+\contentsline {subsection}{\numberline {11.4}Open points}{15}{subsection.11.4}%

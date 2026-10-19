@@ -61,7 +61,15 @@ def test_solve_f1_bpc_matches_compact(instance_path):
     assert got.f2 == pytest.approx(expected.f2, abs=1e-4)
 
 
-@pytest.mark.parametrize("instance_path", _TINY_INSTANCES)
+# Lex-min (f2, f1) phase 2 (min f1 s.t. f2 <= 0) packs every job on-prem;
+# BPC needs ~5 min on tiny_large and ~13 min on tiny_xlarge.
+_SLOW_F2 = {"data/tiny_large.json", "data/tiny_xlarge.json"}
+
+
+@pytest.mark.parametrize("instance_path", [
+    pytest.param(p, marks=pytest.mark.slow) if p in _SLOW_F2 else p
+    for p in _TINY_INSTANCES
+])
 def test_solve_f2_bpc_matches_compact(instance_path):
     inst = Instance.from_file(instance_path)
     expected = solve_f2(inst, **_GUROBI)

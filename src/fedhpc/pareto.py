@@ -6,12 +6,20 @@ import os
 import sys
 import time as _time
 from collections import deque
+from dataclasses import replace
 
 from gurobipy import GRB
 
 from .data import Instance
-from .formulations import LEX_F1, Formulation, SpaceTimeFormulation
-from .model import Solution, _apply_params, _extract, set_mip_start
+from .formulations import LEX_F1, Formulation, SpaceTimeFormulation, nonnegative_data
+from .model import (
+    Solution,
+    _apply_params,
+    _extract,
+    set_mip_start,
+    solve_weighted_sum,
+    weighted_sum_degenerate,
+)
 
 
 def _make_lexmin_bounded(
@@ -235,10 +243,86 @@ def _reference_points(
     f2_T  — f2^T: minimum cost at f1^T (min f2 s.t. f1 = f1^T).
     f1_0  — f1^0: minimum turnaround at zero cost (min f1 s.t. f2 = 0).
 
-    All three share the same feasible region (only the objective/bound differs),
-    so a single model is built once and reused across all three solves — each
-    solve also warm-starts from the previous one's basis/incumbent, since Gurobi
-    keeps that state across ``optimize()`` calls on the same model instance.
+    Raises RuntimeError when no schedule is free; see
+    :func:`weighted_sum_reference` (``min_cost_reference=True``) for that case.
+    """
+    refs, _ = _weighted_sum_reference(inst, formulation, params, min_cost_reference=False, want_ideal=False)
+    return refs[:3]
+
+
+def weighted_sum_reference(
+    inst: Instance,
+    formulation: Formulation | None = None,
+    min_cost_reference: bool = False,
+    **params,
+) -> tuple[tuple[float, float, float, float], Solution | None]:
+    """The weighted-sum reference points (f1_T, f2_T, f1_0, f2_0), and the
+    weighted sum's answer when it is degenerate.
+
+    f1_T, f2_T, f1_0 are :func:`_reference_points`' and f2_0 = 0. With
+    ``min_cost_reference``, when no schedule is free (e.g. a job has no free
+    option, or the free options cannot finish every job within the horizon)
+    the cheapest schedule is the reference instead: f2_0 = min f2 and
+    f1_0 = min f1 s.t. f2 = f2_0 (lex-min (f2, f1), as :func:`model.solve_f2`);
+    without it, that case raises RuntimeError.
+
+    The second item is None unless the reference points are degenerate
+    (:func:`model.weighted_sum_degenerate`) and the reference solves found a
+    minimum-cost schedule (always, unless some data are negative). It is then a schedule with
+    f1 <= f1_0 and minimum cost, i.e., an optimum of the degenerate weighted
+    sum (min f2 s.t. f1 <= f1_0), found by the reference solves themselves.
+    """
+    return _weighted_sum_reference(inst, formulation, params, min_cost_reference, want_ideal=True)
+
+
+def solve_weighted_sum_with_reference(
+    inst: Instance,
+    lam: float,
+    formulation: Formulation | None = None,
+    min_cost_reference: bool = False,
+    **params,
+) -> tuple[Solution, tuple[float, float, float, float]]:
+    """:func:`weighted_sum_reference` followed by :func:`model.solve_weighted_sum`.
+
+    Returns the solution and the reference points (f1_T, f2_T, f1_0, f2_0).
+    When :func:`weighted_sum_reference` returns the degenerate case's optimum,
+    that schedule is returned instead of rebuilding the unreduced model to
+    solve the same problem again.
+    """
+    if not (0.0 <= lam <= 1.0):
+        raise ValueError("lam must be in [0, 1]")
+    fmt = formulation or SpaceTimeFormulation()
+    refs, ideal = _weighted_sum_reference(inst, fmt, params, min_cost_reference, want_ideal=True)
+    if ideal is not None:
+        return ideal, refs
+    f1_T, f2_T, f1_0, f2_0 = refs
+    return solve_weighted_sum(inst, lam, f1_T, f2_T, f1_0, formulation=fmt, f2_0=f2_0, **params), refs
+
+
+def _zero_cost_possible(inst: Instance) -> bool:
+    """Whether every job has a zero-cost option on a type without fixed cost —
+    necessary for a zero-cost schedule when the data are nonnegative."""
+    fixed = {m.id: m.fixed_cost for m in inst.instance_types}
+    return all(
+        any(inst.c[j.id, m] <= 0 and fixed[m] <= 0 for m in inst.F[j.id])
+        for j in inst.jobs
+    )
+
+
+def _weighted_sum_reference(
+    inst: Instance,
+    formulation: Formulation | None,
+    params: dict,
+    min_cost_reference: bool,
+    want_ideal: bool,
+) -> tuple[tuple[float, float, float, float], Solution | None]:
+    """See :func:`weighted_sum_reference`. ``want_ideal=False`` skips building
+    the degenerate case's Solution.
+
+    Phases 1–2 share one model (built with the lex hint, LEX_F1); phase 3
+    shares one unhinted model — each solve also warm-starts from the previous
+    one's basis/incumbent, since Gurobi keeps that state across ``optimize()``
+    calls on the same model instance.
     """
     fmt = formulation or SpaceTimeFormulation()
     mdl, vars_ = fmt.build(inst, objective=LEX_F1)
@@ -265,9 +349,18 @@ def _reference_points(
         raise RuntimeError("Could not solve min-cost at f1^T problem.")
     f2_T = mdl.ObjVal
 
-    # Phase 3: f1_0 = min f1 s.t. f2 <= 0, reusing the same model — drop the
-    # f1_T fix and impose the zero-cost bound instead. A model pruned for the
-    # lex objective is invalid under a cost bound, so rebuild without the hint.
+    nonnegative = nonnegative_data(inst)
+    if nonnegative and f2_T <= 1e-8:
+        # f2 >= 0 and the lex-min (f1, f2) schedule costs 0 (to the degeneracy
+        # tolerance of model.weighted_sum_degenerate): it is free and
+        # turnaround-optimal, so f1_0 = f1_T, f2_0 = 0, and it
+        # is the degenerate weighted sum's optimum. Phase 3 is not needed.
+        ideal = _extract(inst, mdl, vars_) if want_ideal else None
+        return (f1_T, f2_T, f1_T, 0.0), ideal
+
+    # Phase 3: f1_0 = min f1 s.t. f2 <= 0. A model pruned for the lex objective
+    # is invalid under a cost bound, so rebuild without the hint; otherwise drop
+    # the f1_T fix and reuse the same model.
     if vars_.get("objective_reduced"):
         mdl, vars_ = fmt.build(inst)
         _apply_params(mdl, params)
@@ -276,14 +369,44 @@ def _reference_points(
         f2_expr = fmt.f2_expr(inst, x)
     else:
         mdl.remove(mdl.getConstrByName("fix_f1"))
-    mdl.addConstr(f2_expr <= 0.0, name="eps_cost")
     mdl.setObjective(f1_expr, GRB.MINIMIZE)
-    mdl.optimize()
-    if mdl.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
-        raise RuntimeError("Could not solve min-turnaround at zero-cost problem.")
+    f2_0 = 0.0
+    # Without a free option for some job no schedule is free: skip the attempt.
+    zero_cost_infeasible = min_cost_reference and nonnegative and not _zero_cost_possible(inst)
+    if not zero_cost_infeasible:
+        eps_cost = mdl.addConstr(f2_expr <= 0.0, name="eps_cost")
+        mdl.optimize()
+        if min_cost_reference and mdl.Status in (GRB.INFEASIBLE, GRB.INF_OR_UNBD):
+            # f1 is bounded (binary variables), so INF_OR_UNBD is infeasible.
+            mdl.remove(eps_cost)
+            zero_cost_infeasible = True
+        elif mdl.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
+            raise RuntimeError("Could not solve min-turnaround at zero-cost problem.")
+    if zero_cost_infeasible:
+        # Lex-min (f2, f1) on the same model, with model.solve_f2's tolerance.
+        mdl.setObjective(f2_expr, GRB.MINIMIZE)
+        mdl.optimize()
+        if mdl.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
+            raise RuntimeError("Could not solve min-cost problem.")
+        f2_0 = mdl.ObjVal
+        mdl.addConstr(f2_expr <= f2_0 + 1e-6, name="fix_f2")
+        mdl.setObjective(f1_expr, GRB.MINIMIZE)
+        mdl.optimize()
+        if mdl.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
+            raise RuntimeError("Could not solve min-turnaround at minimum cost problem.")
     f1_0 = mdl.ObjVal
 
-    return f1_T, f2_T, f1_0
+    ideal = None
+    # Phase 3's schedule has minimum cost when it was minimised (fix_f2) or
+    # when f2 >= 0 (it costs <= 0); otherwise solve_weighted_sum must be used.
+    min_cost_schedule = zero_cost_infeasible or nonnegative
+    if want_ideal and min_cost_schedule and weighted_sum_degenerate(f1_T, f2_T, f1_0, f2_0):
+        # Phase 3's schedule has f1 = f1_0 and minimum cost: an optimum of
+        # min f2 s.t. f1 <= f1_0, reported with that objective, as
+        # model.solve_weighted_sum's degenerate case does.
+        ideal = _extract(inst, mdl, vars_)
+        ideal = replace(ideal, objective=ideal.f2)
+    return (f1_T, f2_T, f1_0, f2_0), ideal
 
 
 def true_pareto_frontier(
@@ -884,14 +1007,24 @@ def map_pareto_frontier(
 
 
 def _filter_dominated(solutions: list[Solution]) -> list[Solution]:
-    pts = [(s.f1, s.f2, s) for s in solutions if s.f1 is not None and s.f2 is not None]
-    return [
-        s for i, (f1i, f2i, s) in enumerate(pts)
-        if not any(
-            f1j <= f1i and f2j <= f2i and (f1j < f1i or f2j < f2i)
-            for j, (f1j, f2j, _) in enumerate(pts) if j != i
-        )
-    ]
+    """The solutions no other one strictly dominates, in input order (exact
+    duplicates are all kept). O(n log n): a sweep in (f1, f2) order."""
+    pts = [s for s in solutions if s.f1 is not None and s.f2 is not None]
+    order = sorted(range(len(pts)), key=lambda i: (pts[i].f1, pts[i].f2))
+    keep = [False] * len(pts)
+    best_f2 = float("inf")   # min f2 over points with strictly smaller f1
+    k = 0
+    while k < len(order):
+        f1 = pts[order[k]].f1
+        group = []
+        while k < len(order) and pts[order[k]].f1 == f1:
+            group.append(order[k])
+            k += 1
+        group_f2 = pts[group[0]].f2   # the group's min f2 (sorted by f2)
+        for i in group:
+            keep[i] = pts[i].f2 < best_f2 and pts[i].f2 == group_f2
+        best_f2 = min(best_f2, group_f2)
+    return [s for s, kept in zip(pts, keep) if kept]
 
 
 def hybrid_frontier(

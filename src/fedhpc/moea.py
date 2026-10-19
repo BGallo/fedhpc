@@ -635,7 +635,7 @@ def _lp_relaxation_seeds(
         mdl.optimize()
         if mdl.SolCount == 0:
             continue
-        xval = {key: v.X for key, v in x.items()}
+        xval = dict(zip(x, mdl.getAttr("X", list(x.values()))))
         genome: list[int] = []
         for j in inst.jobs:
             best_k, best_v = 0, -1.0
