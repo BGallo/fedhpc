@@ -678,6 +678,7 @@ def _weighted_raw(
     mut_mode: int = 0,
     decode_order: int = 0,
     fbi_passes: int = 0,
+    ls_mode: int = 0,
 ) -> tuple[list[tuple[int, int]], float, float, float, int]:
     _require_ext()
     return _ext.weighted(
@@ -702,6 +703,7 @@ def _weighted_raw(
         mut_mode        = mut_mode,
         decode_order    = decode_order,
         fbi_passes      = fbi_passes,
+        ls_mode         = ls_mode,
     )
 
 
@@ -752,6 +754,7 @@ def weighted_solve(
     mut_mode: int = 0,
     decode_order: int = 1,
     fbi_passes: int = 0,
+    ls_mode: int = 0,
 ) -> Solution:
     """Heuristically minimise ``lam·f̂1 + (1−lam)·f̂2`` (the single-objective
     weighted-sum scalarisation), returning one feasible ``Solution``.
@@ -807,6 +810,10 @@ def weighted_solve(
     fbi_passes       : >0 applies that many forward-backward improvement (double
                        justification, Valls-Ballestin-Quintanilla 2005) passes
                        per individual, keeping the lower f1. 0 (default) off.
+    ls_mode          : 0 (default) = type-flip local search; 1 = on-prem/cloud
+                       split flip (one candidate per job, half the shortlist
+                       est-ranked, half random), the neighbourhood of
+                       :func:`weighted_solve_dispatch`.
     seed, n_threads  : determinism / OpenMP controls (bit-for-bit stable for a
                        fixed ``(seed, n_threads)``).
 
@@ -840,6 +847,7 @@ def weighted_solve(
         n_threads=n_threads, ls_moves=ls_moves, restart_patience=restart_patience,
         shortlist=shortlist, ablate=ablate, extra_seeds=extra, xover_mode=xover_mode,
         mut_mode=mut_mode, decode_order=decode_order, fbi_passes=fbi_passes,
+        ls_mode=ls_mode,
     )
     return _to_solutions(inst, [(asgn, f1, f2)])[0]
 
@@ -917,6 +925,160 @@ def weighted_solve_brkga(
         local_polish = int(local_polish),
     )
     return _to_solutions(inst, [(asgn, f1, f2)])[0]
+
+
+def _dispatch_jobs(inst: Instance):
+    """C++ payload for ``_ext.weighted_dispatch``: per job (arrival, weight,
+    [(type_id, p_occ, cost, earliest_start, latest_start), ...])."""
+    _require_no_fixed_costs(inst)
+    out = []
+    for j in inst.jobs:
+        opts = []
+        for m_id in inst.F[j.id]:
+            ts = inst.T[j.id, m_id]
+            opts.append((m_id, inst.p_occ[j.id, m_id], float(inst.c[j.id, m_id]),
+                         ts.start, ts.stop - 1))
+        out.append((float(j.arrival), float(j.weight), opts))
+    return out
+
+
+def weighted_solve_dispatch(
+    inst: Instance,
+    lam: float,
+    *,
+    f1_T: float | None = None,
+    f2_T: float | None = None,
+    f1_0: float | None = None,
+    K: int = 256,
+    max_iters: int = 100_000,
+    n_kicks: int = 60,
+    kick_size: int = 16,
+    flags: int = 64,
+    ls: bool = True,
+    mu: float = -1.0,
+    n_mu: int = 1,
+    seed: int = 42,
+    n_threads: int = 0,
+    return_stats: bool = False,
+):
+    """Heuristically minimise the weighted-sum scalar of :func:`weighted_solve`
+    with the dispatch decoder of ``_ext/weighted_dispatch.hpp``.
+
+    The genome is only the on-prem/cloud split (``auto`` / cloud / on-prem per
+    job); the decoder builds the on-prem schedule by time-driven non-delay
+    WSPT dispatch over all on-prem types, sends cloud jobs to their best cloud
+    type for this scalar, and (``auto``) offloads a waiting job once waiting
+    longer would score worse than cloud. A best-improvement local search over
+    single genome flips (``K`` est-ranked candidates decoded exactly per step)
+    and ``n_kicks`` ILS kicks of ``kick_size`` random flips search the split.
+
+    ``mu`` mixes the dispatch priority from WSPT (0) toward cloud-regret
+    density; a negative value searches from the ``n_mu`` best values of a
+    grid (ranked by decoding the all-auto genome), splitting the kicks. ``flags`` is the ``DFlag`` ablation bitmask (see the binding
+    docstring).
+    With ``return_stats`` returns ``(Solution, stats)``.
+
+    Defaults are the A/B-selected configuration (2026-10-23, both 10-min
+    instances, lam 0.1..0.9 vs the exact reduced SpaceTime optima): mu grid,
+    half est-ranked / half random candidates (``flags=64``), K=256, 60 kicks
+    of 16 flips — +0.02..+1.2 % gap in 1-7 s, against the memetic
+    weighted_solve's +0.1..+17 % in 9-65 s. Multi-start over mu (``n_mu``)
+    measured no gain.
+    """
+    if not 0.0 <= lam <= 1.0:
+        raise ValueError("lam must be in [0, 1]")
+    _require_ext()
+    if f1_T is None or f2_T is None or f1_0 is None:
+        f1_T, f2_T, f1_0 = heuristic_weighted_reference_points(
+            inst, seed=seed, n_threads=n_threads,
+        )
+    if f1_0 <= f1_T + 1e-8 or f2_T <= 1e-8:
+        w1, w2, f1_cap = 1e-6, 1.0, f1_0
+    else:
+        w1, w2, f1_cap = lam / (f1_0 - f1_T), (1.0 - lam) / f2_T, f1_0
+    asgn, f1, f2, _g, stats = _ext.weighted_dispatch(
+        H=inst.horizon, jobs=_dispatch_jobs(inst), type_cap=_type_cap(inst),
+        init_occ=_init_occ(inst), w1=w1, w2=w2, f1_cap=f1_cap, seed=seed,
+        n_threads=n_threads, K=K, max_iters=max_iters, n_kicks=n_kicks,
+        kick_size=kick_size, flags=flags, ls=int(bool(ls)), mu=mu, n_mu=n_mu,
+    )
+    sol = _to_solutions(inst, [(asgn, f1, f2)])[0]
+    return (sol, stats) if return_stats else sol
+
+
+def weighted_solve_memetic(
+    inst: Instance,
+    lam: float,
+    *,
+    f1_T: float | None = None,
+    f2_T: float | None = None,
+    f1_0: float | None = None,
+    pop_size: int = 32,
+    n_gen: int = 60,
+    seed: int = 42,
+    n_threads: int = 0,
+    ls_moves: int = 8,
+    restart_patience: int = 6,
+    shortlist: int = 24,
+    xover_mode: int = 2,
+    flags: int = 64,
+    mu: float = -1.0,
+    ablate: int = 0,
+    adapt: int = 7,
+    return_stats: bool = False,
+):
+    """The memetic GA of :func:`weighted_solve` on the representation of
+    :func:`weighted_solve_dispatch` (``_ext/weighted_memetic.hpp``).
+
+    Same population / tournament / crossover (``xover_mode`` 2 = MSXF,
+    0 = two-point, 1 = none) / mutation / capped local search / elitism / ILS
+    kick loop and parameters as :func:`weighted_solve`, but the genome is the
+    per-job auto / cloud / on-prem split, the decoder is the time-driven
+    dispatch with deadline offload, and the local search is ``dispatch_ls``
+    (``shortlist`` candidates per step; ``flags`` is the ``DFlag`` bitmask,
+    128 = weighted.hpp's improving-estimate shortlist). ``mu`` as for
+    :func:`weighted_solve_dispatch`; ``ablate`` takes the ga_common ``ABL_*``
+    bits. ``flags`` 256 decodes with the serial SGS instead of dispatch, 512
+    with the better of both.
+
+    ``adapt`` (``MAdapt`` bitmask) makes decoder settings per-individual and
+    evolved instead of fixed for the run: 1 = the mu grid index, 2 = deadline
+    offload on/off, 4 = dispatch vs serial SGS decoder; 8 = the local search
+    also tries neighbouring settings at each local optimum. Settings are spread
+    over the initial population, inherited by crossover and mutated. With
+    MA_MU set, ``mu`` is ignored.
+
+    Default ``adapt=7`` (A/B 2026-10-26, both 10-min instances, λ 0.1..0.9,
+    seeds 1/7/42, vs the exact reduced SpaceTime optima): mean gap
+    +0.116 % / +0.147 % in 2.3 s / 10.5 s, against +0.222 % / +0.379 % for
+    fixed decode-only mu (``adapt=0``) and +0.277 % / +5.39 % for
+    :func:`weighted_solve`. The mu bit carries the congested instance
+    (λ = 0.5: +1.23 % → +0.09 %), the decoder bit the light one (λ ≤ 0.25 →
+    optimal); the deadline bit and setting moves (8) measured ~neutral, and
+    the best-of decoder (``flags`` 512) matches the adaptive decoder at 2-4×
+    the time. With ``return_stats`` returns ``(Solution, stats)``.
+    """
+    if not 0.0 <= lam <= 1.0:
+        raise ValueError("lam must be in [0, 1]")
+    _require_ext()
+    if f1_T is None or f2_T is None or f1_0 is None:
+        f1_T, f2_T, f1_0 = heuristic_weighted_reference_points(
+            inst, seed=seed, n_threads=n_threads,
+        )
+    if f1_0 <= f1_T + 1e-8 or f2_T <= 1e-8:
+        w1, w2, f1_cap = 1e-6, 1.0, f1_0
+    else:
+        w1, w2, f1_cap = lam / (f1_0 - f1_T), (1.0 - lam) / f2_T, f1_0
+    asgn, f1, f2, _g, stats = _ext.weighted_memetic(
+        n_jobs=len(inst.jobs), job_slots=_job_slots_ext(inst), type_cap=_type_cap(inst),
+        type_risk=_type_risk(inst), init_occ=_init_occ(inst), H=inst.horizon,
+        jobs=_dispatch_jobs(inst), w1=w1, w2=w2, f1_cap=f1_cap, pop_size=pop_size,
+        n_gen=n_gen, seed=seed, n_threads=n_threads, ls_moves=ls_moves,
+        restart_patience=restart_patience, shortlist=shortlist, xover_mode=xover_mode,
+        flags=flags, mu=mu, ablate=ablate, adapt=adapt,
+    )
+    sol = _to_solutions(inst, [(asgn, f1, f2)])[0]
+    return (sol, stats) if return_stats else sol
 
 
 # ── Priority-key + non-delay-SGS representation ────────────────────────────────

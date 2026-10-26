@@ -45,9 +45,16 @@ struct WeightedScalar {
 // (Δf2 exact, Δf1 ≈ Δp_occ), decode the best `shortlist` of them exactly with
 // schedule_repair + local_search, take the one that most reduces g, repeat up
 // to `max_moves` times. Leaves ind holding a decoded, evaluated solution.
+//
+// ls_mode 1 replaces the type-flip neighbourhood by the split flip of
+// weighted_dispatch.hpp: one candidate per job — an on-prem job moves to the
+// earliest slot of its scalar-best cloud type, a cloud job to the earliest slot
+// of its scalar-best on-prem type — with no improving-estimate filter; half
+// the shortlist is ranked by the estimate, half drawn at random (needs rng).
 inline bool weighted_local_search(Individual& ind, const Problem& prob,
                                   EvalWorkspace& ws, const WeightedScalar& G,
-                                  int max_moves, int shortlist, int ablate = 0) {
+                                  int max_moves, int shortlist, int ablate = 0,
+                                  int ls_mode = 0, std::mt19937* rng = nullptr) {
     const int  fpb    = (ablate & ABL_NO_FREE_POOL) ? 0 : 1;
     const bool no_ls   = ablate & ABL_NO_LOCAL_SEARCH;
     const bool no_rank = ablate & ABL_NO_EST_SHORTLIST;
@@ -61,8 +68,36 @@ inline bool weighted_local_search(Individual& ind, const Problem& prob,
     struct Cand { double est; int j, k; };
     std::vector<Cand> cand;
 
+    // scalar score of slot k of job j
+    auto score = [&](int j, int k) {
+        const SlotInfo& x = prob.job_slots[j][k];
+        return G.w1 * x.weight * x.f1_contrib + G.w2 * x.cost;
+    };
+
     for (int mv = 0; mv < max_moves; mv++) {
         cand.clear();
+        if (ls_mode == 1) {
+            for (int j = 0; j < prob.n_jobs; j++) {
+                const SlotInfo& s = prob.job_slots[j][ind.genes[j]];
+                const bool on = prob.type_cap[s.type_id] >= 0;
+                int best_k = -1; double best_s = 0;
+                for (const auto& sp : prob.job_type_span[j]) {
+                    if ((prob.type_cap[sp[0]] >= 0) == on) continue;
+                    const double sc = score(j, sp[1]);
+                    if (best_k < 0 || sc < best_s) { best_k = sp[1]; best_s = sc; }
+                }
+                if (best_k >= 0) cand.push_back({best_s - score(j, ind.genes[j]), j, best_k});
+            }
+            if (cand.empty()) break;
+            const int K = std::min<int>((int)cand.size(), shortlist), h = K / 2;
+            auto by_est = [](const Cand& a, const Cand& b) { return a.est < b.est; };
+            std::partial_sort(cand.begin(), cand.begin() + h, cand.end(), by_est);
+            for (int i = h; i < K; i++) {
+                std::uniform_int_distribution<int> d(i, (int)cand.size() - 1);
+                std::swap(cand[i], cand[d(*rng)]);
+            }
+            cand.resize(K);
+        } else
         for (int j = 0; j < prob.n_jobs; j++) {
             const SlotInfo& s = prob.job_slots[j][ind.genes[j]];
             for (const auto& sp : prob.job_type_span[j]) {
@@ -75,7 +110,7 @@ inline bool weighted_local_search(Individual& ind, const Problem& prob,
         }
         if (cand.empty()) break;
         const int K = std::min<int>((int)cand.size(), shortlist);
-        if (!no_rank)
+        if (!no_rank && ls_mode == 0)
             std::partial_sort(cand.begin(), cand.begin() + K, cand.end(),
                               [](const Cand& a, const Cand& b) { return a.est < b.est; });
 
@@ -192,7 +227,8 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
              int pop_size, int n_gen, int seed, int n_threads,
              int ls_moves, int restart_patience, int shortlist, int ablate = 0,
              const std::vector<std::vector<int>>& extra_seeds = {}, int xover_mode = 0,
-             int mut_mode = 0, int decode_order = 0, int fbi_passes = 0) {
+             int mut_mode = 0, int decode_order = 0, int fbi_passes = 0,
+             int ls_mode = 0) {
     py::gil_scoped_release release;
     set_num_threads(n_threads);
 
@@ -233,11 +269,10 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
         int local_calls = 0;
         #pragma omp for schedule(dynamic, 1)
         for (int k = 0; k < pop_size; k++) {
-            if (k >= n_hs) {
-                std::mt19937 lrng(init_seeds[k]);
-                pop[k] = make_random(prob, lrng, abl_unif);
-            }
-            weighted_local_search(pop[k], prob, ws, G, ls_moves, shortlist, ablate);
+            std::mt19937 lrng(init_seeds[k]);
+            if (k >= n_hs) pop[k] = make_random(prob, lrng, abl_unif);
+            weighted_local_search(pop[k], prob, ws, G, ls_moves, shortlist, ablate,
+                                  ls_mode, &lrng);
             finish(pop[k], ws, fbi_passes);
             local_calls++;
         }
@@ -248,11 +283,10 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
     {
         EvalWorkspace ws; ws.reset(prob.n_types, prob.max_slot);
         for (int k = 0; k < pop_size; k++) {
-            if (k >= n_hs) {
-                std::mt19937 lrng(init_seeds[k]);
-                pop[k] = make_random(prob, lrng, abl_unif);
-            }
-            weighted_local_search(pop[k], prob, ws, G, ls_moves, shortlist, ablate);
+            std::mt19937 lrng(init_seeds[k]);
+            if (k >= n_hs) pop[k] = make_random(prob, lrng, abl_unif);
+            weighted_local_search(pop[k], prob, ws, G, ls_moves, shortlist, ablate,
+                                  ls_mode, &lrng);
             finish(pop[k], ws, fbi_passes);
             ls_calls++;
         }
@@ -302,7 +336,8 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
                     if (mut_mode == 1) mutate_scalar(c, prob, p_mut, lrng, w1, w2);
                     else mutate(c, prob, p_mut, lrng);
                 }
-                weighted_local_search(c, prob, ws, G, gen_moves, shortlist, ablate);
+                weighted_local_search(c, prob, ws, G, gen_moves, shortlist, ablate,
+                                      ls_mode, &lrng);
                 finish(c, ws, fbi_passes);
                 local_calls++;
                 offspring[k] = std::move(c);
@@ -332,7 +367,8 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
                     if (mut_mode == 1) mutate_scalar(c, prob, p_mut, lrng, w1, w2);
                     else mutate(c, prob, p_mut, lrng);
                 }
-                weighted_local_search(c, prob, ws, G, gen_moves, shortlist, ablate);
+                weighted_local_search(c, prob, ws, G, gen_moves, shortlist, ablate,
+                                      ls_mode, &lrng);
                 finish(c, ws, fbi_passes);
                 ls_calls++;
                 offspring[k] = std::move(c);
@@ -359,7 +395,8 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
                 const auto& span = prob.job_type_span[j];
                 kick.genes[j] = span[rng() % span.size()][1];
             }
-            weighted_local_search(kick, prob, ws, G, ls_moves, shortlist, ablate);
+            weighted_local_search(kick, prob, ws, G, ls_moves, shortlist, ablate,
+                                  ls_mode, &rng);
             finish(kick, ws, fbi_passes);
             ls_calls++;
             pop[pop_size - 1] = kick;
@@ -372,7 +409,8 @@ run_weighted(const Problem& prob, double w1, double w2, double f1_cap,
     // Final intensive polish on the incumbent.
     {
         EvalWorkspace ws; ws.reset(prob.n_types, prob.max_slot);
-        weighted_local_search(incumbent, prob, ws, G, ls_moves * 3, shortlist, ablate);
+        weighted_local_search(incumbent, prob, ws, G, ls_moves * 3, shortlist, ablate,
+                              ls_mode, &rng);
         finish(incumbent, ws, fbi_passes > 0 ? fbi_passes * 2 + 2 : 0);
         ls_calls++;
         evaluate(incumbent, prob, ws);

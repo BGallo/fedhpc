@@ -17,6 +17,8 @@
 #include "moead.hpp"
 #include "weighted.hpp"
 #include "weighted_brkga.hpp"
+#include "weighted_dispatch.hpp"
+#include "weighted_memetic.hpp"
 #include "sgs_algos.hpp"
 
 // Convert a Profile (vector<pair<string,double>>) to a Python dict.
@@ -201,12 +203,12 @@ PYBIND11_MODULE(_moea, m) {
            int pop_size, int n_gen, int seed, int n_threads,
            int ls_moves, int restart_patience, int shortlist, int ablate,
            const std::vector<std::vector<int>>& extra_seeds, int xover_mode, int mut_mode,
-           int decode_order, int fbi_passes) {
+           int decode_order, int fbi_passes, int ls_mode) {
             auto [asgn, f1, f2, g, ls_calls] = run_weighted(
                 build_problem(n_jobs, job_slots, type_cap, type_risk, init_occ, ablate),
                 w1, w2, f1_cap, pop_size, n_gen, seed, n_threads,
                 ls_moves, restart_patience, shortlist, ablate, extra_seeds, xover_mode, mut_mode,
-                decode_order, fbi_passes);
+                decode_order, fbi_passes, ls_mode);
             return py::make_tuple(asgn, f1, f2, g, ls_calls);
         },
         py::arg("n_jobs"),
@@ -230,6 +232,7 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("mut_mode")        = 0,
         py::arg("decode_order")    = 0,
         py::arg("fbi_passes")      = 0,
+        py::arg("ls_mode")         = 0,
         "Single-objective memetic metaheuristic: minimise w1*f1 + w2*f2 with a\n"
         "soft cap f1 <= f1_cap. Memetic GA over per-job type assignments with an\n"
         "SPT list-scheduling decoder + greedy scalar type-flip local search and\n"
@@ -247,7 +250,90 @@ PYBIND11_MODULE(_moea, m) {
         "justification) passes per individual, keeping the better f1. Both keep\n"
         "f2 fixed, so g is monotone; both are off by default (byte-for-byte\n"
         "unchanged). Deterministic for fixed (seed, n_threads).\n"
+        "ls_mode: 0 = type-flip local search; 1 = on-prem/cloud split flip with\n"
+        "half est-ranked / half random candidates.\n"
         "Returns (assignment, f1, f2, g, n_ls_calls)."
+    );
+
+    m.def("weighted_dispatch",
+        [](int H,
+           const std::vector<std::tuple<double, double,
+               std::vector<std::tuple<int, int, double, int, int>>>>& jobs,
+           const std::vector<int>& type_cap,
+           const std::vector<std::tuple<int,int,int>>& init_occ,
+           double w1, double w2, double f1_cap, int seed, int n_threads,
+           int K, int max_iters, int n_kicks, int kick_size, int flags, int ls, double mu, int n_mu) {
+            const DProblem P = build_dproblem(H, jobs, type_cap, init_occ);
+            DispatchResult R = run_weighted_dispatch(P, w1, w2, f1_cap, seed, n_threads,
+                                                     K, max_iters, n_kicks, kick_size, flags, ls, mu, n_mu);
+            py::dict d;
+            d["decodes"] = R.st.decodes; d["ls_moves"] = R.st.ls_moves; d["kicks"] = R.st.kicks;
+            d["iters"] = R.st.iters; d["decode_ms"] = R.st.decode_ms; d["total_ms"] = R.total_ms;
+            d["cv"] = R.best.cv; d["n_cloud"] = R.best.n_cloud;
+            d["n_auto_off"] = R.best.n_auto_off; d["pen_g"] = R.best.pen_g;
+            d["trace"] = R.st.trace; d["mu"] = R.st.mu;
+            return py::make_tuple(R.asgn, R.best.f1, R.best.f2, R.best.g, d);
+        },
+        py::arg("H"), py::arg("jobs"), py::arg("type_cap"), py::arg("init_occ"),
+        py::arg("w1"), py::arg("w2"), py::arg("f1_cap") = 1e18,
+        py::arg("seed") = 42, py::arg("n_threads") = 0,
+        py::arg("K") = 64, py::arg("max_iters") = 100000,
+        py::arg("n_kicks") = 0, py::arg("kick_size") = 8,
+        py::arg("flags") = 0, py::arg("ls") = 1, py::arg("mu") = 0.0, py::arg("n_mu") = 1,
+        "Weighted-sum solver on the time-driven dispatch decoder (see\n"
+        "weighted_dispatch.hpp). jobs[j] = (arrival, weight, [(type, p_occ,\n"
+        "cost, earliest_start, latest_start), ...]). flags: DFlag bitmask\n"
+        "(1 no deadline offload, 2/4 pool tie-break most-free/best-fit,\n"
+        "8 random LS candidates, 16 no recall moves, 32 no ILS kicks,\n"
+        "64 half est-ranked / half random LS candidates, 256 serial SGS\n"
+        "decoder, 512 best of dispatch and serial SGS).\n"
+        "mu: dispatch priority mix (0 = WSPT; < 0 = search from the n_mu best of a\n"
+        "grid by all-auto decode; n_kicks is split across them).\n"
+        "Returns (assignment, f1, f2, g, stats)."
+    );
+
+    m.def("weighted_memetic",
+        [](int n_jobs,
+           const std::vector<std::vector<std::tuple<int,int,int,double,double,double>>>& job_slots,
+           const std::vector<int>& type_cap,
+           const std::vector<double>& type_risk,
+           const std::vector<std::tuple<int,int,int>>& init_occ,
+           int H,
+           const std::vector<std::tuple<double, double,
+               std::vector<std::tuple<int, int, double, int, int>>>>& jobs,
+           double w1, double w2, double f1_cap, int pop_size, int n_gen, int seed,
+           int n_threads, int ls_moves, int restart_patience, int shortlist,
+           int xover_mode, int flags, double mu, int ablate, int adapt) {
+            const Problem prob = build_problem(n_jobs, job_slots, type_cap, type_risk, init_occ, ablate);
+            const DProblem P = build_dproblem(H, jobs, type_cap, init_occ);
+            MemeticResult R = run_weighted_memetic(prob, P, w1, w2, f1_cap, pop_size, n_gen, seed,
+                                                   n_threads, ls_moves, restart_patience, shortlist,
+                                                   xover_mode, flags, mu, ablate, adapt);
+            py::dict d;
+            d["decodes"] = R.decodes; d["ls_calls"] = R.ls_calls; d["kicks"] = R.kicks;
+            d["total_ms"] = R.total_ms; d["cv"] = R.best.cv; d["n_cloud"] = R.best.n_cloud;
+            d["n_auto_off"] = R.best.n_auto_off; d["pen_g"] = R.best.pen_g;
+            d["trace"] = R.trace; d["mu"] = R.mu; d["deadline"] = R.dl; d["serial"] = R.dec;
+            d["mu_hist"] = R.mu_hist; d["deadline_hist"] = R.dl_hist; d["serial_hist"] = R.dec_hist;
+            return py::make_tuple(R.asgn, R.best.f1, R.best.f2, R.best.g, d);
+        },
+        py::arg("n_jobs"), py::arg("job_slots"), py::arg("type_cap"), py::arg("type_risk"),
+        py::arg("init_occ"), py::arg("H"), py::arg("jobs"),
+        py::arg("w1"), py::arg("w2"), py::arg("f1_cap") = 1e18,
+        py::arg("pop_size") = 32, py::arg("n_gen") = 60, py::arg("seed") = 42,
+        py::arg("n_threads") = 0, py::arg("ls_moves") = 8, py::arg("restart_patience") = 6,
+        py::arg("shortlist") = 24, py::arg("xover_mode") = 2, py::arg("flags") = 64,
+        py::arg("mu") = -1.0, py::arg("ablate") = 0, py::arg("adapt") = 0,
+        "The weighted() memetic GA on the dispatch decoder (weighted_memetic.hpp):\n"
+        "auto/cloud/on-prem genome, dispatch decoder, dispatch_ls local search.\n"
+        "job_slots/type_cap/... as for weighted() (heuristic seeds); H/jobs as for\n"
+        "weighted_dispatch(). xover_mode 0 = two-point, 1 = none, 2 = MSXF.\n"
+        "flags: DFlag bitmask (128 = weighted.hpp's improving-estimate shortlist).\n"
+        "mu: dispatch priority (< 0 = best of a grid by all-auto decode).\n"
+        "flags 256 = serial SGS decoder, 512 = best of dispatch and serial SGS.\n"
+        "adapt: MAdapt bitmask of per-individual settings (1 mu grid index,\n"
+        "2 deadline offload, 4 dispatch/serial decoder, 8 setting moves in LS).\n"
+        "Returns (assignment, f1, f2, g, stats)."
     );
 
     m.def("weighted_brkga",

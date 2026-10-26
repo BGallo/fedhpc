@@ -30,6 +30,8 @@ from fedhpc.moea import (
     moead_frontier,
     nsga2_frontier,
     nsga3_frontier,
+    weighted_solve_dispatch,
+    weighted_solve_memetic,
 )
 
 # ---------------------------------------------------------------------------
@@ -1360,3 +1362,105 @@ class TestWeightedBrkga:
         d = self._brkga(known_pareto_inst, 0.5, pop_size=20, n_gen=25)
         on = self._brkga(known_pareto_inst, 0.5, pop_size=20, n_gen=25, use_delay=True)
         assert (d.f1, d.f2) == (on.f1, on.f2)
+
+
+class TestWeightedDispatch:
+    """weighted_solve_dispatch — on-prem/cloud split genome on the time-driven
+    dispatch decoder. Must return one feasible Solution whose f1/f2 match a
+    recomputation, be deterministic and independent of the thread count, and
+    recover the exact optima on the known-answer instance."""
+
+    _REFS = dict(f1_T=10.0, f2_T=50.0, f1_0=30.0)
+    _FLAG_SETS = [0, 1, 2, 4, 8, 16, 32, 64, 256, 512, 64 | 256 | 1, 64 | 512]
+
+    @pytest.mark.parametrize("flags", _FLAG_SETS)
+    @pytest.mark.parametrize("lam", [0.0, 0.25, 0.5, 0.75, 1.0])
+    def test_valid_feasible_deterministic(self, flags, lam, known_pareto_inst):
+        inst = known_pareto_inst
+        kw = dict(flags=flags, mu=-1, n_kicks=4, kick_size=1, **self._REFS)
+        a = weighted_solve_dispatch(inst, lam, n_threads=1, **kw)
+        b = weighted_solve_dispatch(inst, lam, n_threads=4, **kw)
+        assert (a.f1, a.f2, a.assignment) == (b.f1, b.f2, b.assignment)
+        assert capacity_violations(inst, a) == []
+        assert recompute_f1(inst, a) == pytest.approx(a.f1, abs=1e-6)
+        assert recompute_f2(inst, a) == pytest.approx(a.f2, abs=1e-6)
+
+    @pytest.mark.parametrize("lam,expected", [(1.0, (10.0, 100.0)), (0.0, (30.0, 0.0)),
+                                              (0.5, (30.0, 0.0))])
+    def test_known_optima(self, lam, expected, known_pareto_inst):
+        s = weighted_solve_dispatch(known_pareto_inst, lam, mu=-1, **self._REFS)
+        assert (s.f1, s.f2) == expected
+
+    @pytest.mark.parametrize("lam", [0.0, 0.5, 1.0])
+    def test_lands_on_exact_front(self, lam, known_pareto_inst, known_pareto_front):
+        s = weighted_solve_dispatch(known_pareto_inst, lam, **self._REFS)
+        assert (s.f1, s.f2) in known_pareto_front
+
+    @pytest.mark.parametrize("lam", [0.1, 0.5, 0.9])
+    def test_feasible_on_data_instance(self, lam):
+        inst = Instance.from_file("data/tiny_xlarge.json")
+        s, st = weighted_solve_dispatch(inst, lam, mu=-1, n_kicks=10, return_stats=True,
+                                        f1_T=171.005, f2_T=8.9377, f1_0=264.005)
+        assert st["cv"] == 0
+        assert capacity_violations(inst, s) == []
+        assert recompute_f1(inst, s) == pytest.approx(s.f1, abs=1e-6)
+        assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
+
+
+class TestWeightedMemetic:
+    """weighted_solve_memetic — the weighted_solve memetic GA on the dispatch
+    decoder — and weighted_solve's split-flip local search (ls_mode=1). Both
+    must return feasible Solutions whose f1/f2 match a recomputation, be
+    deterministic and independent of the thread count, and recover the exact
+    optima on the known-answer instance."""
+
+    _REFS = dict(f1_T=10.0, f2_T=50.0, f1_0=30.0)
+    # (flags, mu, xover_mode, ablate, adapt)
+    _CONFIGS = [(64, -1.0, 2, 0, 0), (128 | 1, 0.0, 2, 0, 0), (128, 0.0, 0, 0, 0),
+                (64, 0.0, 1, 0, 0), (65, -1.0, 2, 64, 0), (8, 3.0, 2, 1 << 5, 0),
+                (64 | 256, -1.0, 2, 0, 0), (64 | 512, -1.0, 2, 0, 0),
+                (64, -1.0, 2, 0, 1), (64, -1.0, 0, 0, 2), (64, -1.0, 2, 0, 3),
+                (64, -1.0, 0, 0, 7), (64 | 512, -1.0, 2, 0, 11), (64, -1.0, 2, 0, 15)]
+
+    @pytest.mark.parametrize("cfg", _CONFIGS)
+    @pytest.mark.parametrize("lam", [0.0, 0.25, 0.5, 0.75, 1.0])
+    def test_valid_feasible_deterministic(self, cfg, lam, known_pareto_inst):
+        inst = known_pareto_inst
+        flags, mu, xm, abl, adapt = cfg
+        kw = dict(flags=flags, mu=mu, xover_mode=xm, ablate=abl, adapt=adapt, pop_size=8,
+                  n_gen=10, restart_patience=2, **self._REFS)
+        a = weighted_solve_memetic(inst, lam, n_threads=1, **kw)
+        b = weighted_solve_memetic(inst, lam, n_threads=4, **kw)
+        assert (a.f1, a.f2, a.assignment) == (b.f1, b.f2, b.assignment)
+        assert capacity_violations(inst, a) == []
+        assert recompute_f1(inst, a) == pytest.approx(a.f1, abs=1e-6)
+        assert recompute_f2(inst, a) == pytest.approx(a.f2, abs=1e-6)
+
+    @pytest.mark.parametrize("lam,expected", [(1.0, (10.0, 100.0)), (0.0, (30.0, 0.0)),
+                                              (0.5, (30.0, 0.0))])
+    def test_known_optima(self, lam, expected, known_pareto_inst):
+        s = weighted_solve_memetic(known_pareto_inst, lam, pop_size=8, n_gen=10, **self._REFS)
+        assert (s.f1, s.f2) == expected
+
+    @pytest.mark.parametrize("adapt,flags", [(0, 64), (0, 64 | 256), (0, 64 | 512), (15, 64),
+                                             (11, 64 | 512)])
+    @pytest.mark.parametrize("lam", [0.1, 0.5, 0.9])
+    def test_feasible_on_data_instance(self, lam, adapt, flags):
+        inst = Instance.from_file("data/tiny_xlarge.json")
+        s, st = weighted_solve_memetic(inst, lam, pop_size=8, n_gen=10, return_stats=True,
+                                       adapt=adapt, flags=flags,
+                                       f1_T=171.005, f2_T=8.9377, f1_0=264.005)
+        assert sum(st["mu_hist"]) == sum(st["deadline_hist"]) == sum(st["serial_hist"]) == 8
+        assert st["cv"] == 0
+        assert capacity_violations(inst, s) == []
+        assert recompute_f1(inst, s) == pytest.approx(s.f1, abs=1e-6)
+        assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
+
+    @pytest.mark.parametrize("lam", [0.0, 0.5, 1.0])
+    def test_split_flip_ls_feasible_deterministic(self, lam, known_pareto_inst, known_pareto_front):
+        kw = dict(pop_size=12, n_gen=15, seed=7, ls_mode=1, **self._REFS)
+        a = weighted_solve(known_pareto_inst, lam, n_threads=1, **kw)
+        b = weighted_solve(known_pareto_inst, lam, n_threads=4, **kw)
+        assert (a.f1, a.f2, a.assignment) == (b.f1, b.f2, b.assignment)
+        assert capacity_violations(known_pareto_inst, a) == []
+        assert (a.f1, a.f2) in known_pareto_front
