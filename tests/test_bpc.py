@@ -5,16 +5,18 @@ master must equal the LP relaxation of the compact SpaceTimeFormulation MIP
 exactly (Geoffrion's integrality property — each type's pricing subproblem
 polytope is a pure DAG flow, hence integral). A mismatch means the pricing
 arc-cost bookkeeping is wrong, not a branching issue (there is no branching
-yet). See src/fedhpc/bpc.py's module docstring and
-/home/bernardo/.claude/plans/cached-beaming-cookie.md for the design.
+yet). See src/fedhpc/bpc.py's module docstring for the design.
+
+The trap instances have running jobs, which BPC absorbs as pinned
+pseudo-jobs; the compact model handles them through its flow boundary and
+ghost completions, so equal bounds also check that rewrite.
 """
 from __future__ import annotations
-
-import glob
 
 import pytest
 from gurobipy import GRB
 
+from conftest import TRAP_INSTANCES
 from fedhpc.bpc import solve_root_relaxation
 from fedhpc.data import Instance
 from fedhpc.formulations import SpaceTimeFormulation, configure_env
@@ -27,9 +29,6 @@ _WEIGHTS = [
     (0.5, 0.5),
     (0.3, 0.7),
 ]
-
-_TINY_INSTANCES = sorted(glob.glob("data/tiny_*.json"))
-
 
 def _compact_lp_bound(inst: Instance, weight1: float, weight2: float) -> float:
     fmt = SpaceTimeFormulation()
@@ -46,10 +45,9 @@ def _compact_lp_bound(inst: Instance, weight1: float, weight2: float) -> float:
 
 
 @pytest.mark.parametrize("weight1,weight2", _WEIGHTS)
-@pytest.mark.parametrize("instance_path", _TINY_INSTANCES)
-def test_root_lp_bound_matches_compact_on_tiny_instances(instance_path, weight1, weight2):
-    inst = Instance.from_file(instance_path)
-    assert not inst.running_jobs, "Phase 1 does not support running jobs yet"
+@pytest.mark.parametrize("name", sorted(TRAP_INSTANCES))
+def test_root_lp_bound_matches_compact_on_trap_instances(name, weight1, weight2):
+    inst = TRAP_INSTANCES[name]()
 
     compact_bound = _compact_lp_bound(inst, weight1, weight2)
     result = solve_root_relaxation(inst, weight1, weight2)

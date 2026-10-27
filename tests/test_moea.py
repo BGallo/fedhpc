@@ -15,6 +15,9 @@ import pytest
 
 # Pull shared helpers from conftest (importable because conftest is a plain module)
 from conftest import (
+    POS_CONGESTION_REFS,
+    TRAP_INSTANCES,
+    trap_small,
     capacity_violations,
     is_non_dominated_set,
     recompute_f1,
@@ -521,8 +524,8 @@ class TestMipComparison:
         assert min(s.f2 for s in sols) == pytest.approx(mip_f2, abs=1e-4)
 
     def test_small_json_nsga2_all_constraints_satisfied(self):
-        """All NSGA-II solutions on tiny_small.json must be feasible."""
-        inst = Instance.from_file("data/tiny_small.json")
+        """All NSGA-II solutions on trap_small must be feasible."""
+        inst = trap_small()
         sols = nsga2_frontier(inst, pop_size=100, n_gen=200, seed=42)
         assert len(sols) > 0
         for s in sols:
@@ -531,8 +534,8 @@ class TestMipComparison:
             assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
 
     def test_small_json_moead_all_constraints_satisfied(self):
-        """All MOEA/D solutions on tiny_small.json must be feasible."""
-        inst = Instance.from_file("data/tiny_small.json")
+        """All MOEA/D solutions on trap_small must be feasible."""
+        inst = trap_small()
         sols = moead_frontier(inst, n_weights=100, n_gen=200, seed=42)
         assert len(sols) > 0
         for s in sols:
@@ -541,12 +544,12 @@ class TestMipComparison:
             assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
 
     def test_nsga2_output_non_dominated_on_small_json(self):
-        inst = Instance.from_file("data/tiny_small.json")
+        inst = trap_small()
         sols = nsga2_frontier(inst, pop_size=100, n_gen=200, seed=42)
         assert is_non_dominated_set(sols)
 
     def test_moead_output_non_dominated_on_small_json(self):
-        inst = Instance.from_file("data/tiny_small.json")
+        inst = trap_small()
         sols = moead_frontier(inst, n_weights=100, n_gen=200, seed=42)
         assert is_non_dominated_set(sols)
 
@@ -623,7 +626,7 @@ class TestMoeadMaxReplace:
         assert unique_front_points(r1) == unique_front_points(r2)
 
     def test_valid_on_small_json(self):
-        inst = Instance.from_file("data/tiny_small.json")
+        inst = trap_small()
         sols = moead_frontier(inst, n_weights=100, n_gen=200,
                               neighborhood_size=20, max_replace=5, seed=42)
         assert len(sols) > 0
@@ -959,7 +962,7 @@ class TestMoeadArchiveSize:
                 )
 
     def test_valid_on_small_json(self):
-        inst = Instance.from_file("data/tiny_small.json")
+        inst = trap_small()
         sols = moead_frontier(inst, n_weights=100, n_gen=200, neighborhood_size=20,
                               max_replace=5, archive_size=30, seed=42)
         assert len(sols) > 0
@@ -1036,7 +1039,7 @@ class TestSchedRepair:
                 )
 
     def test_valid_on_small_json(self):
-        inst = Instance.from_file("data/tiny_small.json")
+        inst = trap_small()
         for fn, kw in [
             (nsga2_frontier, {"pop_size": 100, "n_gen": 200, "seed": 42}),
             (nsga3_frontier, {"pop_size": 100, "n_divisions": 99, "n_gen": 200, "seed": 42}),
@@ -1094,10 +1097,10 @@ class TestWeightedSolve:
         assert turn.f1 == pytest.approx(10.0, abs=1e-6)
         assert cost.f2 == pytest.approx(0.0, abs=1e-6)
 
-    @pytest.mark.parametrize("path", ["data/tiny_small.json", "data/tiny_large.json"])
+    @pytest.mark.parametrize("name", sorted(TRAP_INSTANCES))
     @pytest.mark.parametrize("lam", [0.25, 0.5, 0.75])
-    def test_matches_exact_mip_scalar_on_bundled_instances(self, path, lam):
-        inst = Instance.from_file(path)
+    def test_matches_exact_mip_scalar_on_trap_instances(self, name, lam):
+        inst = TRAP_INSTANCES[name]()
         f1_T, f2_T, f1_0 = _reference_points(inst, OutputFlag=0)
         ex = solve_weighted_sum(inst, lam, f1_T=f1_T, f2_T=f2_T, f1_0=f1_0, OutputFlag=0)
         he = weighted_solve(inst, lam, f1_T=f1_T, f2_T=f2_T, f1_0=f1_0)
@@ -1397,10 +1400,10 @@ class TestWeightedDispatch:
         assert (s.f1, s.f2) in known_pareto_front
 
     @pytest.mark.parametrize("lam", [0.1, 0.5, 0.9])
-    def test_feasible_on_data_instance(self, lam):
-        inst = Instance.from_file("data/tiny_xlarge.json")
+    def test_feasible_on_data_instance(self, lam, pos_congestion_inst):
+        inst = pos_congestion_inst
         s, st = weighted_solve_dispatch(inst, lam, mu=-1, n_kicks=10, return_stats=True,
-                                        f1_T=171.005, f2_T=8.9377, f1_0=264.005)
+                                        **POS_CONGESTION_REFS)
         assert st["cv"] == 0
         assert capacity_violations(inst, s) == []
         assert recompute_f1(inst, s) == pytest.approx(s.f1, abs=1e-6)
@@ -1445,11 +1448,10 @@ class TestWeightedMemetic:
     @pytest.mark.parametrize("adapt,flags", [(0, 64), (0, 64 | 256), (0, 64 | 512), (15, 64),
                                              (11, 64 | 512)])
     @pytest.mark.parametrize("lam", [0.1, 0.5, 0.9])
-    def test_feasible_on_data_instance(self, lam, adapt, flags):
-        inst = Instance.from_file("data/tiny_xlarge.json")
+    def test_feasible_on_data_instance(self, lam, adapt, flags, pos_congestion_inst):
+        inst = pos_congestion_inst
         s, st = weighted_solve_memetic(inst, lam, pop_size=8, n_gen=10, return_stats=True,
-                                       adapt=adapt, flags=flags,
-                                       f1_T=171.005, f2_T=8.9377, f1_0=264.005)
+                                       adapt=adapt, flags=flags, **POS_CONGESTION_REFS)
         assert sum(st["mu_hist"]) == sum(st["deadline_hist"]) == sum(st["serial_hist"]) == 8
         assert st["cv"] == 0
         assert capacity_violations(inst, s) == []

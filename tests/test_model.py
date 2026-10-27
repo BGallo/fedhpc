@@ -52,8 +52,8 @@ def concurrent_instance() -> Instance:
 
 
 @pytest.fixture
-def small_instance() -> Instance:
-    return Instance.from_file("data/tiny_small.json")
+def small_instance(trap_small) -> Instance:
+    return trap_small
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +76,19 @@ class TestInstance:
         inst = Instance(jobs=jobs, instance_types=instance_types, horizon=20)
         inst.build()
         assert inst.F[0] == [1]  # only type 1 is feasible
+
+    @pytest.mark.parametrize("weight", [0.5, 1.25, 2.999])
+    def test_fractional_weight_rejected(self, weight):
+        """Integral weights are a model assumption: the exact Pareto searches
+        step f1 by whole units, so a fractional weight would make them skip
+        front points (and BPC prune incorrectly)."""
+        it = InstanceType(id=0, kind="x", perf=1.0, io_time=0.0, deploy=0,
+                          cost_io=0.0, cost_vm=0.0, cost_stor=0.0,
+                          cpu=8, mem=16, stor=100)
+        j = Job(id=0, arrival=0, exec_time=5, io_volume=0, cpu=1, mem=1, stor=1,
+                weight=weight)
+        with pytest.raises(ValueError, match="integral"):
+            Instance(jobs=[j], instance_types=[it], horizon=20).build()
 
     def test_p_bill_excludes_deploy(self):
         """p_bill must not include the deploy penalty."""

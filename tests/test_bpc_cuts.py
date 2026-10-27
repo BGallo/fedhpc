@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import pytest
 
+from conftest import trap_small
 from fedhpc.data import Instance
 from fedhpc.formulations import configure_env
 from fedhpc.model import solve_f1, solve_f2
@@ -189,14 +190,14 @@ class TestIntegralNodeObjectiveRegression:
     docstring: an integral node's reported objective must match what its
     *own extracted assignment* truly costs, not a possibly-optimistic raw
     mdl.ObjVal — otherwise it can falsely look unbeatable and prune away the
-    genuine optimum found later in the search. tiny_smallest.json's
-    solve_f1_bpc tie-break phase is the exact case that first exposed this.
+    genuine optimum found later in the search. A solve_f1_bpc tie-break
+    phase first exposed this; both lex directions are checked on trap_small.
     """
 
     def test_solve_f1_bpc_tie_break_finds_true_minimum(self):
         from fedhpc.bpc import solve_f1_bpc
 
-        inst = Instance.from_file("data/tiny_smallest.json")
+        inst = trap_small()
         expected = solve_f1(inst, OutputFlag=0)
         got = solve_f1_bpc(inst)
         assert got.f1 == pytest.approx(expected.f1, abs=1e-4)
@@ -205,7 +206,7 @@ class TestIntegralNodeObjectiveRegression:
     def test_solve_f2_bpc_tie_break_finds_true_minimum(self):
         from fedhpc.bpc import solve_f2_bpc
 
-        inst = Instance.from_file("data/tiny_smallest.json")
+        inst = trap_small()
         expected = solve_f2(inst, OutputFlag=0)
         got = solve_f2_bpc(inst)
         assert got.f1 == pytest.approx(expected.f1, abs=1e-4)

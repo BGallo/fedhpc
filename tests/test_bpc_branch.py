@@ -15,23 +15,28 @@ fallback that replaced it as the primary strategy) — correctness is the same
 contract either way. Direct unit coverage of the Ryan-Foster same/differ
 mechanics themselves (``_column_allowed``, ``_price_type``) lives in
 ``TestRyanFosterMechanics`` below.
+
+The trap instances carry running jobs that bind at both turnaround anchors
+(tests/test_trap_instances.py), so matching the compact model on them also
+checks BPC's running-job handling: before it existed, BPC returned schedules
+using capacity the running jobs occupy.
 """
 from __future__ import annotations
-
-import glob
 
 import pytest
 import gurobipy as gp
 from gurobipy import GRB
 
-from fedhpc.bpc import solve_f1_bpc, solve_f2_bpc, solve_weighted_sum_bpc
-from fedhpc.data import Instance
+from conftest import TRAP_INSTANCES, capacity_violations
+from fedhpc import bpc
+from fedhpc.bpc import make_bpc_lexmin_bounded, solve_f1_bpc, solve_f2_bpc, solve_weighted_sum_bpc
+from fedhpc.data import Instance, RunningJob
 from fedhpc.formulations import SpaceTimeFormulation, configure_env
 from fedhpc.model import solve_f1, solve_f2
 
 configure_env()
 
-_TINY_INSTANCES = sorted(glob.glob("data/tiny_*.json"))
+_TRAPS = sorted(TRAP_INSTANCES)
 _GUROBI = {"OutputFlag": 0}
 
 
@@ -52,26 +57,18 @@ def _compact_weighted_f1_f2(inst: Instance, weight1: float, weight2: float) -> t
     return f1_expr.getValue(), f2_expr.getValue()
 
 
-@pytest.mark.parametrize("instance_path", _TINY_INSTANCES)
-def test_solve_f1_bpc_matches_compact(instance_path):
-    inst = Instance.from_file(instance_path)
+@pytest.mark.parametrize("name", _TRAPS)
+def test_solve_f1_bpc_matches_compact(name):
+    inst = TRAP_INSTANCES[name]()
     expected = solve_f1(inst, **_GUROBI)
     got = solve_f1_bpc(inst)
     assert got.f1 == pytest.approx(expected.f1, abs=1e-4)
     assert got.f2 == pytest.approx(expected.f2, abs=1e-4)
 
 
-# Lex-min (f2, f1) phase 2 (min f1 s.t. f2 <= 0) packs every job on-prem;
-# BPC needs ~5 min on tiny_large and ~13 min on tiny_xlarge.
-_SLOW_F2 = {"data/tiny_large.json", "data/tiny_xlarge.json"}
-
-
-@pytest.mark.parametrize("instance_path", [
-    pytest.param(p, marks=pytest.mark.slow) if p in _SLOW_F2 else p
-    for p in _TINY_INSTANCES
-])
-def test_solve_f2_bpc_matches_compact(instance_path):
-    inst = Instance.from_file(instance_path)
+@pytest.mark.parametrize("name", _TRAPS)
+def test_solve_f2_bpc_matches_compact(name):
+    inst = TRAP_INSTANCES[name]()
     expected = solve_f2(inst, **_GUROBI)
     got = solve_f2_bpc(inst)
     assert got.f1 == pytest.approx(expected.f1, abs=1e-4)
@@ -79,12 +76,59 @@ def test_solve_f2_bpc_matches_compact(instance_path):
 
 
 @pytest.mark.parametrize("weight1,weight2", [(1.0, 0.0), (0.0, 1.0), (0.5, 0.5), (0.3, 0.7)])
-@pytest.mark.parametrize("instance_path", _TINY_INSTANCES)
-def test_solve_weighted_sum_bpc_matches_compact(instance_path, weight1, weight2):
-    inst = Instance.from_file(instance_path)
+@pytest.mark.parametrize("name", _TRAPS)
+def test_solve_weighted_sum_bpc_matches_compact(name, weight1, weight2):
+    inst = TRAP_INSTANCES[name]()
     exp_f1, exp_f2 = _compact_weighted_f1_f2(inst, weight1, weight2)
     got = solve_weighted_sum_bpc(inst, weight1, weight2)
     assert got.objective == pytest.approx(weight1 * exp_f1 + weight2 * exp_f2, abs=1e-4)
+
+
+def test_running_jobs_occupy_capacity():
+    """Regression: with the 2-instance on-prem pool held by running jobs
+    until t=20, BPC's schedule must respect that occupancy (it used to ignore
+    running jobs and report a cheaper, infeasible schedule)."""
+    inst = TRAP_INSTANCES["trap_small"]()
+    inst.running_jobs = [RunningJob(id=200, type_id=0, end=20),
+                         RunningJob(id=201, type_id=0, end=20)]
+    inst.n_running, inst.rj_arrivals, inst.occupied = {}, {}, {}
+    inst.build()
+    expected = solve_f1(inst, **_GUROBI)
+    got = solve_f1_bpc(inst)
+    assert capacity_violations(inst, got) == []
+    assert set(got.assignment) == {j.id for j in inst.jobs}
+    assert (got.f1, got.f2) == pytest.approx((expected.f1, expected.f2), abs=1e-4)
+
+
+def _failing_second_call(monkeypatch):
+    """Make every second ``_branch_and_price`` call (a lex tie-break) raise."""
+    real, calls = bpc._branch_and_price, []
+
+    def flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) % 2 == 0:
+            raise RuntimeError("BPC branch-and-price exceeded max_nodes")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(bpc, "_branch_and_price", flaky)
+
+
+@pytest.mark.parametrize("solve", [solve_f1_bpc, solve_f2_bpc])
+def test_failed_tie_break_is_not_optimal(monkeypatch, known_pareto_inst, solve):
+    """Regression: a lex-min whose tie-break phase fails is primary-optimal
+    only; it used to come back as "optimal"."""
+    _failing_second_call(monkeypatch)
+    sol = solve(known_pareto_inst)
+    assert sol.status == "feasible"
+    assert sol.assignment  # phase 1's schedule is still returned
+
+
+def test_lexmin_bounded_failed_tie_break_is_inconclusive(monkeypatch, known_pareto_inst):
+    """Same regression through the box-search closure: "feasible" makes
+    true_pareto_frontier drop the box instead of trusting the point."""
+    _failing_second_call(monkeypatch)
+    lexmin_bounded, _counters = make_bpc_lexmin_bounded(known_pareto_inst)
+    assert lexmin_bounded("f1", "f2").status == "feasible"
 
 
 def test_solve_f1_bpc_matches_compact_on_known_pareto_inst(known_pareto_inst):

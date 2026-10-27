@@ -28,6 +28,9 @@ class Job:
     mem: float           # q^mem_j
     stor: float          # q^stor_j
     weight: float = 1.0  # w_j — turnaround weight in f1 (1.0 = plain total turnaround)
+    # Must be integral (checked by Instance.build): with integer completions,
+    # f1 values of two schedules then differ by an integer, which the exact
+    # Pareto searches and BPC pruning rely on.
 
 
 @dataclass
@@ -125,6 +128,10 @@ class Instance:
     # Used by OccupancyFormulation to tighten the capacity upper bound on w[m,t].
 
     def build(self) -> None:
+        fractional = [j.id for j in self.jobs if not float(j.weight).is_integer()]
+        if fractional:
+            raise ValueError(f"Job weights must be integral (jobs {fractional})")
+
         type_map = {m.id: m for m in self.instance_types}
 
         for j in self.jobs:

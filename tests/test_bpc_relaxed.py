@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import pytest
 
+from conftest import trap_small
 from fedhpc.data import Instance
 from fedhpc.formulations import configure_env
 
@@ -130,13 +131,14 @@ class TestPrescreenEndToEnd:
     def test_solve_f1_bpc_and_f2_bpc_match_compact_with_prescreen(self):
         """Same regression shape as test_bpc_cuts.py's
         TestIntegralNodeObjectiveRegression: run the public tie-break-aware
-        wrappers (not raw _branch_and_price) through the prescreen, on the
-        smallest instance, and check against the compact model directly.
+        wrappers (not raw _branch_and_price) through the prescreen, on
+        trap_small (running jobs included), and check against the compact
+        model directly.
         """
         from fedhpc.bpc import _branch_and_price
         from fedhpc.model import solve_f1, solve_f2
 
-        inst = Instance.from_file("data/tiny_smallest.json")
+        inst = trap_small()
         exp1 = solve_f1(inst, OutputFlag=0)
         exp2 = solve_f2(inst, OutputFlag=0)
 

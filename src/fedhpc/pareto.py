@@ -433,6 +433,12 @@ def true_pareto_frontier(
     under a wall-clock cap (see ``bpc.make_bpc_lexmin_bounded``'s
     docstring), and ``formulation`` is ignored under it.
 
+    Exactness assumes two schedules' f1 values differ by a whole number,
+    which holds because job weights are integral (``Instance.build`` rejects
+    fractional ones) and completions are integer slots; the right-side cut
+    below steps f1 down by exactly 1. Two costs closer than ``_EPS`` (1e-4)
+    are treated as equal.
+
     Standard exact algorithm for biobjective integer programs (Hamacher,
     Pedersen & Ruzika 2007; related to the "balanced box" method of Boland,
     Charkhgard & Savelsbergh 2015) — used here instead of a per-integer-level
@@ -668,7 +674,8 @@ def true_pareto_frontier(
         else:
             # f1's bound must be an exact integer decrement (right.f1 - 1),
             # not right.f1 - a small epsilon: f1 is always integer-spaced
-            # (see the docstring), so both should be mathematically
+            # (integral weights × integer completions — Instance.build
+            # rejects fractional weights), so both should be mathematically
             # equivalent as a cut — but empirically they are not. Testing
             # found a case (stess_test.json) where bounding at right.f1 -
             # 1e-4 (e.g. 538.9999) made Gurobi report a genuinely
@@ -794,8 +801,9 @@ def map_pareto_frontier(
     1. Same two anchors A, B as true_pareto_frontier.
     2. Maintain an unordered pool of open boxes (L, R), seeded with (A, B).
        A box is only ever discarded once L.f1 and R.f1 are adjacent integers
-       (R.f1 - L.f1 <= 1) — f1 is always integer-spaced, so that's a rigorous
-       proof nothing more fits between them, regardless of which direction
+       (R.f1 - L.f1 <= 1) — f1 is always integer-spaced (integral job weights,
+       enforced by ``Instance.build``), so that's a rigorous proof nothing
+       more fits between them, regardless of which direction
        last touched the box.
     3. Each step, alternate direction and pick the open box with the largest
        gap *in that direction* (f1-span or f2-span) — always attacking

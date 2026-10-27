@@ -14,6 +14,8 @@ Space-time network flow MIP formulation (non-preemptive, elastic provisioning).
 4. Deploy/provisioning adds a **time penalty only** — no monetary cost.
 5. Idle time between uses of the same type is free and allowed.
 6. Instance provisioning is elastic — any number of concurrent instances may be used (unlimited types). There is no hard budget: cost is an objective, and a cost cap is expressed as an ε-constraint on f2.
+7. Capacitated (on-prem) types have `N_m` instances; jobs already running at `t = 0` (`running_jobs`) hold one instance each until they finish and are not re-optimized.
+8. Job weights `w_j` are **integral** (`Instance.build()` raises otherwise). With integer completion times, any two schedules' f1 values then differ by a whole number. The exact Pareto searches (`true_pareto_frontier`, `map_pareto_frontier`) step f1 by exactly 1, and BPC pruning uses that spacing; with fractional weights both would skip Pareto points.
 
 ### Sets
 
@@ -32,6 +34,7 @@ Space-time network flow MIP formulation (non-preemptive, elastic provisioning).
 - `e_j` — base execution time
 - `ι_j` — I/O volume
 - `q^cpu_j`, `q^mem_j`, `q^stor_j` — CPU, memory, storage demand
+- `w_j` — turnaround weight (integer, default 1)
 
 **Per instance type `m`:**
 - `P_m` — relative performance factor
@@ -41,6 +44,8 @@ Space-time network flow MIP formulation (non-preemptive, elastic provisioning).
 - `κ^S_m` — cost per unit of billable time × storage
 - `κ^IO_m` — cost per I/O unit
 - `C^cpu_m`, `C^mem_m`, `C^stor_m` — CPU, memory, storage capacities
+- `N_m` — number of instances (`capacity`; unlimited when absent)
+- `U_m` — fixed cost charged once if any job runs on `m` (`fixed_cost`, default 0)
 
 ### Derived Parameters
 
@@ -84,14 +89,14 @@ One directed acyclic graph `G_m = (T, A_m)` per instance type:
 
 ### Objectives
 
-**f1 — Minimize total turnaround (eq. 10):**
+**f1 — Minimize total weighted turnaround (eq. 10):**
 ```
-f1 = Σ_j Σ_{m∈F_j} Σ_{t∈T_jm} (t + p^occ_jm - a_j) · x_jmt
+f1 = Σ_j Σ_{m∈F_j} Σ_{t∈T_jm} w_j (t + p^occ_jm - a_j) · x_jmt
 ```
 
 **f2 — Minimize total monetary cost (eq. 11):**
 ```
-f2 = Σ_j Σ_{m∈F_j} Σ_{t∈T_jm} c^proc_jm · x_jmt
+f2 = Σ_j Σ_{m∈F_j} Σ_{t∈T_jm} c^proc_jm · x_jmt  +  Σ_m U_m z_m
 ```
 
 ### Constraints (eqs 12–17)
@@ -129,24 +134,30 @@ Sweeps a discrete set of ε values to approximate the Pareto frontier, handling 
 - **Version 1:** `min f1` subject to `f2 ≤ ε`
 - **Version 2:** `min f2` subject to `f1 ≤ ε1`
 
+#### Exact Pareto front
+
+`pareto.true_pareto_frontier` enumerates the complete front by box splitting: about 2 solves per Pareto point. Each solve is a lexicographic minimum under a bound on the other objective. `pareto.map_pareto_frontier` bisects the objective range instead, giving broad coverage under a solve or time budget. Both rely on f1 being integer-spaced (assumption 8). Each box solve runs on either the compact Gurobi model (`engine="gurobi"`) or the branch-price-and-cut engine in `bpc.py` (`engine="bpc"`). BPC handles running jobs by turning each into a pinned pseudo-job; it is practical only for instances of about a dozen jobs.
+
 ## Project Structure
 
 ```
 fedhpc/
-├── data/
-│   └── small.json            # Example instance (5 jobs, 4 machines)
-├── src/
-│   └── fedhpc/
-│       ├── __init__.py
-│       ├── model.py          # MIP model (gurobipy)
-│       ├── data.py           # Instance data structures
-│       ├── pareto.py         # Weighted-sum and ε-constraint solvers
-│       └── cli.py            # Entry point
+├── data/                     # Real-trace instances (see "Instances" below)
+├── src/fedhpc/
+│   ├── data.py               # Instance data structures and derived parameters
+│   ├── formulations.py       # SpaceTime / Occupancy MIP builders + dominance reductions
+│   ├── model.py              # Single-objective, weighted-sum and ε-constraint solves
+│   ├── pareto.py             # Reference points, exact box-splitting / bisection fronts, hybrid
+│   ├── bpc.py                # Branch-price-and-cut exact engine
+│   ├── moea.py               # NSGA-II / NSGA-III / MOEA/D and weighted-sum heuristics
+│   ├── baselines.py          # List-scheduling baselines (greedy, threshold bursting)
+│   ├── metrics.py, viz.py    # Front indicators, plots, reports
+│   ├── cg_bound.py, ilssp.py, rm_benchmark.py  # Rm||TWCT+TMUC benchmark
+│   ├── cli.py                # Entry point
+│   └── _ext/                 # C++ extensions (pybind11): EAs, graphs, ILS-SP, pricing
 ├── tests/
-│   ├── conftest.py
-│   └── test_model.py
-├── pyproject.toml
-└── README.md
+├── scripts/                  # Experiments and benchmarks
+└── proofs/                   # Lean proofs of reduction lemmas
 ```
 
 ## Setup
@@ -154,36 +165,41 @@ fedhpc/
 Requires a valid [Gurobi license](https://www.gurobi.com/downloads/) and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-# Install dependencies
+# Install dependencies (builds the C++ extensions)
 uv sync
 
-# Run tests
+# Run tests (~3.5 min)
 uv run pytest
 
-# Minimise turnaround only
-uv run fedhpc --instance data/small.json --method f1
+I=data/pos_congestion_known_runtime_offline_10min.json
 
-# Minimise cost only
-uv run fedhpc --instance data/small.json --method f2
+# Lex-min turnaround / cost
+uv run fedhpc --instance $I --method f1
+uv run fedhpc --instance $I --method f2
 
 # Weighted-sum scalarisation (α controls turnaround vs cost trade-off)
-uv run fedhpc --instance data/small.json --method weighted --alpha 0.5
+uv run fedhpc --instance $I --method weighted --alpha 0.5
 
-# ε-constraint: minimise turnaround with cost cap ε
-uv run fedhpc --instance data/small.json --method epsilon --epsilon 200
+# ε-constraint: minimise turnaround with cost cap ε / cost with turnaround cap ε
+uv run fedhpc --instance $I --method epsilon --epsilon 200
+uv run fedhpc --instance $I --method epsilon-t --epsilon 50000
 
-# ε-constraint: minimise cost with turnaround cap ε
-uv run fedhpc --instance data/small.json --method epsilon-t --epsilon 150
+# Exact Pareto front (box splitting), capped at 20 solves
+uv run fedhpc --instance $I --method pareto-true --max-solves 20
 
-# Pareto frontier via weighted-sum sweep
-uv run fedhpc --instance data/small.json --method pareto-ws --steps 11
-
-# Pareto frontier via ε-constraint sweep
-uv run fedhpc --instance data/small.json --method pareto-eps --steps 20
+# Heuristic fronts
+uv run fedhpc --instance $I --method nsga2
+uv run fedhpc --instance $I --method moead
 
 # JSON output
-uv run fedhpc --instance data/small.json --method f1 --json
+uv run fedhpc --instance $I --method f1 --json
 ```
+
+## Instances
+
+- `data/pos_congestion_known_runtime_offline_10min.json` — 3340 jobs, 28 types, 1525 running jobs, 288 ten-minute slots. The stress instance: tests that exercise scale use it.
+- `data/fedhpc_known_runtime_offline_10min.json`, `data/mit_supercloud_*.json` — further real-trace instances.
+- Tests that need a small instance use the *trap instances* defined in `tests/conftest.py` (7 and 12 jobs). They are small but hard. The optimum hinges on which jobs wait for a scarce fat node or for a running job to free capacity. Every list-scheduling baseline lands at least 9% (`trap_small`) and 14% (`trap_medium`) above the exact minimum turnaround. `tests/test_trap_instances.py` pins this property.
 
 ## Instance Format
 
@@ -197,19 +213,23 @@ Instances are JSON files with the following structure:
       "id": 0, "kind": "on-prem",
       "perf": 1.0, "io_time": 0.0, "deploy": 0,
       "cost_io": 0.0, "cost_vm": 0.0, "cost_stor": 0.0,
-      "cpu": 32, "mem": 128, "stor": 2000
+      "cpu": 32, "mem": 128, "stor": 2000,
+      "capacity": 4
     }
   ],
   "jobs": [
     {
       "id": 0, "arrival": 0, "exec_time": 10, "io_volume": 0,
-      "cpu": 8, "mem": 32, "stor": 500
+      "cpu": 8, "mem": 32, "stor": 500, "weight": 1
     }
+  ],
+  "running_jobs": [
+    {"id": 100, "type_id": 0, "end": 6}
   ]
 }
 ```
 
-`feasible_types` is no longer an input field — `F_j` is computed automatically from the resource constraints (CPU / mem / stor).
+`feasible_types` is no longer an input field — `F_j` is computed automatically from the resource constraints (CPU / mem / stor). Optional fields: `capacity` (absent = unlimited), `fixed_cost`, `revocation_risk` per type; `weight` (an integer, default 1) per job; `running_jobs` (each holds one instance of a capacitated type from slot 0 until `end`).
 
 ## Dependencies
 
@@ -220,4 +240,5 @@ Managed with [uv](https://docs.astral.sh/uv/). See `pyproject.toml` for the full
 
 ## References
 
-FED-HPC problem formulation: `fedhpc.pdf`.# fedhpc
+FED-HPC problem formulation: `MOFE__Multi_Objective_Scheduling_on_Federated_Enviroments.pdf` (not in the repository). Formulation reductions: `docs/formulation_reductions.tex`.
+

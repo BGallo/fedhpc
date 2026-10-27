@@ -5,17 +5,27 @@ Coverage
 ReferencePoints    Correctness of f1_T, f2_T, f1_0 on the known-answer instance.
 WeightedSum        A λ sweep of solve_weighted_sum_with_reference recovers the
                    supported points of the known front.
-TrueFrontier       true_pareto_frontier: exactly the known front; non-dominance
-                   and feasibility on a bundled instance.
+TrueFrontier       true_pareto_frontier: exactly the known front; the same
+                   front as an exhaustive sweep on the trap instances;
+                   non-dominance and feasibility on trap_small.
 MapFrontier        map_pareto_frontier: exact points, and the known front when
                    the budget is not binding.
-Consistency        The two enumerations agree on a bundled instance.
+Consistency        The two enumerations agree on trap_small.
 """
 import pytest
-from conftest import capacity_violations, is_non_dominated_set, recompute_f1, recompute_f2, unique_front_points
+from conftest import (
+    TRAP_INSTANCES,
+    capacity_violations,
+    is_non_dominated_set,
+    recompute_f1,
+    recompute_f2,
+    trap_small,
+    unique_front_points,
+)
 
 from fedhpc.data import Instance
 from fedhpc.pareto import (
+    _filter_dominated,
     _reference_points,
     map_pareto_frontier,
     solve_weighted_sum_with_reference,
@@ -29,7 +39,19 @@ KNOWN_FRONT = {(10.0, 100.0), (15.0, 50.0), (30.0, 0.0)}
 
 @pytest.fixture(scope="module")
 def bundled_inst() -> Instance:
-    return Instance.from_file("data/tiny_small.json")
+    return trap_small()
+
+
+def _exhaustive_front(inst: Instance) -> set[tuple[float, float]]:
+    """The front by brute force: lex-min (f2, f1) under f1 <= every integer
+    level from min f1 up to the min-cost schedule's f1. Exact because f1
+    moves in whole steps (integral weights × integer completions)."""
+    from fedhpc.model import solve_f1, solve_f2, solve_true_pareto_step
+    lo = solve_f1(inst, MIPGap=0, **_GUROBI).f1
+    hi = solve_f2(inst, MIPGap=0, **_GUROBI).f1
+    pts = [solve_true_pareto_step(inst, lo + k + 1e-6, MIPGap=0, **_GUROBI)
+           for k in range(round(hi - lo) + 1)]
+    return unique_front_points(_filter_dominated(pts))
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +117,15 @@ class TestTrueFrontier:
     def test_finds_exactly_the_known_front(self, known_pareto_inst):
         front = true_pareto_frontier(known_pareto_inst, **_GUROBI)
         assert unique_front_points(front) == KNOWN_FRONT
+
+    @pytest.mark.parametrize("name", sorted(TRAP_INSTANCES))
+    def test_matches_exhaustive_sweep(self, name):
+        """Box splitting finds every point a level-by-level sweep finds, on
+        weighted instances (weights 1-3) whose fronts are dense. Regression:
+        the right-side cut steps f1 by exactly 1, which skipped points when
+        fractional weights were still accepted."""
+        inst = TRAP_INSTANCES[name]()
+        assert unique_front_points(true_pareto_frontier(inst, **_GUROBI)) == _exhaustive_front(inst)
 
     def test_bundled_instance(self, bundled_inst):
         front = true_pareto_frontier(bundled_inst, **_GUROBI)

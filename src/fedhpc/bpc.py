@@ -5,14 +5,28 @@ Dantzig-Wolfe reformulation of the space-time network formulation
 ``MOFE__Multi_Objective_Scheduling_on_Federated_Enviroments.pdf`` §3): one
 set-partitioning master over "instance-lifetime" columns (source-to-sink paths
 in each type's space-time network ``G_m``) plus one shortest-path pricing
-subproblem per instance type. See ``/home/bernardo/.claude/plans/cached-beaming-cookie.md``
-for the full design and phasing.
+subproblem per instance type.
 
-Phase 1 scope (this module, for now)
--------------------------------------
-Root-node column generation only — no branching, no cuts, no running-job
-support (``inst.n_running``/``inst.rj_arrivals`` are assumed empty; every
-instance of a type starts idle at ``t=0``). This gives a standalone,
+Running jobs
+------------
+Every public entry point first rewrites ``inst.running_jobs`` as pinned
+pseudo-jobs (:func:`_absorb_running_jobs`): a running job on capacitated type
+``m`` ending at ``e`` becomes a job feasible only on ``m``, only at start 0,
+with ``p_occ = min(e, H)``, cost 0 and weight 0. Covering it exactly once
+takes one of the ``N_m`` instance lifetimes out of service on ``[0, e)`` —
+precisely the compact model's ``y_{m,-1} = N_m - n_running[m]`` boundary plus
+its ghost completion at ``e``. Pseudo-jobs add nothing to f1 or f2, do not
+activate a type's fixed cost, and are stripped from every returned
+assignment.
+
+The development notes below cite timings on ``tiny_*`` instances (5-25-job
+subsets of the fedhpc trace). Those instances have been deleted; the tests
+now use the trap instances in ``tests/conftest.py`` (7 and 12 jobs, with
+running jobs).
+
+Phase 1: root column generation
+-------------------------------
+Root-node column generation only — no branching, no cuts. This gives a standalone,
 independently checkable LP bound: by Geoffrion's integrality property, the
 root LP relaxation of this master must equal the LP relaxation of the compact
 ``SpaceTimeFormulation`` MIP exactly, since each type's pricing subproblem
@@ -411,13 +425,13 @@ instances, same as any RCSP-based column generation.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import gurobipy as gp
 from gurobipy import GRB
 
 from . import formulations
-from .data import Instance
+from .data import Instance, Job
 from .model import Solution
 
 __all__ = [
@@ -443,6 +457,63 @@ class Column:
     jobs: tuple[tuple[int, int], ...]
     cost1: float
     cost2: float
+
+
+@dataclass
+class _RunningAsJobs(Instance):
+    """``base`` with its running jobs as pinned pseudo-jobs ``running_ids``
+    (see :func:`_absorb_running_jobs`)."""
+
+    running_ids: frozenset[int] = frozenset()
+    base: Instance | None = None
+
+    def f2_of(self, assignment: dict[int, tuple[int, int]]) -> float:
+        # A running job's type is not used by the schedule: no fixed cost.
+        return self.base.f2_of(
+            {jid: a for jid, a in assignment.items() if jid not in self.running_ids}
+        )
+
+
+def _absorb_running_jobs(inst: Instance) -> Instance:
+    """Rewrite ``inst.running_jobs`` as pinned pseudo-jobs (see the module
+    docstring's "Running jobs" section). Returns ``inst`` itself when no
+    running job occupies capacity.
+
+    Mirrors :meth:`Instance.build`: running jobs on unlimited types are
+    ignored, ends are clipped to the horizon, and a job ending at slot 0
+    never occupies anything.
+    """
+    if isinstance(inst, _RunningAsJobs):
+        return inst
+    capacitated = {m.id for m in inst.instance_types if m.capacity is not None}
+    running = [(rj.type_id, min(rj.end, inst.horizon)) for rj in inst.running_jobs
+               if rj.type_id in capacitated and rj.end > 0]
+    if not running:
+        return inst
+    jobs = list(inst.jobs)
+    F, T = dict(inst.F), dict(inst.T)
+    p_bill, p_occ, c = dict(inst.p_bill), dict(inst.p_occ), dict(inst.c)
+    next_id = max((j.id for j in inst.jobs), default=-1) + 1
+    ids = []
+    for mid, end in running:
+        jid = next_id
+        next_id += 1
+        ids.append(jid)
+        jobs.append(Job(id=jid, arrival=0.0, exec_time=0.0, io_volume=0.0,
+                        cpu=0.0, mem=0.0, stor=0.0, weight=0.0))
+        F[jid] = [mid]
+        T[jid, mid] = range(0, 1)
+        p_bill[jid, mid], p_occ[jid, mid], c[jid, mid] = 0.0, end, 0.0
+    return _RunningAsJobs(
+        jobs=jobs, instance_types=inst.instance_types, horizon=inst.horizon,
+        slot_size_seconds=inst.slot_size_seconds,
+        p_bill=p_bill, p_occ=p_occ, c=c, F=F, T=T,
+        running_ids=frozenset(ids), base=inst,
+    )
+
+
+def _running_ids(inst: Instance) -> frozenset[int]:
+    return inst.running_ids if isinstance(inst, _RunningAsJobs) else frozenset()
 
 
 @dataclass(frozen=True)
@@ -511,14 +582,20 @@ def _heuristic_seed_columns(inst: Instance) -> list[Column]:
     never a single column with overlapping jobs). Jobs the heuristic leaves
     unscheduled (partial coverage on a constrained instance) simply fall
     back to their big-M artificial, same as before this seeding existed.
+
+    With running jobs the heuristic runs on the original instance (which
+    respects their occupancy) and each pseudo-job opens its own chain at 0.
     """
     from .baselines import greedy_earliest_completion
 
-    sol = greedy_earliest_completion(inst)
+    base = inst.base if isinstance(inst, _RunningAsJobs) else inst
+    assignment = dict(greedy_earliest_completion(base).assignment)
+    for jid in _running_ids(inst):
+        assignment[jid] = (inst.F[jid][0], 0)
     job_by_id = {j.id: j for j in inst.jobs}
 
     by_type: dict[int, list[tuple[int, int, int]]] = {}
-    for jid, (mid, t) in sol.assignment.items():
+    for jid, (mid, t) in assignment.items():
         end = t + inst.p_occ[jid, mid]
         by_type.setdefault(mid, []).append((t, end, jid))
 
@@ -1180,10 +1257,12 @@ def _build_rmp(
     # job, not one aggregate row, to keep the LP bound as tight as the compact
     # model's). Rows first (empty), then z_m with coefficient -1 on each of
     # its type's rows, so real columns only ever need to add +1 per job later.
+    # Running (pseudo-)jobs never activate a fixed cost: no link row.
+    running_ids = _running_ids(inst)
     fixed_link: dict[tuple[int, int], gp.Constr] = {}
     for itype in _fixed_cost_types(inst):
         for j in inst.jobs:
-            if itype.id in inst.F[j.id]:
+            if itype.id in inst.F[j.id] and j.id not in running_ids:
                 fixed_link[j.id, itype.id] = mdl.addConstr(
                     gp.LinExpr() <= 0.0, name=f"use[{j.id},{itype.id}]"
                 )
@@ -1371,8 +1450,10 @@ def solve_root_relaxation(
     ``make_bpc_lexmin_bounded``).
 
     No branching: this is the LP bound only, Phase 1 of the BPC plan.
-    Assumes no running jobs (``inst.n_running``/``inst.rj_arrivals`` empty).
+    Running jobs are absorbed as pinned pseudo-jobs (see the module
+    docstring), so ``model``/``state`` cover those too.
     """
+    inst = _absorb_running_jobs(inst)
     if big_m is None:
         big_m = _big_m_for(inst)
 
@@ -1805,19 +1886,23 @@ def _branch_and_price(
     a better schedule than the last incumbent); ``0`` disables it. It only supplies incumbents, so the optimum
     is unchanged.
 
-    Pruning uses objective integrality when it holds: with ``weight2 == 0``
-    and integer job weights, f1 = Σ w_j C_j − Σ w_j a_j over integer
-    completions C_j, so two schedules' objectives differ by a multiple of
-    ``weight1``. A node then holds a strictly better schedule only if its
+    Pruning uses objective integrality: with ``weight2 == 0``, f1 =
+    Σ w_j C_j − Σ w_j a_j over integer completions C_j and integral weights
+    (an assumption :meth:`Instance.build` enforces), so two schedules'
+    objectives differ by a multiple of ``weight1``. A node then holds a strictly better schedule only if its
     bound is at most ``best − weight1``; the 1e-3 margin absorbs the column
     generation's ``tol``-level bound error. Without it, bounds within that
     error of the optimum (e.g. 187.51663 vs 187.516667 on tiny_large) never
     prune.
+    Running jobs are absorbed as pinned pseudo-jobs (see the module
+    docstring); the returned assignment holds the instance's own jobs only.
     """
+    inst = _absorb_running_jobs(inst)
+    running_ids = _running_ids(inst)
     if big_m is None:
         big_m = _big_m_for(inst)
     prune_gap = tol
-    if weight2 == 0 and weight1 > 0 and all(float(j.weight).is_integer() for j in inst.jobs):
+    if weight2 == 0 and weight1 > 0:
         prune_gap = max(tol, weight1 - 1e-3)
     arcs_by_type = _build_arcs_by_type(inst)
     arrival_of = {j.id: j.arrival for j in inst.jobs}
@@ -1891,6 +1976,9 @@ def _branch_and_price(
             stack.append((forbidden, {**pinned, jid: (mid, t)}, differ_pairs, same_pairs,
                           forbidden_types, forced_types, node.columns))                # up
 
+    if best_assignment is not None:
+        best_assignment = {jid: a for jid, a in best_assignment.items()
+                           if jid not in running_ids}
     return best_obj, best_assignment
 
 
@@ -1913,34 +2001,51 @@ def solve_weighted_sum_bpc(inst: Instance, weight1: float, weight2: float, **kwa
     return _assignment_to_solution(inst, obj, assignment)
 
 
+def _lex_tiebreak(inst: Instance, assignment1: dict[int, tuple[int, int]],
+                  weight1: float, weight2: float, **kwargs) -> Solution:
+    """Phase 2 of a lex-min: ``_branch_and_price(inst, weight1, weight2,
+    **kwargs)`` with the bound row fixing phase 1's optimum.
+
+    The result is ``"optimal"`` only when phase 2 itself finished. If it
+    raised (``max_nodes``/``max_iters_per_node``) or came back infeasible —
+    impossible in exact arithmetic, since phase 1's schedule satisfies the
+    bound — phase 1's schedule is returned as ``"feasible"``: it is
+    primary-optimal, but its secondary objective is unproven, so it may be
+    weakly dominated and must not be trusted as a Pareto point.
+    """
+    try:
+        _obj2, assignment2 = _branch_and_price(inst, weight1, weight2, **kwargs)
+    except RuntimeError:
+        assignment2 = None
+    if assignment2 is None:
+        return replace(_assignment_to_solution(inst, None, assignment1), status="feasible")
+    return _assignment_to_solution(inst, None, assignment2)
+
+
 def solve_f1_bpc(inst: Instance, tol_gap: float = 1e-6, **kwargs) -> Solution:
-    """Lex-min (f1, f2) via branch-and-price — mirrors ``model.solve_f1``."""
+    """Lex-min (f1, f2) via branch-and-price — mirrors ``model.solve_f1``.
+
+    Status ``"feasible"`` when the tie-break phase failed (see
+    :func:`_lex_tiebreak`).
+    """
     f1_star, assignment1 = _branch_and_price(inst, 1.0, 0.0, **kwargs)
     if assignment1 is None:
         return _assignment_to_solution(inst, f1_star, None)
-    _obj2, assignment2 = _branch_and_price(
-        inst, 0.0, 1.0, bound1_value=f1_star + tol_gap, **kwargs
-    )
-    assignment = assignment2 if assignment2 is not None else assignment1
-    completion = {jid: t + inst.p_occ[jid, mid] for jid, (mid, t) in assignment.items()}
-    return Solution(status="optimal", objective=None,
-                     f1=inst.f1_of(completion), f2=inst.f2_of(assignment),
-                     assignment=assignment, completion=completion)
+    return _lex_tiebreak(inst, assignment1, 0.0, 1.0,
+                         bound1_value=f1_star + tol_gap, **kwargs)
 
 
 def solve_f2_bpc(inst: Instance, tol_gap: float = 1e-6, **kwargs) -> Solution:
-    """Lex-min (f2, f1) via branch-and-price — mirrors ``model.solve_f2``."""
+    """Lex-min (f2, f1) via branch-and-price — mirrors ``model.solve_f2``.
+
+    Status ``"feasible"`` when the tie-break phase failed (see
+    :func:`_lex_tiebreak`).
+    """
     f2_star, assignment1 = _branch_and_price(inst, 0.0, 1.0, **kwargs)
     if assignment1 is None:
         return _assignment_to_solution(inst, f2_star, None)
-    _obj2, assignment2 = _branch_and_price(
-        inst, 1.0, 0.0, bound2_value=f2_star + tol_gap, **kwargs
-    )
-    assignment = assignment2 if assignment2 is not None else assignment1
-    completion = {jid: t + inst.p_occ[jid, mid] for jid, (mid, t) in assignment.items()}
-    return Solution(status="optimal", objective=None,
-                     f1=inst.f1_of(completion), f2=inst.f2_of(assignment),
-                     assignment=assignment, completion=completion)
+    return _lex_tiebreak(inst, assignment1, 1.0, 0.0,
+                         bound2_value=f2_star + tol_gap, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -1966,7 +2071,10 @@ def make_bpc_lexmin_bounded(
     keeps running, or eventually raises via ``max_nodes``/``max_iters_per_node``
     in ``bpc_kwargs``, which this catches and reports as an inconclusive
     ("feasible"-status) result rather than letting it propagate and abort
-    the whole search).
+    the whole search). That holds for either phase: a schedule whose
+    tie-break phase failed is primary-optimal only, so it is returned as
+    ``"feasible"`` too (see :func:`_lex_tiebreak`) and the box search drops
+    the box instead of recording a possibly dominated point.
 
     The returned closure's contract mirrors the Gurobi engine's exactly,
     with one difference forced by the representation: instead of callables
@@ -2010,15 +2118,8 @@ def make_bpc_lexmin_bounded(
             b2 = min(b2, obj1 + eps) if b2 is not None else obj1 + eps
 
         w1s, w2s = (1.0, 0.0) if secondary == "f1" else (0.0, 1.0)
-        try:
-            _obj2, assignment2 = _branch_and_price(
-                inst, w1s, w2s, bound1_value=b1, bound2_value=b2, **bpc_kwargs,
-            )
-            counters["n_solves"] += 1
-        except RuntimeError:
-            assignment2 = None
-
-        assignment = assignment2 if assignment2 is not None else assignment1
-        return _assignment_to_solution(inst, None, assignment)
+        counters["n_solves"] += 1
+        return _lex_tiebreak(inst, assignment1, w1s, w2s,
+                             bound1_value=b1, bound2_value=b2, **bpc_kwargs)
 
     return lexmin_bounded, counters
