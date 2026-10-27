@@ -1,0 +1,40 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # With the GRB_WLSACCESSID / GRB_WLSSECRET / GRB_LICENSEID repository
+      # secrets set, the full suite runs on that WLS licence. Without them,
+      # gurobipy falls back to its bundled size-limited licence (2000
+      # variables / constraints) and tests marked needs_full_license are
+      # skipped; every trap-instance model fits that limit.
+      - name: Gurobi licence
+        env:
+          GRB_WLSACCESSID: ${{ secrets.GRB_WLSACCESSID }}
+          GRB_WLSSECRET: ${{ secrets.GRB_WLSSECRET }}
+          GRB_LICENSEID: ${{ secrets.GRB_LICENSEID }}
+        run: |
+          if [ -n "$GRB_WLSACCESSID" ]; then
+            printf 'WLSACCESSID=%s\nWLSSECRET=%s\nLICENSEID=%s\n' \
+              "$GRB_WLSACCESSID" "$GRB_WLSSECRET" "$GRB_LICENSEID" > "$RUNNER_TEMP/gurobi.lic"
+            echo "GRB_LICENSE_FILE=$RUNNER_TEMP/gurobi.lic" >> "$GITHUB_ENV"
+          else
+            echo 'PYTEST_ADDOPTS=-m "not needs_full_license"' >> "$GITHUB_ENV"
+          fi
+
+      - name: Install (builds the C++ extensions)
+        run: uv sync --locked
+
+      - name: Test
+        run: uv run pytest

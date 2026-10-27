@@ -28,16 +28,11 @@ from pathlib import Path
 
 from gurobipy import GRB
 
-from fedhpc.data import Instance
+from fedhpc.data import Instance, reference_points
 from fedhpc.formulations import SpaceTimeFormulation, configure_env
 from fedhpc.model import _extract
 
 sys.stdout.reconfigure(line_buffering=True)
-
-_KNOWN_REF = {
-    "pos_congestion_known_runtime_offline_10min": (44163.67, 648.526, 51251.67),
-    "fedhpc_known_runtime_offline_10min": (11151.04, 380.11, 16577.04),
-}
 
 # (name, {param: value})  — each changes ONE setting from Gurobi defaults.
 CONFIGS: list[tuple[str, dict]] = [
@@ -104,7 +99,7 @@ def _parse_log(txt: str) -> dict:
 def run_instance(path: str, lam: float, args) -> None:
     stem = Path(path).stem
     inst = Instance.from_file(path)
-    f1_T, f2_T, f1_0 = _KNOWN_REF[stem]
+    f1_T, f2_T, f1_0, _f2_0 = reference_points(path)
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
 

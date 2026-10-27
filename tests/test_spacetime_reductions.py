@@ -22,6 +22,13 @@ PLAIN = dict(collapse_unbounded=False, pareto_unbounded=False,
              rejection_deadlines=False, lex_deadlines=False)
 
 
+def _seeds(n):
+    """Seeds 0..n-1; seeds 1 and 2 build unreduced models beyond Gurobi's
+    size-limited licence, so they are marked needs_full_license."""
+    return [pytest.param(s, marks=pytest.mark.needs_full_license) if s in (1, 2) else s
+            for s in range(n)]
+
+
 def _type(id, kind, perf, deploy, cost_vm, capacity, fixed_cost=0.0):
     big = 1e9
     return InstanceType(id=id, kind=kind, perf=perf, io_time=0.0, deploy=deploy,
@@ -77,7 +84,7 @@ def test_reductions_shrink_model():
 
 
 @pytest.mark.parametrize("fixed", [False, True])
-@pytest.mark.parametrize("seed", range(4))
+@pytest.mark.parametrize("seed", _seeds(4))
 def test_lexicographic_optima_unchanged(seed, fixed):
     inst = _instance(seed, fixed=fixed)
     _same(solve_f1(inst, formulation=SpaceTimeFormulation(), MIPGap=0),
@@ -87,7 +94,7 @@ def test_lexicographic_optima_unchanged(seed, fixed):
 
 
 @pytest.mark.parametrize("fixed", [False, True])
-@pytest.mark.parametrize("seed", range(4))
+@pytest.mark.parametrize("seed", _seeds(4))
 def test_weighted_optima_unchanged(seed, fixed):
     inst = _instance(seed, fixed=fixed)
     for lam in (0.0, 0.2, 0.5, 0.8, 1.0):
@@ -100,7 +107,7 @@ def test_weighted_optima_unchanged(seed, fixed):
             assert red.objective == pytest.approx(pln.objective, rel=1e-9, abs=1e-9), lam
 
 
-@pytest.mark.parametrize("seed", range(3))
+@pytest.mark.parametrize("seed", _seeds(3))
 def test_epsilon_optima_unchanged(seed):
     inst = _instance(seed, fixed=True)
     for eps in (0.0, 3.0, 10.0):
@@ -115,7 +122,7 @@ def test_epsilon_optima_unchanged(seed):
         assert red.f2 == pytest.approx(pln.f2)
 
 
-@pytest.mark.parametrize("seed", range(3))
+@pytest.mark.parametrize("seed", _seeds(3))
 def test_reference_points_unchanged(seed):
     inst = _instance(seed)
     red = _reference_points(inst, formulation=SpaceTimeFormulation(), MIPGap=0)
@@ -123,7 +130,7 @@ def test_reference_points_unchanged(seed):
     assert red == pytest.approx(pln)
 
 
-@pytest.mark.parametrize("seed", range(3))
+@pytest.mark.parametrize("seed", _seeds(3))
 def test_zero_cost_cap_optimum_unchanged(seed):
     inst = _instance(seed, fixed=True)
     _same(solve_epsilon_cost(inst, 0.0, formulation=SpaceTimeFormulation(), MIPGap=0),
@@ -133,7 +140,7 @@ def test_zero_cost_cap_optimum_unchanged(seed):
 @pytest.mark.parametrize("opts", [dict(normal_patterns=True),
                                   dict(compressed_flow=True),
                                   dict(compressed_flow=True, cover_ge=True)])
-@pytest.mark.parametrize("seed", range(2))
+@pytest.mark.parametrize("seed", _seeds(2))
 def test_reductions_compose_with_flow_options(seed, opts):
     inst = _instance(seed, fixed=True)
     _same(solve_f1(inst, formulation=SpaceTimeFormulation(**opts), MIPGap=0),

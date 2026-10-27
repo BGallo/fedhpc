@@ -33,6 +33,7 @@ def test_evaluate_matches_published_optimum():
     assert _brute(rm.parse(M2N10_1)) == 145220
 
 
+@pytest.mark.needs_full_license
 @pytest.mark.parametrize("use_hint", [False, True])
 def test_mip_reaches_published_optimum(use_hint):
     data = rm.parse(M2N10_1)
@@ -76,6 +77,7 @@ def test_cpp_heuristics_refuse_fixed_costs():
         moea._job_slots(inst)
 
 
+@pytest.mark.needs_full_license
 def test_machine_horizons_are_valid_and_keep_optimum():
     data = rm.parse(M2N10_1)
     p = data[0]

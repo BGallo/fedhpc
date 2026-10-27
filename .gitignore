@@ -14,3 +14,27 @@ wheels/
 
 # Local notes
 SPACETIME_REDUCTIONS.md
+
+# LaTeX build artefacts (keep the .tex sources and rendered .html)
+*.aux
+*.fdb_latexmk
+*.fls
+*.out
+*.toc
+*.synctex.gz
+docs/*.log
+
+# Run logs and scratch output (Gurobi logs from the experiment scripts,
+# *.gurobi.log, are kept as experiment records)
+*.log
+!*.gurobi.log
+*.bak*
+*.tmp
+pareto_runs/_stale_fatnode/
+profile_logs/
+
+# CLI output written to the default --output-dir (.)
+/*_frontier.csv
+/*_machine_schedule.txt
+/*_gantt.png
+/*_graph.png

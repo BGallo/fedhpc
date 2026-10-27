@@ -32,7 +32,7 @@ from fedhpc.baselines import (
     onprem_only_spt,
     threshold_bursting_sweep,
 )
-from fedhpc.data import Instance
+from fedhpc.data import Instance, reference_points
 from fedhpc.formulations import SpaceTimeFormulation, configure_env
 from fedhpc.model import Solution, _extract, set_mip_start
 from fedhpc.moea import heuristic_weighted_reference_points, weighted_solve
@@ -41,16 +41,17 @@ from fedhpc.viz import compute_stats
 
 sys.stdout.reconfigure(line_buffering=True)
 
-# known-exact reference points, to skip the expensive recompute where we have them
-_KNOWN_REF = {
-    # stem: (f1_T, f2_T, f1_0)
-    # pos_congestion: all three are proven-optimal anchors (pareto_runs/STATUS_pos_congestion.md).
-    "pos_congestion_known_runtime_offline_10min": (44163.67, 648.526, 51251.67),
-    # fedhpc: f1_T / f1_0 are the proven frontier extremes (pareto_runs/STATUS.md,
-    # 169-point exact map); f2_T is the best known cost at f1_T from the memetic
-    # metaheuristic (exact solve does not converge in a practical budget here).
-    "fedhpc_known_runtime_offline_10min": (11151.04, 380.11, 16577.04),
-}
+def _known_reference_points(path) -> tuple[float, float, float] | None:
+    """(f1_T, f2_T, f1_0) from data/reference_points.json, or None when the
+    instance has no entry or its entry is stale (then they are recomputed)."""
+    try:
+        f1_T, f2_T, f1_0, _f2_0 = reference_points(path)
+    except KeyError:
+        return None
+    except ValueError as e:
+        print(f"  {e}")
+        return None
+    return f1_T, f2_T, f1_0
 
 
 def _gurobi_weighted(inst, lam, f1_T, f2_T, f1_0, *, time_limit, mip_gap, hint):
@@ -167,8 +168,8 @@ def run_instance(path: str, args) -> None:
     if args.ref_points:
         f1_T, f2_T, f1_0 = (float(v) for v in args.ref_points.split(","))
         ref_src = "cli"
-    elif stem in _KNOWN_REF and not args.recompute_ref:
-        f1_T, f2_T, f1_0 = _KNOWN_REF[stem]
+    elif not args.recompute_ref and (known := _known_reference_points(path)) is not None:
+        f1_T, f2_T, f1_0 = known
         ref_src = "known-exact"
     else:
         t0 = time.perf_counter()

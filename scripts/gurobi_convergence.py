@@ -23,7 +23,7 @@ from pathlib import Path
 
 from gurobipy import GRB
 
-from fedhpc.data import Instance
+from fedhpc.data import Instance, reference_points
 from fedhpc.formulations import SpaceTimeFormulation, configure_env
 from fedhpc.moea import weighted_solve
 
@@ -39,13 +39,6 @@ POP = int(os.environ.get("POP", "24"))
 NGEN = int(os.environ.get("NGEN", "40"))
 OUT_DIR = Path("pareto_runs/convergence")
 
-# Exact reference points already computed (REF_TL=300, MIPGap=1e-4) in
-# weighted_heur_vs_gurobi.py on 2026-09-16 -- reused verbatim since they are
-# deterministic for a fixed instance/formulation, saving ~12 minutes.
-REF_POINTS = {
-    "fedhpc_known_runtime_offline_10min.json": (11151.0, 361.96, 16577.0),
-    "pos_congestion_known_runtime_offline_10min.json": (44163.7, 648.53, 51251.7),
-}
 
 
 def gurobi_weighted_logged(inst, lam, f1_T, f2_T, f1_0, time_limit, mip_gap=1e-6):
@@ -109,7 +102,7 @@ def main():
     for path in INSTANCES:
         inst = Instance.from_file(path)
         name = path.split("/")[-1]
-        f1_T, f2_T, f1_0 = REF_POINTS[name]
+        f1_T, f2_T, f1_0, _f2_0 = reference_points(path)
         print(f"\n{'='*90}\n{name}  —  {len(inst.jobs)} jobs  "
               f"ref: f1_T={f1_T} f2_T={f2_T} f1_0={f1_0}\n{'='*90}")
 

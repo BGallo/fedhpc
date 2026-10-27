@@ -90,8 +90,8 @@ def main() -> None:
         "Gurobi did not close the gap at every λ within the time limit — see the MIP-gap column."
     )
     pos_fig = (
-        f"Despite ~26M binary variables, Gurobi proved optimality at all three λ with the warm "
-        f"start, in {pw0:.0f}–{pw1:.0f} s each — the weighted-sum problem is not intractable here. "
+        f"Gurobi proved optimality at all three λ with the warm start, in {pw0:.0f}–{pw1:.0f} s "
+        f"each on the reduced space-time model — the weighted-sum problem is not intractable here. "
         f"The exact optima again undercut the threshold curve at matched turnaround; the "
         f"metaheuristic warm start was within {hg(pos):.1f}%."
     ) if pos_proven else (
@@ -108,12 +108,11 @@ def main() -> None:
             "title": "Instance A — fedhpc (964 jobs, moderate load)",
             "blurb": (
                 f"<p>964 window jobs, {fed['n_running']} jobs already running, 29 instance types "
-                f"(5 on-prem + 24 cloud), 48-hour horizon. Reference points "
+                f"(5 on-prem + 24 cloud), 48-hour horizon. All three reference points are "
+                f"proven-exact (<span class='mono'>data/reference_points.json</span>): "
                 f"<span class='mono'>f1ᵀ={fed_raw['reference_points']['f1_T']:.0f}</span>, "
-                f"<span class='mono'>f2ᵀ≈{fed_raw['reference_points']['f2_T']:.0f}</span> "
-                f"(<span class='mono'>f2ᵀ</span> best-known, not proven), "
-                f"<span class='mono'>f1⁰={fed_raw['reference_points']['f1_0']:.0f}</span> "
-                f"(both f1 anchors proven-exact).</p>"
+                f"<span class='mono'>f2ᵀ={fed_raw['reference_points']['f2_T']:.1f}</span>, "
+                f"<span class='mono'>f1⁰={fed_raw['reference_points']['f1_0']:.0f}</span>.</p>"
             ),
             "figcaption": fed_fig,
             "readout": _readout(fed, fed_raw),
@@ -124,27 +123,24 @@ def main() -> None:
             "blurb": (
                 f"<p>3340 window jobs, {pos['n_running']} running, 28 types, from the "
                 f"pos/CSR1 2024-01-30 congestion event. All three reference points are "
-                f"proven-exact anchors: <span class='mono'>f1ᵀ={pos_raw['reference_points']['f1_T']:.0f}</span>, "
+                f"proven-exact (<span class='mono'>data/reference_points.json</span>): "
+                f"<span class='mono'>f1ᵀ={pos_raw['reference_points']['f1_T']:.0f}</span>, "
                 f"<span class='mono'>f2ᵀ={pos_raw['reference_points']['f2_T']:.1f}</span>, "
                 f"<span class='mono'>f1⁰={pos_raw['reference_points']['f1_0']:.0f}</span>. "
-                f"The space-time MILP has ~26M binary variables; ~70 s presolve alone.</p>"
+                f"Unreduced, the space-time MILP has ~25M binary variables; the exact dominance "
+                f"reductions in formulations.py cut it to a size Gurobi solves in seconds.</p>"
             ),
             "figcaption": pos_fig,
             "readout": _readout(pos, pos_raw),
         },
         notes=[
-            "The weighted-sum normalisation uses reference points "
-            "(f1ᵀ, f2ᵀ, f1⁰). fedhpc's f2ᵀ is the best-known value from the metaheuristic — "
-            "the exact min-cost-at-f1ᵀ solve did not find an incumbent in a 900 s warm-started "
-            "run — so fedhpc's λ points sit at slightly different front locations than a run "
-            "with different reference points would give. Every plotted point is still Pareto-optimal.",
-            "Every weighted-sum solve here converged to a proven optimum in minutes — including "
-            "all three pos_congestion λ despite ~26M binaries, and (see above) even with no warm "
-            "start at all. What is genuinely hard for this formulation is the pure lexicographic "
-            "min-turnaround corner used to compute f2ᵀ: an earlier claim that identical-machine "
-            "symmetry causes this is wrong — on-prem capacity is a single integer flow count "
-            "y[m,t] with no machine index — the driver is the size of one LP solve plus the "
-            "tight-corner feasibility, and there the min-turnaround LP bound is looser.",
+            "The weighted-sum normalisation uses the reference points (f1ᵀ, f2ᵀ, f1⁰), all "
+            "proven-exact and stored with the instance file's hash in data/reference_points.json "
+            "(results computed with stale points are refused). Every plotted point is Pareto-optimal.",
+            "Every weighted-sum solve here converged to a proven optimum (0% MIP gap) in seconds, "
+            "thanks to the exact dominance reductions (cloud-start collapse, rejection deadlines) "
+            "applied to the space-time formulation; the lexicographic min-turnaround corner used "
+            "for f2ᵀ is likewise solved exactly via the lex deadline reduction.",
             "f1 (turnaround) is summed only over <em>scheduled</em> jobs. on-prem-only leaves "
             f"{pos['onprem'].get('n_unscheduled', 0)} job(s) unscheduled on pos_congestion and "
             f"{fed['onprem'].get('n_unscheduled', 0)} on fedhpc — its f1 is therefore optimistic "

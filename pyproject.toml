@@ -26,6 +26,15 @@ build-backend = "scikit_build_core.build"
 wheel.packages = ["src/fedhpc"]
 cmake.build-type = "Release"
 
+[tool.uv]
+# Rebuild the package (and its C++ extensions) on `uv run` / `uv sync`
+# whenever these change, so a stale _moea .so never shadows an edited .hpp.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "CMakeLists.txt" },
+    { file = "src/fedhpc/_ext/*" },
+]
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
@@ -35,4 +44,5 @@ dev = [
 testpaths = ["tests"]
 markers = [
     "slow: long-running exact solves (deselect with -m 'not slow')",
+    "needs_full_license: builds a Gurobi model beyond the size-limited pip licence",
 ]

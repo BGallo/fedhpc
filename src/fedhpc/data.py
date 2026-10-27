@@ -12,6 +12,7 @@ Key design:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import dataclass, field
@@ -284,3 +285,28 @@ class Instance:
     def from_file(cls, path: str | Path) -> Instance:
         with open(path) as f:
             return cls.from_dict(json.load(f))
+
+
+REFERENCE_POINTS = Path(__file__).resolve().parents[2] / "data" / "reference_points.json"
+
+
+def reference_points(instance_path: str | Path,
+                     table: str | Path = REFERENCE_POINTS) -> tuple[float, float, float, float]:
+    """Exact weighted-sum reference points ``(f1_T, f2_T, f1_0, f2_0)`` of an
+    instance file, from ``table`` (``data/reference_points.json``).
+
+    Raises ``KeyError`` when the instance has no entry and ``ValueError`` when
+    the entry was computed on a different version of the file (its sha256
+    differs) — stale reference points silently mis-normalise the weighted sum.
+    Recompute with ``scripts/compute_reference_points.py``.
+    """
+    path = Path(instance_path)
+    with open(table) as f:
+        entry = json.load(f)[path.stem]
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if entry["sha256"] != digest:
+        raise ValueError(
+            f"reference points for {path.stem} are stale (instance file changed); "
+            "rerun scripts/compute_reference_points.py"
+        )
+    return entry["f1_T"], entry["f2_T"], entry["f1_0"], entry["f2_0"]

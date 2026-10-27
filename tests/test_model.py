@@ -77,6 +77,20 @@ class TestInstance:
         inst.build()
         assert inst.F[0] == [1]  # only type 1 is feasible
 
+    def test_reference_points_match_and_detect_staleness(self, tmp_path):
+        """data/reference_points.json entries load for their own instance and
+        are refused once the instance file changes."""
+        from fedhpc.data import reference_points
+        src = "data/pos_congestion_known_runtime_offline_10min.json"
+        f1_T, f2_T, f1_0, f2_0 = reference_points(src)
+        assert f1_T < f1_0 and f2_0 < f2_T
+        changed = tmp_path / "pos_congestion_known_runtime_offline_10min.json"
+        changed.write_text(open(src).read() + " ")
+        with pytest.raises(ValueError, match="stale"):
+            reference_points(changed)
+        with pytest.raises(KeyError):
+            reference_points(tmp_path / "unknown.json")
+
     @pytest.mark.parametrize("weight", [0.5, 1.25, 2.999])
     def test_fractional_weight_rejected(self, weight):
         """Integral weights are a model assumption: the exact Pareto searches

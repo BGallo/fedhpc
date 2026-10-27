@@ -20,17 +20,11 @@ from pathlib import Path
 
 from gurobipy import GRB
 
-from fedhpc.data import Instance
+from fedhpc.data import Instance, reference_points
 from fedhpc.formulations import SpaceTimeFormulation, configure_env
 from fedhpc.model import _extract
 
 sys.stdout.reconfigure(line_buffering=True)
-
-_KNOWN_REF = {
-    "pos_congestion_known_runtime_offline_10min": (44163.67, 648.526, 51251.67),
-    "fedhpc_known_runtime_offline_10min": (11151.04, 380.11, 16577.04),
-}
-
 
 def _parse_log(path: Path) -> list[dict]:
     """Pull (time_s, incumbent, bound, gap%) rows out of a Gurobi MIP log."""
@@ -127,7 +121,7 @@ def main() -> None:
     configure_env(verbose=False)
     stem = Path(args.instance).stem
     inst = Instance.from_file(args.instance)
-    f1_T, f2_T, f1_0 = _KNOWN_REF[stem]
+    f1_T, f2_T, f1_0, _f2_0 = reference_points(args.instance)
 
     print(f"{stem} — {len(inst.jobs)} jobs, {len(inst.instance_types)} types, H={inst.horizon}")
     print(f"reference points: f1_T={f1_T} f2_T={f2_T} f1_0={f1_0}")

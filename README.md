@@ -162,7 +162,9 @@ fedhpc/
 
 ## Setup
 
-Requires a valid [Gurobi license](https://www.gurobi.com/downloads/) and [uv](https://docs.astral.sh/uv/).
+Requires Python ≥ 3.14, a C++17 compiler with CMake, a valid [Gurobi license](https://www.gurobi.com/downloads/) and [uv](https://docs.astral.sh/uv/).
+
+uv rebuilds the C++ extensions on the next `uv run` / `uv sync` whenever a file under `src/fedhpc/_ext/`, `CMakeLists.txt` or `pyproject.toml` changes (`[tool.uv] cache-keys`), so an edited header can't be shadowed by a stale `.so`.
 
 ```bash
 # Install dependencies (builds the C++ extensions)
@@ -170,6 +172,9 @@ uv sync
 
 # Run tests (~3.5 min)
 uv run pytest
+
+# Only what fits Gurobi's size-limited pip licence (2000 vars / constraints)
+uv run pytest -m "not needs_full_license"
 
 I=data/pos_congestion_known_runtime_offline_10min.json
 
@@ -199,7 +204,12 @@ uv run fedhpc --instance $I --method f1 --json
 
 - `data/pos_congestion_known_runtime_offline_10min.json` — 3340 jobs, 28 types, 1525 running jobs, 288 ten-minute slots. The stress instance: tests that exercise scale use it.
 - `data/fedhpc_known_runtime_offline_10min.json`, `data/mit_supercloud_*.json` — further real-trace instances.
+- `data/reference_points.json` — exact weighted-sum reference points `(f1_T, f2_T, f1_0, f2_0)` per instance, each with the SHA-256 of the instance file it was computed on. Load with `fedhpc.data.reference_points(path)`, which refuses an entry whose instance has changed. Recompute with `uv run python scripts/compute_reference_points.py [INSTANCE ...]`. The experiment scripts read this table instead of hard-coding values.
 - Tests that need a small instance use the *trap instances* defined in `tests/conftest.py` (7 and 12 jobs). They are small but hard. The optimum hinges on which jobs wait for a scarce fat node or for a running job to free capacity. Every list-scheduling baseline lands at least 9% (`trap_small`) and 14% (`trap_medium`) above the exact minimum turnaround. `tests/test_trap_instances.py` pins this property.
+
+## Continuous integration
+
+`.github/workflows/tests.yml` runs the suite on Python 3.14 on every push and pull request. With the repository secrets `GRB_WLSACCESSID`, `GRB_WLSSECRET` and `GRB_LICENSEID` set, it runs everything on that WLS licence. Without them it uses the size-limited pip licence and skips tests marked `needs_full_license`. Check that your licence terms allow CI use: academic WLS licences may not.
 
 ## Instance Format
 

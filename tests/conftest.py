@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from fedhpc.data import Instance, InstanceType, Job
+from fedhpc.data import Instance, InstanceType, Job, reference_points
 
 
 @pytest.fixture(autouse=True)
@@ -179,10 +179,8 @@ def trap_inst(request) -> Instance:
 
 
 POS_CONGESTION = "data/pos_congestion_known_runtime_offline_10min.json"
-# Exact weighted-sum reference points, pareto.weighted_sum_reference(MIPGap=0)
-# on the current data (2026-10-27; f2_0 = 0). results/lambda_eval predates a
-# data change and is stale.
-POS_CONGESTION_REFS = dict(f1_T=44163.67, f2_T=496.656892, f1_0=48192.67)
+# Exact weighted-sum reference points (data/reference_points.json; f2_0 = 0).
+POS_CONGESTION_REFS = dict(zip(("f1_T", "f2_T", "f1_0"), reference_points(POS_CONGESTION)))
 
 
 @pytest.fixture(scope="session")
