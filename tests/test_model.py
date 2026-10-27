@@ -568,3 +568,102 @@ class TestRunningJobs:
         assert sol.status == "optimal"
         mid, t_start = sol.assignment[0]
         assert mid == 0 and t_start == 0  # slot is available immediately
+
+
+# ---------------------------------------------------------------------------
+# Cost grid and exact lexicographic certificates
+# ---------------------------------------------------------------------------
+
+class TestCostGrid:
+    def _inst(self, **kw) -> Instance:
+        it = InstanceType(id=0, kind="x", perf=3.0, io_time=0.0, deploy=0,
+                          cost_io=0.0, cost_vm=0.123456, cost_stor=0.0,
+                          cpu=8, mem=16, stor=100, fixed_cost=0.0000449)
+        j = Job(id=0, arrival=0, exec_time=10, io_volume=0, cpu=1, mem=1, stor=1)
+        inst = Instance(jobs=[j], instance_types=[it], horizon=20, **kw)
+        inst.build()
+        return inst
+
+    def test_costs_rounded_to_resolution(self):
+        inst = self._inst()
+        # 0.123456 * 10/3 = 0.41152 -> 4115 units of 1e-4
+        assert inst.c_units[0, 0] == 4115
+        assert inst.c[0, 0] == pytest.approx(0.4115, abs=1e-12)
+        assert inst.instance_types[0].fixed_cost == pytest.approx(0.0, abs=1e-12)
+
+    def test_custom_resolution(self):
+        inst = self._inst(cost_resolution=0.01)
+        assert inst.c_units[0, 0] == 41 and inst.c[0, 0] == pytest.approx(0.41)
+
+    def test_resolution_from_json(self, tmp_path):
+        d = {"horizon": 20, "cost_resolution": 0.5,
+             "instance_types": [dict(id=0, kind="x", perf=1.0, io_time=0.0, deploy=0,
+                                     cost_io=0.0, cost_vm=0.3, cost_stor=0.0,
+                                     cpu=8, mem=16, stor=100)],
+             "jobs": [dict(id=0, arrival=0, exec_time=3, io_volume=0, cpu=1, mem=1, stor=1)]}
+        inst = Instance.from_dict(d)
+        assert inst.cost_resolution == 0.5 and inst.c[0, 0] == 1.0  # 0.9 -> 2 × 0.5
+
+    def test_nonpositive_resolution_rejected(self):
+        with pytest.raises(ValueError, match="cost_resolution"):
+            self._inst(cost_resolution=0.0)
+
+    def test_f2_of_is_exact_on_the_grid(self, trap_medium):
+        sol = solve_f2(trap_medium)
+        units = sum(trap_medium.c_units[jid, mid] for jid, (mid, _t) in sol.assignment.items())
+        assert sol.f2 == units * trap_medium.cost_resolution
+
+    def test_f1_level_is_integral_difference(self, trap_small):
+        a, b = solve_f1(trap_small), solve_f2(trap_small)
+        assert trap_small.f1_level(b.f1) - trap_small.f1_level(a.f1) == pytest.approx(b.f1 - a.f1)
+
+
+class TestCertificate:
+    class _Model:
+        def __init__(self, bound, status=2, count=1):
+            self.ObjBound, self.Status, self.SolCount = bound, status, count
+
+    def test_certified_within_one_step(self, trap_small):
+        from fedhpc.model import is_certified
+        assert is_certified(trap_small, self._Model(99.3), "f1", 100.0)
+        assert not is_certified(trap_small, self._Model(98.9), "f1", 100.0)
+        d = trap_small.cost_resolution
+        assert is_certified(trap_small, self._Model(1.0 - 0.5 * d), "f2", 1.0)
+        assert not is_certified(trap_small, self._Model(1.0 - 1.5 * d), "f2", 1.0)
+
+    def test_not_certified_without_incumbent(self, trap_small):
+        from fedhpc.model import is_certified
+        assert not is_certified(trap_small, self._Model(0.0, count=0), "f1", 0.0)
+
+    @pytest.mark.parametrize("solve", [solve_f1, solve_f2])
+    def test_lex_solves_certified(self, trap_medium, solve):
+        assert solve(trap_medium).status == "optimal"
+
+    @pytest.mark.parametrize("solve", [solve_f1, solve_f2])
+    def test_early_stop_is_never_labelled_optimal_wrongly(self, trap_medium, solve):
+        """MIPGapAbs=1e6 lets Gurobi stop at its first incumbent; the result
+        may only be "optimal" if it really is (the certificate is ours, not
+        Gurobi's gap)."""
+        exact = solve(trap_medium)
+        for seed in range(3):
+            sol = solve(trap_medium, MIPGapAbs=1e6, Heuristics=1.0, Seed=seed)
+            assert sol.status in ("optimal", "feasible")
+            if sol.status == "optimal":
+                assert (sol.f1, sol.f2) == pytest.approx((exact.f1, exact.f2))
+
+
+def test_bound_just_below_an_integer_cost_excludes_it():
+    """min f1 s.t. f2 <= 35 - δ/2 on integer cost data must not return the
+    f2 = 35 schedule (presolve used to round the right-hand side up)."""
+    it = [InstanceType(id=0, kind="on-prem", perf=1.0, io_time=0.0, deploy=0, cost_io=0.0,
+                       cost_vm=0.0, cost_stor=0.0, cpu=4, mem=8, stor=50, capacity=1),
+          InstanceType(id=1, kind="cloud", perf=1.0, io_time=0.0, deploy=0, cost_io=0.0,
+                       cost_vm=2.0, cost_stor=0.0, cpu=4, mem=8, stor=50, fixed_cost=15.0)]
+    jobs = [Job(id=0, arrival=0, exec_time=6, io_volume=0, cpu=2, mem=4, stor=20, weight=1),
+            Job(id=1, arrival=0, exec_time=6, io_volume=0, cpu=2, mem=4, stor=20, weight=3),
+            Job(id=2, arrival=2, exec_time=4, io_volume=0, cpu=2, mem=4, stor=20, weight=2)]
+    inst = Instance(jobs=jobs, instance_types=it, horizon=25)
+    inst.build()
+    sol = solve_epsilon_cost(inst, 35.0 - inst.cost_resolution / 2)
+    assert sol.status == "optimal" and sol.f2 <= 35.0 - inst.cost_resolution
+    assert (sol.f1, sol.f2) == pytest.approx((38.0, 23.0))

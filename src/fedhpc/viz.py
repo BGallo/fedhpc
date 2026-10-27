@@ -351,8 +351,6 @@ def format_pareto_metrics(metrics: dict, ranked: list, inst: Instance) -> str:
         _mrow("Cardinality    (# non-dominated pts)",     f"{n}"),
         _mrow("Hypervolume    (norm, ref=(1.1,1.1))",
               f"{hv:.6f}", "↑ higher is better"),
-        _mrow("IGD            (vs uniform diag ref)",
-              f"{igd:.6f}", "↓ lower  is better"),
         _mrow("R2             (Tchebycheff, 101 weights)",
               f"{r2:.6f}", "↓ lower  is better"),
         _mrow("Spread (Δ)     (uniformity of spacing)",
@@ -361,6 +359,21 @@ def format_pareto_metrics(metrics: dict, ranked: list, inst: Instance) -> str:
               f"{coverage * 100:.2f} %", "↑ higher is better"),
         "",
     ]
+    if igd is None:
+        lines += ["  (Normalised by this front's own ideal/nadir: describes its shape,",
+                  "   not its quality — pass a reference front to compare methods.)", ""]
+    else:
+        vs = metrics["vs_reference"]
+        lines += [
+            _mrow("IGD / IGD+     (vs reference front)",
+                  f"{vs['igd']:.6f} / {vs['igd_plus']:.6f}", "↓ lower  is better"),
+            _mrow("Additive ε     (vs reference front)",
+                  f"{vs['eps_plus']:.6f}", "↓ lower  is better"),
+            _mrow("HV ratio       (vs reference front)",
+                  f"{vs['hvr']:.6f}", "↑ 1 = matches"),
+            _mrow("Exact / dominated points", f"{vs['exact']} / {vs['dominated']}"),
+            "",
+        ]
 
     if knee is not None and knee.f1 is not None:
         rk = _rank(knee)

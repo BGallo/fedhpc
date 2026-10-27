@@ -165,6 +165,40 @@ class Formulation(ABC):
         return expr
 
 
+    # ------------------------------------------------------------------
+    # Upper bounds on an objective, as integer rows
+    # ------------------------------------------------------------------
+
+    def bound_constr(self, inst: Instance, x: dict, which: str, value: float):
+        """``which <= value`` (``"f1"``/``"f2"``) as a row with integer
+        coefficients and an integer right-hand side.
+
+        f1 = Σ w_j C_j − Σ w_j a_j with integral weights, so f1 <= value is
+        Σ w_j (t + p_jm) x_jmt <= ⌊value + Σ w_j a_j⌋; f2 = δ·(Σ c_units x +
+        Σ U_units z), so f2 <= value is that sum <= ⌊value / δ⌋. Writing the
+        bound on the grid matters: Gurobi's presolve rounds the right-hand
+        side of an all-integer row (here, data with integral costs) and
+        turned ``f2 <= 35 - 5e-5`` into ``f2 <= 35``. ``value`` itself may be
+        off-grid (callers pass half-steps); values on the grid are kept.
+        """
+        if which == "f1":
+            job = {j.id: j for j in inst.jobs}
+            p_occ = inst.p_occ
+            expr = gp.LinExpr(
+                [job[jid].weight * (t + p_occ[jid, m_id]) for (jid, m_id, t) in x],
+                list(x.values()),
+            )
+            offset = sum(j.weight * j.arrival for j in inst.jobs)
+            return expr <= math.floor(value + offset + 1e-6)
+        delta = inst.cost_resolution
+        expr = gp.LinExpr([inst.c_units[jid, m_id] for (jid, m_id, _t) in x], list(x.values()))
+        z = getattr(x, "z", {})
+        if z:
+            units = {m.id: round(m.fixed_cost / delta) for m in inst.instance_types}
+            expr.addTerms([units[mid] for mid in z], list(z.values()))
+        return expr <= math.floor(value / delta + 1e-6)
+
+
 def normal_pattern_starts(inst: Instance) -> dict[int, bytearray]:
     """Per type m, a 0/1 mask over {0..H} of the *normal patterns*: times at
     which some left-shifted schedule can start a job on m.
@@ -280,6 +314,14 @@ def _truncate(starts, cut: int):
     if isinstance(starts, range):
         return range(starts.start, max(starts.start, min(starts.stop, cut)))
     return frozenset(t for t in starts if t < cut)
+
+
+def _score_margin(score: float) -> float:
+    """Relative float margin for R3's score comparisons: a dominance test only
+    fires when the dominating side is better by more than rounding noise, so
+    float error can never cut a strictly better option (exact ties then keep
+    both options, which is merely conservative)."""
+    return 1e-9 * max(1.0, abs(score))
 
 
 def _first_start_reaching(score_rate: float, score_at0: float, target: float,
@@ -426,7 +468,8 @@ class SpaceTimeFormulation(Formulation):
                 kept = []
                 for m in sorted(cloud, key=lambda m: (R[m], C[m], m)):
                     own = R[m] - b * fixed[m]
-                    if not any(C[k] <= C[m] and R[k] <= own for k in kept):
+                    if not any(C[k] <= C[m] and R[k] <= own - _score_margin(own)
+                               for k in kept):
                         kept.append(m)
                 cloud = kept
                 for m in Sj:
@@ -436,7 +479,8 @@ class SpaceTimeFormulation(Formulation):
                     lo = min(Sj[m])
                     cut = min(
                         max(C[k] - p,
-                            _first_start_reaching(aw, score_at0(m), R[k], lo))
+                            _first_start_reaching(aw, score_at0(m),
+                                                  R[k] + _score_margin(R[k]), lo))
                         for k in cloud
                     )
                     if cut != math.inf:
@@ -535,6 +579,15 @@ class SpaceTimeFormulation(Formulation):
             if mid in flow_ids:
                 starting_at.setdefault((mid, t), []).append(var)
                 arriving_at.setdefault((mid, t + inst.p_occ[jid, mid]), []).append(var)
+
+        if self.compressed_flow:
+            # Every start and completion must be a node of the compressed
+            # graph: an arc ending off-graph would have no flow row, letting
+            # its capacity leak silently.
+            off = [(mid, v) for (mid, v) in (*starting_at, *arriving_at)
+                   if v not in nodes[mid]]
+            if off:
+                raise AssertionError(f"compressed_flow: arcs at non-node times {off[:5]}")
 
         # (18) Unique assignment: each job processed exactly once
         for j in inst.jobs:

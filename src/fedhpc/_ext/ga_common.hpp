@@ -163,6 +163,16 @@ struct Individual {
     }
 };
 
+// ── Objective normalisation ───────────────────────────────────────────────────
+
+// Range [ideal, nadir] of one objective for normalisation, floored relative to
+// the objective's magnitude rather than at an absolute 1.0: on instances whose
+// cost range is below 1 an absolute floor silently down-weighted f2.
+inline double objective_range(double nadir, double ideal) noexcept {
+    const double scale = std::max({1.0, std::abs(nadir), std::abs(ideal)});
+    return std::max(nadir - ideal, 1e-6 * scale);
+}
+
 // ── Evaluation ────────────────────────────────────────────────────────────────
 
 // Flat-grid occupancy: zero only dirtied cells, no heap allocation in hot path.

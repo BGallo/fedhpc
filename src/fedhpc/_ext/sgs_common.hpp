@@ -19,9 +19,8 @@
  * type-choice-selected candidate first, then wrap through the remaining
  * cost-sorted candidates, taking the first that admits a capacity-feasible
  * start in [a_min, t_max_excl). If none do (every feasible type saturated
- * for this job's whole window), force the type-choice candidate at a_min and
- * charge the capacity excess to cv — the same fallback convention the
- * Python prototype used, so results stay comparable.
+ * for this job's whole window), force the type-choice candidate at a_min,
+ * charge the capacity excess to cv and record its load for later jobs.
  *
  * local_search_sgs() (below) is this representation's analogue of
  * ga_common.hpp's local_search(): coordinate descent, accept-only-if-
@@ -147,18 +146,22 @@ inline void evaluate_sgs(Individual& ind, const SgsProblem& prob, SgsWorkspace& 
 
         if (!placed) {
             // Every feasible type saturated for this job's whole window:
-            // force the type-choice candidate at its earliest start and
-            // charge the resulting overcrowding to cv (does not touch occ,
-            // matching the Python prototype's fallback exactly).
+            // force the type-choice candidate at its earliest start, charge
+            // the overcrowding to cv and record the load in occ, so later
+            // jobs see it and their own overload counts this job too (the
+            // Python prototype left occ untouched, under-counting cv).
             chosen = k0;
             const SgsCandidate& c = cands[chosen];
             start = c.a_min;
             const int base = c.type_id * prob.horizon;
             long long excess = 0;
             for (int u = start; u < start + c.p_occ; u++) {
-                const int total = ws.occ[base + u] + prob.init_occ_flat[base + u];
+                const int idx = base + u;
+                const int total = ws.occ[idx] + prob.init_occ_flat[idx];
                 const int exc = total - c.cap + 1;
                 if (exc > 0) excess += exc;
+                if (ws.occ[idx] == 0) ws.dirty.push_back(idx);
+                ws.occ[idx]++;
             }
             ind.cv += static_cast<double>(excess);
         } else {

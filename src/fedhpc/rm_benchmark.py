@@ -68,11 +68,12 @@ def to_instance(data: RmData, horizon: int | list[int]) -> Instance:
         if not inst.F[j]:
             raise ValueError(f"horizon {horizon} too short for job {j}")
         for k in range(len(U)):
-            del inst.p_bill[j, k], inst.p_occ[j, k], inst.c[j, k], inst.T[j, k]
+            del inst.p_bill[j, k], inst.p_occ[j, k], inst.c[j, k], inst.c_units[j, k], inst.T[j, k]
         for k in inst.F[j]:
             inst.p_bill[j, k] = float(p[j][k])
             inst.p_occ[j, k] = p[j][k]
-            inst.c[j, k] = float(L[k] * p[j][k])
+            inst.c_units[j, k] = round(L[k] * p[j][k] / inst.cost_resolution)
+            inst.c[j, k] = inst.c_units[j, k] * inst.cost_resolution
             inst.T[j, k] = range(0, Hk[k] - p[j][k] + 1)
     return inst
 

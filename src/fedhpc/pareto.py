@@ -16,6 +16,9 @@ from .model import (
     Solution,
     _apply_params,
     _extract,
+    certify_params,
+    is_certified,
+    objective_step,
     set_mip_start,
     solve_weighted_sum,
     weighted_sum_degenerate,
@@ -23,7 +26,7 @@ from .model import (
 
 
 def _make_lexmin_bounded(
-    inst: Instance, fmt: Formulation, params: dict, eps: float,
+    inst: Instance, fmt: Formulation, params: dict,
     per_solve_time_limit: float | None = None,
     n_seed_retries: int = 1,
 ):
@@ -75,6 +78,14 @@ def _make_lexmin_bounded(
     least found a solution, else no solution) — callers must treat that as
     *inconclusive*, not as a proof of anything, since MIPGap was never
     reached.
+
+    Each phase is certified exactly (``model.certify_params`` /
+    ``model.is_certified``): Gurobi runs to an absolute gap just under one
+    objective step (1 for f1, the cost resolution δ for f2) and the phase
+    counts only if the incumbent's exact value — recomputed from its
+    schedule, not Gurobi's ObjVal — is within one step of the dual bound.
+    Phase 2 fixes the primary at that exact value, and every bound is an
+    integer row (``Formulation.bound_constr``).
     """
     counters = {"n_solves": 0, "build_time": 0.0}
 
@@ -128,27 +139,34 @@ def _make_lexmin_bounded(
         secondary_expr = _expr_of[secondary](x)
 
         if bound is not None:
-            mdl.addConstr(_expr_of[bound](x) <= bound_value, name="box_bound")
+            mdl.addConstr(fmt.bound_constr(inst, x, bound, bound_value), name="box_bound")
         if start is not None:
             set_mip_start(inst, x, start)
         mdl.setObjective(primary_expr, GRB.MINIMIZE)
+        _apply_params(mdl, certify_params(inst, primary, params))
         t1 = _time.perf_counter()
+
+        def done(which: str) -> Solution:
+            sol = _extract(inst, mdl, vars_, build_time=counters["build_time"],
+                           solve_time=_time.perf_counter() - t1)
+            if sol.f1 is not None and not is_certified(inst, mdl, which, getattr(sol, which)):
+                # Not proven, even after retries: inconclusive for the caller
+                sol = replace(sol, status="feasible")
+            return sol
+
         _optimize_with_retries(mdl)
-        if mdl.Status != GRB.OPTIMAL:
-            # Includes SUBOPTIMAL/TIME_LIMIT: MIPGap wasn't proven even
-            # after retries, so there's no primary_star to trust for the
-            # phase-2 tie-break — return as-is (status "feasible"/
-            # "infeasible"/etc, never "optimal") and let the caller treat
-            # it as inconclusive.
-            return _extract(inst, mdl, vars_, build_time=counters["build_time"],
-                            solve_time=_time.perf_counter() - t1)
-        primary_star = mdl.ObjVal
-        mdl.addConstr(primary_expr <= primary_star + eps, name="fix_primary")
+        first = done(primary)
+        if first.status != "optimal":
+            # Includes infeasible boxes (status "infeasible", no schedule)
+            # and unproven ones ("feasible"); phase 2 needs a proven optimum.
+            return first
+        mdl.addConstr(fmt.bound_constr(inst, x, primary, getattr(first, primary)),
+                      name="fix_primary")
         mdl.setObjective(secondary_expr, GRB.MINIMIZE)
+        _apply_params(mdl, certify_params(inst, secondary, params))
         mdl.setParam("Seed", 0)  # reset to the default seed for the new sub-problem
         _optimize_with_retries(mdl)
-        return _extract(inst, mdl, vars_, build_time=counters["build_time"],
-                        solve_time=_time.perf_counter() - t1)
+        return done(secondary)
 
     return lexmin_bounded, counters
 
@@ -157,7 +175,6 @@ def _make_engine_lexmin_bounded(
     inst: Instance,
     formulation: Formulation | None,
     params: dict,
-    eps: float,
     per_solve_time_limit: float | None,
     n_seed_retries: int,
     engine: str,
@@ -179,11 +196,11 @@ def _make_engine_lexmin_bounded(
     """
     if engine == "bpc":
         from . import bpc
-        return bpc.make_bpc_lexmin_bounded(inst, eps=eps)
+        return bpc.make_bpc_lexmin_bounded(inst)
     if engine != "gurobi":
         raise ValueError(f"unknown engine {engine!r} (expected 'gurobi' or 'bpc')")
     fmt = formulation or SpaceTimeFormulation()
-    return _make_lexmin_bounded(inst, fmt, params, eps, per_solve_time_limit, n_seed_retries)
+    return _make_lexmin_bounded(inst, fmt, params, per_solve_time_limit, n_seed_retries)
 
 
 # ── Checkpointing (true_pareto_frontier / map_pareto_frontier) ────────────────
@@ -326,28 +343,33 @@ def _weighted_sum_reference(
     """
     fmt = formulation or SpaceTimeFormulation()
     mdl, vars_ = fmt.build(inst, objective=LEX_F1)
-    _apply_params(mdl, params)
 
     x = vars_["x"]
     f1_expr = fmt.f1_expr(inst, x)
     f2_expr = fmt.f2_expr(inst, x)
 
+    def phase(which: str, error: str) -> float:
+        """Minimise ``which`` on the current model (certified, see
+        model.certify_params) and return its exact value from the schedule."""
+        mdl.setObjective(f1_expr if which == "f1" else f2_expr, GRB.MINIMIZE)
+        _apply_params(mdl, certify_params(inst, which, params))
+        mdl.optimize()
+        if mdl.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
+            raise RuntimeError(error)
+        return getattr(_extract(inst, mdl, vars_), which)
+
+    def fix(which: str, value: float, name: str):
+        # which <= value as an integer row (Formulation.bound_constr)
+        return mdl.addConstr(fmt.bound_constr(inst, x, which, value), name=name)
+
     # Phase 1: f1_T = min f1
-    mdl.setObjective(f1_expr, GRB.MINIMIZE)
-    mdl.optimize()
-    if mdl.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
-        raise RuntimeError("Could not solve min-turnaround problem.")
-    f1_T = mdl.ObjVal
+    f1_T = phase("f1", "Could not solve min-turnaround problem.")
 
     # Phase 2: f2_T = min f2 s.t. f1 <= f1_T (identical to solve_f1's phase 2 —
     # this *is* the min-cost-at-f1^T problem, so no separate epsilon_turnaround
     # solve is needed).
-    mdl.addConstr(f1_expr <= f1_T + 1e-6, name="fix_f1")
-    mdl.setObjective(f2_expr, GRB.MINIMIZE)
-    mdl.optimize()
-    if mdl.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
-        raise RuntimeError("Could not solve min-cost at f1^T problem.")
-    f2_T = mdl.ObjVal
+    fix("f1", f1_T, "fix_f1")
+    f2_T = phase("f2", "Could not solve min-cost at f1^T problem.")
 
     nonnegative = nonnegative_data(inst)
     if nonnegative and f2_T <= 1e-8:
@@ -363,38 +385,31 @@ def _weighted_sum_reference(
     # the f1_T fix and reuse the same model.
     if vars_.get("objective_reduced"):
         mdl, vars_ = fmt.build(inst)
-        _apply_params(mdl, params)
         x = vars_["x"]
         f1_expr = fmt.f1_expr(inst, x)
         f2_expr = fmt.f2_expr(inst, x)
     else:
         mdl.remove(mdl.getConstrByName("fix_f1"))
-    mdl.setObjective(f1_expr, GRB.MINIMIZE)
     f2_0 = 0.0
     # Without a free option for some job no schedule is free: skip the attempt.
     zero_cost_infeasible = min_cost_reference and nonnegative and not _zero_cost_possible(inst)
+    f1_0 = None
     if not zero_cost_infeasible:
-        eps_cost = mdl.addConstr(f2_expr <= 0.0, name="eps_cost")
-        mdl.optimize()
-        if min_cost_reference and mdl.Status in (GRB.INFEASIBLE, GRB.INF_OR_UNBD):
+        # f2 <= 0, as an integer row
+        eps_cost = fix("f2", 0.0, "eps_cost")
+        try:
+            f1_0 = phase("f1", "Could not solve min-turnaround at zero-cost problem.")
+        except RuntimeError:
             # f1 is bounded (binary variables), so INF_OR_UNBD is infeasible.
+            if not (min_cost_reference and mdl.Status in (GRB.INFEASIBLE, GRB.INF_OR_UNBD)):
+                raise
             mdl.remove(eps_cost)
             zero_cost_infeasible = True
-        elif mdl.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
-            raise RuntimeError("Could not solve min-turnaround at zero-cost problem.")
     if zero_cost_infeasible:
-        # Lex-min (f2, f1) on the same model, with model.solve_f2's tolerance.
-        mdl.setObjective(f2_expr, GRB.MINIMIZE)
-        mdl.optimize()
-        if mdl.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
-            raise RuntimeError("Could not solve min-cost problem.")
-        f2_0 = mdl.ObjVal
-        mdl.addConstr(f2_expr <= f2_0 + 1e-6, name="fix_f2")
-        mdl.setObjective(f1_expr, GRB.MINIMIZE)
-        mdl.optimize()
-        if mdl.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
-            raise RuntimeError("Could not solve min-turnaround at minimum cost problem.")
-    f1_0 = mdl.ObjVal
+        # Lex-min (f2, f1) on the same model, as model.solve_f2.
+        f2_0 = phase("f2", "Could not solve min-cost problem.")
+        fix("f2", f2_0, "fix_f2")
+        f1_0 = phase("f1", "Could not solve min-turnaround at minimum cost problem.")
 
     ideal = None
     # Phase 3's schedule has minimum cost when it was minimised (fix_f2) or
@@ -433,11 +448,14 @@ def true_pareto_frontier(
     under a wall-clock cap (see ``bpc.make_bpc_lexmin_bounded``'s
     docstring), and ``formulation`` is ignored under it.
 
-    Exactness assumes two schedules' f1 values differ by a whole number,
-    which holds because job weights are integral (``Instance.build`` rejects
-    fractional ones) and completions are integer slots; the right-side cut
-    below steps f1 down by exactly 1. Two costs closer than ``_EPS`` (1e-4)
-    are treated as equal.
+    Exactness rests on both objectives moving in whole steps: f1 by 1
+    (integral job weights — ``Instance.build`` rejects fractional ones — and
+    integer completion slots) and f2 by the cost resolution δ
+    (``Instance.cost_resolution``; ``build`` rounds costs to that grid). Each
+    sub-solve is certified against those steps (see ``_make_lexmin_bounded``)
+    and every bound is an integer row on the grid
+    (``Formulation.bound_constr``), so the search needs no tight MIPGap and
+    no epsilon judgement.
 
     Standard exact algorithm for biobjective integer programs (Hamacher,
     Pedersen & Ruzika 2007; related to the "balanced box" method of Boland,
@@ -539,14 +557,16 @@ def true_pareto_frontier(
     # both the box-growth exclusion cut and the "fix_primary" tie-break
     # bound. Reaching that reliably needs two things:
     #
-    #   1. Tight solver tolerances. Testing against real instances turned up
-    #      two distinct sources of solve noise: Gurobi's default MIPGap
-    #      (1e-4) lets a solve stop ~0.01% early, and its default IntFeasTol
-    #      (1e-5) — individually negligible per variable, but summed across
-    #      every job's assignment variable and multiplied by each one's cost
-    #      coefficient — measured a ~0.0016 *objective-value* discrepancy on
-    #      a real instance (large.json), two orders of magnitude past what
-    #      the raw tolerance suggests.
+    #   1. Exact optimality. Both objectives move in whole steps (f1 by 1,
+    #      f2 by the cost resolution δ), so each phase is certified by an
+    #      absolute gap under one step against the incumbent's exact value
+    #      recomputed from its schedule (model.certify_params /
+    #      is_certified), and every bound is an integer row on that grid
+    #      (Formulation.bound_constr). This replaced a 1e-9 relative MIPGap, which
+    #      occasionally ran for hours on a box. IntFeasTol stays at 1e-9:
+    #      at the default 1e-5, near-integral incumbents measured a ~0.0016
+    #      objective discrepancy on a real instance (large.json), more than a
+    #      cost step, so their rounded schedule would fail the certificate.
     #   2. A fresh model per solve. The natural design reuses one persistent
     #      model across the whole search (only the bounding constraint and
     #      objective direction change), which is exactly what the *other*
@@ -578,11 +598,11 @@ def true_pareto_frontier(
     # fronts (2-3 points — see hybrid_frontier's findings), so the total
     # rebuild cost stays a handful of builds, not thousands.
     if engine == "gurobi":
-        params = {"MIPGap": 1e-9, "IntFeasTol": 1e-9, **params}
-    _EPS = 1e-4
+        params = {"IntFeasTol": 1e-9, **params}
+    half1, half2 = objective_step(inst, "f1") / 2, objective_step(inst, "f2") / 2
 
     _lexmin_bounded, _counters = _make_engine_lexmin_bounded(
-        inst, formulation, params, _EPS, per_solve_time_limit, n_seed_retries, engine
+        inst, formulation, params, per_solve_time_limit, n_seed_retries, engine
     )
 
     f1_of, f2_of = "f1", "f2"
@@ -631,7 +651,7 @@ def true_pareto_frontier(
                   file=sys.stderr, flush=True)
 
         solutions = [point_a]
-        if abs(point_a.f1 - point_b.f1) < _EPS and abs(point_a.f2 - point_b.f2) < _EPS:
+        if abs(point_a.f1 - point_b.f1) < half1 and abs(point_a.f2 - point_b.f2) < half2:
             if verbose:
                 print("pareto-true: single-point front (A == B)", file=sys.stderr, flush=True)
             return solutions
@@ -670,23 +690,17 @@ def true_pareto_frontier(
         left, right = boxes.popleft() if side == "left" else boxes.pop()
 
         if side == "left":
-            sol = _lexmin_bounded(f1_of, f2_of, f2_of, left.f2 - _EPS)
+            # f2 at least one cost step below L: f2 <= L.f2 - δ/2
+            sol = _lexmin_bounded(f1_of, f2_of, f2_of, left.f2 - half2)
         else:
-            # f1's bound must be an exact integer decrement (right.f1 - 1),
-            # not right.f1 - a small epsilon: f1 is always integer-spaced
-            # (integral weights × integer completions — Instance.build
-            # rejects fractional weights), so both should be mathematically
-            # equivalent as a cut — but empirically they are not. Testing
-            # found a case (stess_test.json) where bounding at right.f1 -
-            # 1e-4 (e.g. 538.9999) made Gurobi report a genuinely
-            # suboptimal point as OPTIMAL/MIPGap=0.0, while the exact
-            # integer bound (538) correctly found the true optimum on an
-            # otherwise-identical, freshly-built model — most likely a
-            # presolve/cut-generation quirk specific to bounding an
-            # integer-valued expression with a non-integer RHS. Use the
-            # clean integer cut here, same as the old sweep's "_STEP = 1 -
-            # ε" convention, to avoid the pathological RHS entirely.
-            sol = _lexmin_bounded(f2_of, f1_of, f1_of, right.f1 - 1.0 + _EPS)
+            # f1 at least one step below R. Callers pass the half-step
+            # value R.f1 - 1/2; bound_constr writes it as the integer row
+            # Σ w (t + p) x <= level(R) - 1. A real-valued RHS a hair below
+            # an achievable value (R.f1 - 1e-4, e.g. 538.9999) once made
+            # Gurobi report a suboptimal point as OPTIMAL (stess_test.json),
+            # and presolve rounded f2 <= 35 - 5e-5 up to 35 on all-integer
+            # cost data; integer rows leave no such ambiguity.
+            sol = _lexmin_bounded(f2_of, f1_of, f1_of, right.f1 - half1)
 
         # A solve that hit per_solve_time_limit without proving optimality
         # (status "feasible" from a SUBOPTIMAL/TIME_LIMIT result — see
@@ -706,9 +720,9 @@ def true_pareto_frontier(
             continue
 
         if side == "left":
-            is_empty = sol.f1 is None or sol.f1 >= right.f1 - _EPS
+            is_empty = sol.f1 is None or sol.f1 >= right.f1 - half1
         else:
-            is_empty = sol.f1 is None or sol.f2 >= left.f2 - _EPS
+            is_empty = sol.f1 is None or sol.f2 >= left.f2 - half2
 
         if is_empty:
             n_boxes_closed += 1
@@ -837,11 +851,15 @@ def map_pareto_frontier(
     shouldn't have to start over. If the checkpoint shows a fully-resolved
     search (no boxes left), it's returned immediately with no new solves.
     """
-    _EPS = 1e-4
-    solve_params = {"MIPGap": 1e-9, "IntFeasTol": 1e-9, **params} if engine == "gurobi" else params
+    solve_params = {"IntFeasTol": 1e-9, **params} if engine == "gurobi" else params
+    half1, half2 = objective_step(inst, "f1") / 2, objective_step(inst, "f2") / 2
     lexmin_bounded, counters = _make_engine_lexmin_bounded(
-        inst, formulation, solve_params, _EPS, per_solve_time_limit, n_seed_retries, engine
+        inst, formulation, solve_params, per_solve_time_limit, n_seed_retries, engine
     )
+
+    def f1_steps(lo: Solution, hi: Solution) -> int:
+        """Whole f1 steps between two (possibly boundary) points."""
+        return round(hi.f1 - lo.f1)
 
     f1_of, f2_of = "f1", "f2"
 
@@ -884,7 +902,7 @@ def map_pareto_frontier(
                   file=sys.stderr, flush=True)
 
         solutions = [point_a]
-        if abs(point_a.f1 - point_b.f1) < _EPS and abs(point_a.f2 - point_b.f2) < _EPS:
+        if abs(point_a.f1 - point_b.f1) < half1 and abs(point_a.f2 - point_b.f2) < half2:
             if verbose:
                 print("pareto-map: single-point front (A == B)", file=sys.stderr, flush=True)
             return solutions
@@ -923,11 +941,11 @@ def map_pareto_frontier(
             truncated = True
             break
 
-        # f2-direction needs a numerically meaningful gap to bisect on; fall
-        # back to f1 (always meaningful — integer-spaced) if the largest
-        # available f2 gap is too fine to usefully split.
+        # f2-direction needs at least two cost steps to bisect on; fall back
+        # to f1 (always splittable while a box is open) otherwise.
         this_dir = direction
-        if this_dir == "f2" and max(l.f2 - r.f2 for l, r in boxes) <= 10 * _EPS:
+        if this_dir == "f2" and max(inst.f2_units(l.f2) - inst.f2_units(r.f2)
+                                    for l, r in boxes) < 2:
             this_dir = "f1"
 
         if this_dir == "f1":
@@ -936,13 +954,16 @@ def map_pareto_frontier(
             idx = max(range(len(boxes)), key=lambda i: boxes[i][0].f2 - boxes[i][1].f2)
         left, right = boxes.pop(idx)
 
+        # Midpoints sit on the objective grids (bound_constr writes the
+        # half-step values as integer rows on them).
         if this_dir == "f1":
-            mid = left.f1 + (right.f1 - left.f1) // 2  # integer midpoint
-            sol = lexmin_bounded(f2_of, f1_of, f1_of, mid)
+            mid = left.f1 + f1_steps(left, right) // 2
+            sol = lexmin_bounded(f2_of, f1_of, f1_of, mid + half1)
             label = f"f1<={mid:.0f}"
         else:
-            mid = (left.f2 + right.f2) / 2.0
-            sol = lexmin_bounded(f1_of, f2_of, f2_of, mid)
+            lo, hi = inst.f2_units(right.f2), inst.f2_units(left.f2)
+            mid = (lo + (hi - lo) // 2) * inst.cost_resolution
+            sol = lexmin_bounded(f1_of, f2_of, f2_of, mid + half2)
             label = f"f2<={mid:.4g}"
 
         # A solve that hit per_solve_time_limit without proving optimality
@@ -961,9 +982,9 @@ def map_pareto_frontier(
             continue
 
         if this_dir == "f1":
-            found_better = sol.f1 is not None and sol.f2 < left.f2 - _EPS
+            found_better = sol.f1 is not None and sol.f2 < left.f2 - half2
         else:
-            found_better = sol.f1 is not None and sol.f1 < right.f1 - _EPS
+            found_better = sol.f1 is not None and sol.f1 < right.f1 - half1
 
         if not found_better:
             # Proven empty up to mid; shrink whichever side the query was
@@ -972,7 +993,7 @@ def map_pareto_frontier(
                 new_box = (_boundary(mid, left.f2), right)
             else:
                 new_box = (left, _boundary(right.f1, mid))
-            if new_box[1].f1 - new_box[0].f1 > 1:
+            if f1_steps(*new_box) > 1:
                 boxes.append(new_box)
             if verbose:
                 print(f"pareto-map: box [{left.f1:.4f},{right.f1:.4f}] "
@@ -984,9 +1005,9 @@ def map_pareto_frontier(
                 print(f"pareto-map: box [{left.f1:.4f},{right.f1:.4f}] "
                       f"({this_dir}, {label})  → new point f1={sol.f1:.4f} f2={sol.f2:.6g}",
                       file=sys.stderr, flush=True)
-            if sol.f1 - left.f1 > 1:
+            if f1_steps(left, sol) > 1:
                 boxes.append((left, sol))
-            if right.f1 - sol.f1 > 1:
+            if f1_steps(sol, right) > 1:
                 boxes.append((sol, right))
 
         direction = "f2" if direction == "f1" else "f1"
@@ -1142,9 +1163,9 @@ def hybrid_frontier(
         if hint is not None:
             set_mip_start(inst, x, hint)
         if constrain_f2 is not None:
-            mdl.addConstr(fmt.f2_expr(inst, x) <= constrain_f2, name="eps_cost")
+            mdl.addConstr(fmt.bound_constr(inst, x, "f2", constrain_f2), name="eps_cost")
         if constrain_f1 is not None:
-            mdl.addConstr(fmt.f1_expr(inst, x) <= constrain_f1, name="eps_turnaround")
+            mdl.addConstr(fmt.bound_constr(inst, x, "f1", constrain_f1), name="eps_turnaround")
         obj = fmt.f2_expr(inst, x) if minimize_cost else fmt.f1_expr(inst, x)
         mdl.setObjective(obj, GRB.MINIMIZE)
         t1 = _time.perf_counter()

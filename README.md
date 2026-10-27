@@ -16,6 +16,7 @@ Space-time network flow MIP formulation (non-preemptive, elastic provisioning).
 6. Instance provisioning is elastic — any number of concurrent instances may be used (unlimited types). There is no hard budget: cost is an objective, and a cost cap is expressed as an ε-constraint on f2.
 7. Capacitated (on-prem) types have `N_m` instances; jobs already running at `t = 0` (`running_jobs`) hold one instance each until they finish and are not re-optimized.
 8. Job weights `w_j` are **integral** (`Instance.build()` raises otherwise). With integer completion times, any two schedules' f1 values then differ by a whole number. The exact Pareto searches (`true_pareto_frontier`, `map_pareto_frontier`) step f1 by exactly 1, and BPC pruning uses that spacing; with fractional weights both would skip Pareto points.
+9. Costs live on a grid of resolution `δ` (`cost_resolution`, default `1e-4`): `build()` rounds every `c_jm` and `U_m` to a multiple of `δ`, so f2 moves in whole steps of `δ`. This is the same resolution the exact searches previously assumed implicitly through a fixed `1e-4` tolerance.
 
 ### Sets
 
@@ -134,6 +135,10 @@ Sweeps a discrete set of ε values to approximate the Pareto frontier, handling 
 - **Version 1:** `min f1` subject to `f2 ≤ ε`
 - **Version 2:** `min f2` subject to `f1 ≤ ε1`
 
+#### Exact certificates
+
+Since f1 moves in steps of 1 and f2 in steps of `δ`, a lexicographic phase is certified optimal once its incumbent's exact value, recomputed from the schedule, is within one step of Gurobi's dual bound. `solve_f1`, `solve_f2`, the ε-constraint solves, the reference points and the Pareto searches run each phase with `MIPGap=0` and `MIPGapAbs` just under one step (`model.certify_params`). They report `"optimal"` only when certified (`model.is_certified`) and `"feasible"` otherwise. Every objective bound is written as an integer row on its grid (`Formulation.bound_constr`), so no right-hand side ever sits a rounding error away from an achievable value. Gurobi's presolve otherwise rounded `f2 ≤ 35 − 5e-5` up to 35 on integer cost data. Passing your own `MIPGap`/`MIPGapAbs` overrides the defaults, and the status then says whether the result is still proven.
+
 #### Exact Pareto front
 
 `pareto.true_pareto_frontier` enumerates the complete front by box splitting: about 2 solves per Pareto point. Each solve is a lexicographic minimum under a bound on the other objective. `pareto.map_pareto_frontier` bisects the objective range instead, giving broad coverage under a solve or time budget. Both rely on f1 being integer-spaced (assumption 8). Each box solve runs on either the compact Gurobi model (`engine="gurobi"`) or the branch-price-and-cut engine in `bpc.py` (`engine="bpc"`). BPC handles running jobs by turning each into a pinned pseudo-job; it is practical only for instances of about a dozen jobs.
@@ -239,7 +244,11 @@ Instances are JSON files with the following structure:
 }
 ```
 
-`feasible_types` is no longer an input field — `F_j` is computed automatically from the resource constraints (CPU / mem / stor). Optional fields: `capacity` (absent = unlimited), `fixed_cost`, `revocation_risk` per type; `weight` (an integer, default 1) per job; `running_jobs` (each holds one instance of a capacitated type from slot 0 until `end`).
+`feasible_types` is no longer an input field — `F_j` is computed automatically from the resource constraints (CPU / mem / stor). Optional fields: `capacity` (absent = unlimited), `fixed_cost`, `revocation_risk` per type; `weight` (an integer, default 1) per job; `running_jobs` (each holds one instance of a capacitated type from slot 0 until `end`); top-level `cost_resolution` (default `1e-4`).
+
+## Quality indicators
+
+`metrics.compare_fronts(front, reference)` scores a front against a reference front (the exact one, or the union of every method's points), normalised by the reference's ideal and nadir. It reports exact hits, dominated points, IGD, IGD+, GD, additive ε and the hypervolume ratio; this is the only way to compare methods. `metrics.pareto_metrics(front)` without `reference` normalises by the front's own extremes: it describes one front's shape but says nothing about its quality. Pass `reference=` to get comparable numbers.
 
 ## Dependencies
 

@@ -111,8 +111,13 @@ def test_weighted_optima_unchanged(seed, fixed):
 def test_epsilon_optima_unchanged(seed):
     inst = _instance(seed, fixed=True)
     for eps in (0.0, 3.0, 10.0):
-        _same(solve_epsilon_cost(inst, eps, formulation=SpaceTimeFormulation(), MIPGap=0),
-              solve_epsilon_cost(inst, eps, formulation=SpaceTimeFormulation(**PLAIN), MIPGap=0))
+        # min f1 s.t. f2 <= eps has no f2 tie-break: equally optimal schedules
+        # may differ in f2, so only f1 and the cap are comparable.
+        red = solve_epsilon_cost(inst, eps, formulation=SpaceTimeFormulation(), MIPGap=0)
+        pln = solve_epsilon_cost(inst, eps, formulation=SpaceTimeFormulation(**PLAIN), MIPGap=0)
+        assert red.status == pln.status == "optimal"
+        assert red.f1 == pytest.approx(pln.f1)
+        assert red.f2 <= eps + 1e-9 and pln.f2 <= eps + 1e-9
     f1_star = solve_f1(inst, formulation=SpaceTimeFormulation(**PLAIN), MIPGap=0).f1
     for slack in (0.0, 5.0, 30.0):
         red = solve_epsilon_turnaround(inst, f1_star + slack,

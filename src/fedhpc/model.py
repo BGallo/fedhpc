@@ -11,8 +11,9 @@ x_jmt ∈ {0,1}  : 1 if job j starts on type m at time t
 """
 from __future__ import annotations
 
+import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import gurobipy as gp
 from gurobipy import GRB
@@ -57,6 +58,51 @@ def _default_formulation() -> Formulation:
 def _apply_params(mdl: gp.Model, params: dict) -> None:
     for k, v in params.items():
         mdl.setParam(k, v)
+
+
+# ---------------------------------------------------------------------------
+# Exact lexicographic certificates
+# ---------------------------------------------------------------------------
+#
+# f1 moves in whole steps of 1 (integral weights × integer completions) and f2
+# in whole steps of the cost resolution δ (Instance.build rounds costs to that
+# grid). A schedule is therefore optimal for f1 (or f2) once its exact value,
+# recomputed from its assignment, is less than one step above a valid dual
+# bound: nothing strictly better fits in between. That replaces chasing a
+# 1e-9 relative MIPGap with an absolute gap just under one step, and every
+# objective bound is an integer row on that grid (Formulation.bound_constr).
+
+def objective_step(inst: Instance, which: str) -> float:
+    """Smallest possible difference between two schedules' f1 (``"f1"``) or
+    f2 (``"f2"``) values."""
+    return 1.0 if which == "f1" else inst.cost_resolution
+
+
+def grid_floor(inst: Instance, which: str, value: float) -> float:
+    """Largest achievable value of ``which`` that is <= ``value``: an off-grid
+    bound (e.g. a half-step box cut) snapped onto the objective's grid, the
+    form :meth:`Formulation.bound_constr` writes as an integer row."""
+    if which == "f1":
+        offset = sum(j.weight * j.arrival for j in inst.jobs)
+        return math.floor(value + offset + 1e-6) - offset
+    delta = inst.cost_resolution
+    return math.floor(value / delta + 1e-6) * delta
+
+
+def certify_params(inst: Instance, which: str, params: dict) -> dict:
+    """``params`` with defaults that make Gurobi stop only once ``which`` is
+    certified optimal: no relative gap, absolute gap just under one step.
+    Values the caller sets explicitly win."""
+    return {"MIPGap": 0.0, "MIPGapAbs": 0.999 * objective_step(inst, which), **params}
+
+
+def is_certified(inst: Instance, mdl: gp.Model, which: str, value: float) -> bool:
+    """Whether ``value`` (the incumbent's exact ``which``, recomputed from its
+    assignment) is within one step of ``mdl``'s dual bound."""
+    if mdl.SolCount == 0 or mdl.Status not in (GRB.OPTIMAL, GRB.TIME_LIMIT, GRB.SUBOPTIMAL):
+        return False
+    step = objective_step(inst, which)
+    return value - mdl.ObjBound < step * (1 - 1e-6)
 
 
 def set_mip_start(inst: Instance, x: dict, hint: Solution) -> None:
@@ -137,12 +183,18 @@ def _solve(
     bound: tuple[str, float, str] | None = None,
 ) -> Solution:
     """Build a fresh model and minimise ``primary``; with ``secondary``, then
-    fix primary at its optimum (+1e-6) and minimise secondary (lex-min).
+    fix primary at its optimum and minimise secondary (lex-min).
 
     ``primary``/``secondary`` are ``"f1"``/``"f2"``; ``primary`` may also be a
-    callable ``(f1_expr, f2_expr) -> expr``. ``bound=(expr, value, name)``
-    adds ``expr <= value``. ``hint_objective`` is passed to
+    callable ``(f1_expr, f2_expr) -> expr``. ``bound=(which, value, name)``
+    adds ``which <= value`` as an integer row (Formulation.bound_constr). ``hint_objective`` is passed to
     :meth:`Formulation.build` (it must be valid for the problem solved).
+
+    For ``"f1"``/``"f2"`` objectives each phase runs with
+    :func:`certify_params` (unless ``params`` overrides them) and the result
+    is ``"optimal"`` only when every phase is certified (:func:`is_certified`);
+    otherwise it is ``"feasible"``. A callable primary keeps Gurobi's own
+    status (its scalar objective has no step to certify against).
     """
     fmt = formulation or _default_formulation()
     t0 = time.perf_counter()
@@ -156,23 +208,39 @@ def _solve(
     exprs = {"f1": fmt.f1_expr(inst, x), "f2": fmt.f2_expr(inst, x)}
     if bound is not None:
         which, value, name = bound
-        mdl.addConstr(exprs[which] <= value, name=name)
+        mdl.addConstr(fmt.bound_constr(inst, x, which, value), name=name)
 
     primary_expr = primary(exprs["f1"], exprs["f2"]) if callable(primary) else exprs[primary]
     mdl.setObjective(primary_expr, GRB.MINIMIZE)
     t1 = time.perf_counter()
-    mdl.optimize()
-
-    if secondary is not None and mdl.Status in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
-        # f1 = Σ(t + p_occ − arrival) has float arrivals, and costs are
-        # floats: a small tolerance keeps the fixing row from cutting the
-        # optimum on rounding noise.
-        mdl.addConstr(primary_expr <= mdl.ObjVal + 1e-6, name=f"fix_{primary}")
-        mdl.setObjective(exprs[secondary], GRB.MINIMIZE)
+    if callable(primary):
         mdl.optimize()
+        return _extract(inst, mdl, vars, build_time=build_time,
+                        solve_time=time.perf_counter() - t1)
 
-    return _extract(inst, mdl, vars, build_time=build_time,
-                    solve_time=time.perf_counter() - t1)
+    _apply_params(mdl, certify_params(inst, primary, params))
+    mdl.optimize()
+    sol = _extract(inst, mdl, vars)
+    certified = sol.f1 is not None and is_certified(inst, mdl, primary, getattr(sol, primary))
+
+    if secondary is not None and certified:
+        # Fix the primary at its exact optimum, as an integer row
+        # (Formulation.bound_constr): tolerances can neither cut the optimum
+        # nor admit a schedule one step worse.
+        mdl.addConstr(fmt.bound_constr(inst, x, primary, getattr(sol, primary)),
+                      name=f"fix_{primary}")
+        mdl.setObjective(exprs[secondary], GRB.MINIMIZE)
+        _apply_params(mdl, certify_params(inst, secondary, params))
+        mdl.optimize()
+        sol = _extract(inst, mdl, vars)
+        certified = sol.f1 is not None and is_certified(inst, mdl, secondary,
+                                                       getattr(sol, secondary))
+
+    sol = _extract(inst, mdl, vars, build_time=build_time,
+                   solve_time=time.perf_counter() - t1)
+    if sol.f1 is not None and not certified:
+        sol = replace(sol, status="feasible")
+    return sol
 
 
 # ---------------------------------------------------------------------------

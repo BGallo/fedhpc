@@ -18,6 +18,7 @@ import numpy as np
 
 from fedhpc.data import Instance
 from fedhpc.formulations import configure_env
+from fedhpc.metrics import compare_fronts
 from fedhpc.moea import moead_frontier, nsga2_frontier, nsga3_frontier
 from fedhpc.pareto import _filter_dominated, _solution_from_dict
 
@@ -30,7 +31,6 @@ CHECKPOINTS = [
 POP = int(os.environ.get("POP", 100))
 NGEN = int(os.environ.get("NGEN", 100))
 SEED = int(os.environ.get("SEED", 42))
-HV_REF = np.array([1.1, 1.1])
 
 
 def load_known_front():
@@ -55,21 +55,11 @@ def _pts(front):
     return np.array([(s.f1, s.f2) for s in front if s.f1 is not None], dtype=float)
 
 
-def _strictly_dominates(a, b):
-    return np.all(a <= b) and np.any(a < b)
-
-
 def score(ea_pts, known_pts, ideal, span):
-    ea = (ea_pts - ideal) / span
-    kn = (known_pts - ideal) / span
-    d_igd = [np.linalg.norm(ea - k, axis=1).min() for k in kn] if len(ea) else [np.inf]
-    eps_plus = (max(min(max(e - k) for e in ea) for k in kn) if len(ea) else np.inf)
-    exact = sum(1 for e in ea_pts
-                if np.any(np.all(np.abs(known_pts - e) <= 1e-4 + 1e-4 * np.abs(known_pts), axis=1)))
-    dom_by_known = sum(1 for e in ea_pts if any(_strictly_dominates(k, e) for k in known_pts))
-    ea_dominates = sum(1 for e in ea_pts if any(_strictly_dominates(e, k) for k in known_pts))
-    return dict(card=len(ea_pts), exact=exact, dom_by_known=dom_by_known,
-                ea_dominates=ea_dominates, igd=float(np.mean(d_igd)), eps_plus=float(eps_plus))
+    """metrics.compare_fronts against the known (exact, incomplete) front."""
+    m = compare_fronts(ea_pts, known_pts, ideal=ideal, nadir=ideal + span, atol=1e-4)
+    m["dom_by_known"], m["ea_dominates"] = m.pop("dominated"), m.pop("dominates")
+    return m
 
 
 def main():

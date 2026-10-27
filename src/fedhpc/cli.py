@@ -111,8 +111,12 @@ def build_parser() -> argparse.ArgumentParser:
                          "For hybrid: per ε-constraint solve (one per EA candidate). "
                          "Default: no limit (run to optimality)."
                      ))
-    mip.add_argument("--mip-gap", type=float, default=1e-4,
-                     help="Gurobi MIPGap (used by exact and hybrid methods). Default: 1e-4.")
+    mip.add_argument("--mip-gap", type=float, default=None,
+                     help="Gurobi MIPGap (used by exact and hybrid methods). Default: "
+                          "unset — f1/f2/epsilon/pareto solves certify exact optima "
+                          "(absolute gap under one objective step), weighted uses "
+                          "Gurobi's 1e-4. Setting it can leave lexicographic results "
+                          "unproven (status 'feasible').")
     mip.add_argument("--max-solves", type=int, default=None,
                      help=(
                          "pareto-true only: cap on box-search solves. On exit, returns a "
@@ -213,7 +217,7 @@ def main(argv: list[str] | None = None) -> None:
     formulation = _FORMULATIONS[args.formulation]()
     configure_env(verbose=args.verbose)
 
-    gurobi_params: dict = {"MIPGap": args.mip_gap}
+    gurobi_params: dict = {} if args.mip_gap is None else {"MIPGap": args.mip_gap}
     if args.time_limit is not None:
         gurobi_params["TimeLimit"] = args.time_limit
     if not args.verbose:
@@ -357,7 +361,7 @@ def _run_hybrid(args: argparse.Namespace, inst: Instance, out_dir: Path) -> None
         n_threads         = args.n_threads,
         formulation       = formulation,
         time_limit        = args.time_limit,
-        mip_gap           = args.mip_gap,
+        **({} if args.mip_gap is None else {"mip_gap": args.mip_gap}),
         verbose           = args.verbose,
     )
 

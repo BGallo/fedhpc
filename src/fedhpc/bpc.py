@@ -432,7 +432,7 @@ from gurobipy import GRB
 
 from . import formulations
 from .data import Instance, Job
-from .model import Solution
+from .model import Solution, grid_floor
 
 __all__ = [
     "Column", "RootResult", "solve_root_relaxation",
@@ -493,6 +493,7 @@ def _absorb_running_jobs(inst: Instance) -> Instance:
     jobs = list(inst.jobs)
     F, T = dict(inst.F), dict(inst.T)
     p_bill, p_occ, c = dict(inst.p_bill), dict(inst.p_occ), dict(inst.c)
+    c_units = dict(inst.c_units)
     next_id = max((j.id for j in inst.jobs), default=-1) + 1
     ids = []
     for mid, end in running:
@@ -504,10 +505,11 @@ def _absorb_running_jobs(inst: Instance) -> Instance:
         F[jid] = [mid]
         T[jid, mid] = range(0, 1)
         p_bill[jid, mid], p_occ[jid, mid], c[jid, mid] = 0.0, end, 0.0
+        c_units[jid, mid] = 0
     return _RunningAsJobs(
         jobs=jobs, instance_types=inst.instance_types, horizon=inst.horizon,
-        slot_size_seconds=inst.slot_size_seconds,
-        p_bill=p_bill, p_occ=p_occ, c=c, F=F, T=T,
+        slot_size_seconds=inst.slot_size_seconds, cost_resolution=inst.cost_resolution,
+        p_bill=p_bill, p_occ=p_occ, c=c, c_units=c_units, F=F, T=T,
         running_ids=frozenset(ids), base=inst,
     )
 
@@ -2022,7 +2024,7 @@ def _lex_tiebreak(inst: Instance, assignment1: dict[int, tuple[int, int]],
     return _assignment_to_solution(inst, None, assignment2)
 
 
-def solve_f1_bpc(inst: Instance, tol_gap: float = 1e-6, **kwargs) -> Solution:
+def solve_f1_bpc(inst: Instance, **kwargs) -> Solution:
     """Lex-min (f1, f2) via branch-and-price — mirrors ``model.solve_f1``.
 
     Status ``"feasible"`` when the tie-break phase failed (see
@@ -2032,10 +2034,10 @@ def solve_f1_bpc(inst: Instance, tol_gap: float = 1e-6, **kwargs) -> Solution:
     if assignment1 is None:
         return _assignment_to_solution(inst, f1_star, None)
     return _lex_tiebreak(inst, assignment1, 0.0, 1.0,
-                         bound1_value=f1_star + tol_gap, **kwargs)
+                         bound1_value=f1_star, **kwargs)
 
 
-def solve_f2_bpc(inst: Instance, tol_gap: float = 1e-6, **kwargs) -> Solution:
+def solve_f2_bpc(inst: Instance, **kwargs) -> Solution:
     """Lex-min (f2, f1) via branch-and-price — mirrors ``model.solve_f2``.
 
     Status ``"feasible"`` when the tie-break phase failed (see
@@ -2045,7 +2047,7 @@ def solve_f2_bpc(inst: Instance, tol_gap: float = 1e-6, **kwargs) -> Solution:
     if assignment1 is None:
         return _assignment_to_solution(inst, f2_star, None)
     return _lex_tiebreak(inst, assignment1, 1.0, 0.0,
-                         bound2_value=f2_star + tol_gap, **kwargs)
+                         bound2_value=f2_star, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -2054,7 +2056,6 @@ def solve_f2_bpc(inst: Instance, tol_gap: float = 1e-6, **kwargs) -> Solution:
 
 def make_bpc_lexmin_bounded(
     inst: Instance,
-    eps: float = 1e-4,
     **bpc_kwargs,
 ):
     """Build a BPC-backed ``lexmin_bounded`` closure with the exact same
@@ -2096,8 +2097,11 @@ def make_bpc_lexmin_bounded(
         bound: str | None = None, bound_value: float | None = None,
         *, start: Solution | None = None,
     ) -> Solution:
-        b1 = bound_value if bound == "f1" else None
-        b2 = bound_value if bound == "f2" else None
+        # Snap the box bound onto its objective's grid: the master's bound
+        # rows (and the RMP integer heuristic's MIP) then never carry a
+        # right-hand side a hair below an achievable value.
+        b1 = grid_floor(inst, "f1", bound_value) if bound == "f1" else None
+        b2 = grid_floor(inst, "f2", bound_value) if bound == "f2" else None
 
         w1, w2 = (1.0, 0.0) if primary == "f1" else (0.0, 1.0)
         try:
@@ -2112,10 +2116,13 @@ def make_bpc_lexmin_bounded(
         if assignment1 is None:
             return _assignment_to_solution(inst, obj1, None)
 
+        # Fix the primary at its exact optimum (the objective is recomputed
+        # from the schedule, see _solve_node), as in pareto._make_lexmin_bounded.
+        fix = obj1
         if primary == "f1":
-            b1 = min(b1, obj1 + eps) if b1 is not None else obj1 + eps
+            b1 = min(b1, fix) if b1 is not None else fix
         else:
-            b2 = min(b2, obj1 + eps) if b2 is not None else obj1 + eps
+            b2 = min(b2, fix) if b2 is not None else fix
 
         w1s, w2s = (1.0, 0.0) if secondary == "f1" else (0.0, 1.0)
         counters["n_solves"] += 1

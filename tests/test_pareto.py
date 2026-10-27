@@ -127,6 +127,15 @@ class TestTrueFrontier:
         inst = TRAP_INSTANCES[name]()
         assert unique_front_points(true_pareto_frontier(inst, **_GUROBI)) == _exhaustive_front(inst)
 
+    def test_matches_exhaustive_sweep_on_integer_costs(self, weighted_fixed_cost_inst):
+        """Regression: with all-integer costs, Gurobi's presolve rounded the
+        box cut f2 <= 35 - 5e-5 up to 35 and closed a box holding (38, 23).
+        Bounds are now integer rows (Formulation.bound_constr)."""
+        inst = weighted_fixed_cost_inst
+        front = unique_front_points(true_pareto_frontier(inst, **_GUROBI))
+        assert front == _exhaustive_front(inst)
+        assert (38.0, 23.0) in front
+
     def test_bundled_instance(self, bundled_inst):
         front = true_pareto_frontier(bundled_inst, **_GUROBI)
         assert len(front) >= 1

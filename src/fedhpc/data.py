@@ -95,6 +95,13 @@ class Instance:
     # Read from _info.fedhpc_settings.time_scale_seconds when present; else 1.0.
     slot_size_seconds: float = 1.0
 
+    # Monetary resolution δ (top-level "cost_resolution" in the JSON; default
+    # 1e-4). build() rounds every c_jm and fixed cost U_m to a multiple of δ,
+    # so f2 moves in whole steps of δ exactly as f1 moves in whole steps of 1
+    # (integral weights × integer completions). The exact Pareto searches and
+    # lexicographic certificates rely on both steps.
+    cost_resolution: float = 1e-4
+
     # ---- Populated by build() for new (optimizable) jobs --------------------
 
     p_bill: dict[tuple[int, int], float] = field(default_factory=dict)
@@ -104,6 +111,8 @@ class Instance:
     # p^occ_jm = ceil(p^bill_jm + π_m)      (integer, with deploy, used for scheduling)
 
     c: dict[tuple[int, int], float] = field(default_factory=dict)
+    c_units: dict[tuple[int, int], int] = field(default_factory=dict)
+    # c_jm / δ — the exact integer cost; c_jm == c_units · δ
     # c^proc_jm = κ^IO_m·ι_j + κ^VM_m·p^bill_jm + κ^S_m·q^stor_j·p^bill_jm
 
     F: dict[int, list[int]] = field(default_factory=dict)
@@ -132,6 +141,13 @@ class Instance:
         fractional = [j.id for j in self.jobs if not float(j.weight).is_integer()]
         if fractional:
             raise ValueError(f"Job weights must be integral (jobs {fractional})")
+        if not self.cost_resolution > 0:
+            raise ValueError(f"cost_resolution must be positive, got {self.cost_resolution}")
+        delta = self.cost_resolution
+        # Fixed costs are rounded in place, so every consumer of m.fixed_cost
+        # (formulations, BPC, reductions) sees the same grid value.
+        for m in self.instance_types:
+            m.fixed_cost = round(m.fixed_cost / delta) * delta
 
         type_map = {m.id: m for m in self.instance_types}
 
@@ -152,12 +168,15 @@ class Instance:
                 # (eq. 3) Occupation time — includes deploy, ceiled to positive int
                 self.p_occ[j.id, m_id] = max(1, math.ceil(p_bill + m.deploy))
 
-                # (eq. 4) Monetary cost — uses p_bill (deploy is free)
-                self.c[j.id, m_id] = (
+                # (eq. 4) Monetary cost — uses p_bill (deploy is free),
+                # rounded to the cost grid δ
+                units = round((
                     m.cost_io * j.io_volume
                     + m.cost_vm * p_bill
                     + m.cost_stor * j.stor * p_bill
-                )
+                ) / delta)
+                self.c_units[j.id, m_id] = units
+                self.c[j.id, m_id] = units * delta
 
                 # (eq. 5) Feasible start times — uses p_occ.
                 # t + p_occ ≤ horizon  ⟺  t ≤ horizon − p_occ, so the feasible
@@ -249,12 +268,23 @@ class Instance:
             for j in self.jobs if j.id in completion
         )
 
+    def f1_level(self, f1: float) -> int:
+        """The integer Σ w_j C_j behind an f1 value: f1 = Σ w_j C_j − Σ w_j a_j,
+        so two schedules' f1 differ by exactly the difference of their levels."""
+        return round(f1 + sum(j.weight * j.arrival for j in self.jobs))
+
+    def f2_units(self, f2: float) -> int:
+        """f2 in whole multiples of the cost resolution δ."""
+        return round(f2 / self.cost_resolution)
+
     def f2_of(self, assignment: dict[int, tuple[int, int]]) -> float:
-        """Monetary cost Σ c_jm + Σ_{m used} U_m of a ``{job: (type, start)}`` map."""
-        fixed = {m.id: m.fixed_cost for m in self.instance_types}
+        """Monetary cost Σ c_jm + Σ_{m used} U_m of a ``{job: (type, start)}``
+        map, summed exactly on the cost grid."""
+        delta = self.cost_resolution
+        fixed = {m.id: round(m.fixed_cost / delta) for m in self.instance_types}
         used = {mid for mid, _t in assignment.values()}
-        return (
-            sum(self.c[jid, mid] for jid, (mid, _t) in assignment.items())
+        return delta * (
+            sum(self.c_units[jid, mid] for jid, (mid, _t) in assignment.items())
             + sum(fixed[mid] for mid in used)
         )
 
@@ -277,6 +307,7 @@ class Instance:
             horizon=int(data["horizon"]),
             running_jobs=running_jobs,
             slot_size_seconds=slot_size_seconds,
+            cost_resolution=float(data.get("cost_resolution", 1e-4)),
         )
         inst.build()
         return inst

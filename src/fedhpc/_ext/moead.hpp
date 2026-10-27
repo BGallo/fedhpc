@@ -42,7 +42,8 @@
 // Insert cand into a bounded non-dominated archive (no-op if cand is
 // infeasible or dominated by an existing member). Newly-dominated members
 // are dropped. Over capacity, evict the member with the smallest distance
-// to its nearest neighbour in objective space (most crowded).
+// to its nearest neighbour (most crowded), each objective normalised by the
+// archive's own range — raw distances let f1 (thousands of slots) swamp f2.
 inline void archive_insert(std::vector<Individual>& archive, const Individual& cand,
                            int archive_size) {
     if (cand.cv > 0.0) return;
@@ -55,14 +56,21 @@ inline void archive_insert(std::vector<Individual>& archive, const Individual& c
     archive.push_back(cand);
     if (static_cast<int>(archive.size()) <= archive_size) return;
 
+    double lo1 = archive[0].f1, hi1 = lo1, lo2 = archive[0].f2, hi2 = lo2;
+    for (const auto& a : archive) {
+        lo1 = std::min(lo1, a.f1); hi1 = std::max(hi1, a.f1);
+        lo2 = std::min(lo2, a.f2); hi2 = std::max(hi2, a.f2);
+    }
+    const double r1 = objective_range(hi1, lo1), r2 = objective_range(hi2, lo2);
+
     int worst = 0;
     double worst_nn = std::numeric_limits<double>::infinity();
     for (int i = 0; i < static_cast<int>(archive.size()); i++) {
         double nn = std::numeric_limits<double>::infinity();
         for (int j = 0; j < static_cast<int>(archive.size()); j++) {
             if (i == j) continue;
-            const double d = std::hypot(archive[i].f1 - archive[j].f1,
-                                        archive[i].f2 - archive[j].f2);
+            const double d = std::hypot((archive[i].f1 - archive[j].f1) / r1,
+                                        (archive[i].f2 - archive[j].f2) / r2);
             nn = std::min(nn, d);
         }
         if (nn < worst_nn) { worst_nn = nn; worst = i; }
@@ -81,8 +89,8 @@ inline void scalar_polish_pop(std::vector<Individual>& pop,
                               double z1, double z2, double n1, double n2,
                               int max_moves, int ablate, double& time_acc) {
     const auto t0 = Clock::now();
-    const double r1 = std::max(n1 - z1, 1.0);
-    const double r2 = std::max(n2 - z2, 1.0);
+    const double r1 = objective_range(n1, z1);
+    const double r2 = objective_range(n2, z2);
     const int n = static_cast<int>(pop.size());
 #ifdef _OPENMP
     #pragma omp parallel
@@ -252,8 +260,8 @@ run_moead(const Problem& prob, int n_weights, int n_gen,
     auto scalar = [&](const Individual& ind, int i) noexcept -> double {
         if (ind.cv > 0.0) return 1e18 + ind.cv * 1e6;
         const double lam1 = W[i].first, lam2 = W[i].second;
-        const double r1 = std::max(n1 - z1, 1.0);
-        const double r2 = std::max(n2 - z2, 1.0);
+        const double r1 = objective_range(n1, z1);
+        const double r2 = objective_range(n2, z2);
         return std::max(lam1 * (ind.f1 - z1) / r1,
                         lam2 * (ind.f2 - z2) / r2);
     };

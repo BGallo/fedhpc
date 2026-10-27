@@ -25,75 +25,25 @@ import numpy as np
 
 from fedhpc.data import Instance
 from fedhpc.formulations import configure_env
+from fedhpc.metrics import compare_fronts
 from fedhpc.moea import moead_frontier, nsga2_frontier, nsga3_frontier
 from fedhpc.pareto import true_pareto_frontier
 
-INSTANCES = sys.argv[1:] or [
-    "data/smallest.json",
-    "data/small.json",
-    "data/medium.json",
-    "data/large.json",
-]
+INSTANCES = sys.argv[1:]
+if not INSTANCES:
+    sys.exit("usage: compare_moea_vs_true.py INSTANCE.json [...]  "
+             "(small instances: the exact front is enumerated in full)")
 
 POP, NGEN, SEED = 200, 300, 42
-HV_REF = np.array([1.1, 1.1])          # reference point in normalised space
 
 
 def _pts(front):
     return np.array([(s.f1, s.f2) for s in front if s.f1 is not None], dtype=float)
 
 
-def _hv2d(pts, ref):
-    if len(pts) == 0:
-        return 0.0
-    s = pts[np.argsort(pts[:, 0])]
-    hv = 0.0
-    for i in range(len(s)):
-        if s[i, 0] >= ref[0] or s[i, 1] >= ref[1]:
-            continue  # point outside the reference box dominates nothing in it
-        f1_next = ref[0] if i == len(s) - 1 else min(s[i + 1, 0], ref[0])
-        hv += max(f1_next - s[i, 0], 0.0) * max(ref[1] - s[i, 1], 0.0)
-    return max(hv, 0.0)
-
-
-def _dominated_by_any(p, ref_pts):
-    return np.any(
-        np.all(ref_pts <= p, axis=1) & np.any(ref_pts < p, axis=1)
-    )
-
-
 def score(ea_pts, true_pts, ideal, span):
-    ea = (ea_pts - ideal) / span
-    tr = (true_pts - ideal) / span
-
-    # IGD: true -> nearest EA ;  GD: EA -> nearest true
-    d_igd = [np.linalg.norm(ea - t, axis=1).min() for t in tr] if len(ea) else [np.inf]
-    d_gd = [np.linalg.norm(tr - e, axis=1).min() for e in ea] if len(ea) else [np.inf]
-
-    # additive epsilon: min shift eps s.t. for every true point there is an EA
-    # point with ea - eps <= true  (componentwise)
-    if len(ea):
-        eps_plus = max(min(max(e - t) for e in ea) for t in tr)
-    else:
-        eps_plus = np.inf
-
-    exact = sum(
-        1 for e in ea_pts
-        if np.any(np.all(np.abs(true_pts - e) <= 1e-6, axis=1))
-    )
-    dominated = sum(1 for e in ea_pts if _dominated_by_any(e, true_pts))
-
-    hv_true = _hv2d(tr, HV_REF)
-    hv_ea = _hv2d(ea, HV_REF)
-    return dict(
-        card=len(ea_pts),
-        exact=exact,
-        dominated=dominated,
-        igd=float(np.mean(d_igd)),
-        gd=float(np.mean(d_gd)),
-        eps_plus=float(eps_plus),
-        hvr=float(hv_ea / hv_true) if hv_true > 0 else float("nan"),
-    )
+    """metrics.compare_fronts, normalised by the true front's ideal/nadir."""
+    return compare_fronts(ea_pts, true_pts, ideal=ideal, nadir=ideal + span)
 
 
 def run_instance(path: str):

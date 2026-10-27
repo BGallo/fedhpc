@@ -474,8 +474,8 @@ run_moead_sgs(const SgsProblem& prob, int n_weights, int n_gen, int T_size,
     auto scalar = [&](const Individual& ind, int i) noexcept -> double {
         if (ind.cv > 0.0) return 1e18 + ind.cv * 1e6;
         const double lam1 = W[i].first, lam2 = W[i].second;
-        const double r1 = std::max(n1 - z1, 1.0);
-        const double r2 = std::max(n2 - z2, 1.0);
+        const double r1 = objective_range(n1, z1);
+        const double r2 = objective_range(n2, z2);
         return std::max(lam1 * (ind.f1 - z1) / r1, lam2 * (ind.f2 - z2) / r2);
     };
 

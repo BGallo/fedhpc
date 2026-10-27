@@ -9,7 +9,9 @@ from fedhpc.formulations import configure_env
 from fedhpc.moea import moead_frontier, nsga2_frontier, nsga3_frontier
 from fedhpc.pareto import true_pareto_frontier
 
-PATH = sys.argv[1] if len(sys.argv) > 1 else "data/medium.json"
+if len(sys.argv) < 2:
+    sys.exit("usage: diagnose_moea_vs_true.py INSTANCE.json")
+PATH = sys.argv[1]
 configure_env(verbose=False)
 inst = Instance.from_file(PATH)
 
