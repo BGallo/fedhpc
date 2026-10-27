@@ -185,7 +185,8 @@ POS_CONGESTION_REFS = dict(zip(("f1_T", "f2_T", "f1_0"), reference_points(POS_CO
 
 @pytest.fixture(scope="session")
 def pos_congestion_inst() -> Instance:
-    """The stress instance: 3340 jobs, 28 types, H=288, 1525 running jobs."""
+    """The stress instance: 3340 jobs, 16 types (4 on-prem + 12 on-demand
+    cloud), H=288, 1525 running jobs."""
     return Instance.from_file(POS_CONGESTION)
 
 

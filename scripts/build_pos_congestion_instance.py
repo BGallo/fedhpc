@@ -92,31 +92,20 @@ _ONPREM_GROUPS = {
 }
 _ONPREM_ORDER = ["clb1", "csr1", "csr2", "csr3"]
 
-# prefix -> (cores, cost_per_hour, mem_gb) — mirrors fedhpc_known_runtime_offline.json
+# prefix -> (cores, cost_per_hour, mem_gb) — the on-demand types of
+# fedhpc_known_runtime_offline.json (spot capacity is not modelled)
 _CLOUD_TYPES = [
-    ("aws_c5_24xlarge_spot",  48, 1.13, 512),
     ("aws_c5_24xlarge_od",    48, 4.08, 512),
-    ("aws_c5a_24xlarge_spot", 48, 1.13, 512),
     ("aws_c5a_24xlarge_od",   48, 3.70, 512),
-    ("aws_c6a_24xlarge_spot", 48, 1.48, 512),
     ("aws_c6a_24xlarge_od",   48, 3.67, 512),
-    ("aws_m5_24xlarge_spot",  48, 1.07, 512),
     ("aws_m5_24xlarge_od",    48, 4.61, 512),
-    ("aws_m5a_24xlarge_spot", 48, 1.24, 512),
     ("aws_m5a_24xlarge_od",   48, 4.13, 512),
-    ("aws_c6i_24xlarge_spot", 48, 1.35, 512),
     ("aws_c6i_24xlarge_od",   48, 4.08, 512),
-    ("aws_c6i_32xlarge_spot", 64, 1.53, 512),
     ("aws_c6i_32xlarge_od",   64, 5.44, 512),
-    ("aws_c7a_32xlarge_spot", 64, 1.85, 512),
     ("aws_c7a_32xlarge_od",   64, 6.57, 512),
-    ("aws_r6i_32xlarge_spot", 64, 2.09, 1024),
     ("aws_r6i_32xlarge_od",   64, 8.06, 1024),
-    ("aws_m6i_32xlarge_spot", 64, 1.94, 512),
     ("aws_m6i_32xlarge_od",   64, 6.14, 512),
-    ("aws_c7i_48xlarge_spot", 96, 2.32, 1024),
     ("aws_c7i_48xlarge_od",   96, 8.57, 1024),
-    ("aws_c7a_48xlarge_spot", 96, 2.50, 1024),
     ("aws_c7a_48xlarge_od",   96, 9.85, 1024),
 ]
 

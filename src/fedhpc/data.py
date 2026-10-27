@@ -48,11 +48,6 @@ class InstanceType:
     mem: float           # C^mem_m
     stor: float          # C^stor_m
     capacity: int | None = None  # max simultaneous instances (None = unlimited)
-    revocation_risk: float = 0.0
-    # Probability in [0, 1] that a running instance of this type is reclaimed
-    # before the job finishes (e.g. cloud spot/preemptible capacity). 0 for
-    # on-demand/on-prem types. Informational only for the MIP; the MOEA/D and
-    # NSGA layers use it to bias random-genome initialization (see moea.py).
     fixed_cost: float = 0.0
     # U_m — one-off monetary charge added to f2 when at least one (new) job is
     # scheduled on this type (e.g. rental setup / activation fee). For a
@@ -328,16 +323,22 @@ def reference_points(instance_path: str | Path,
 
     Raises ``KeyError`` when the instance has no entry and ``ValueError`` when
     the entry was computed on a different version of the file (its sha256
-    differs) — stale reference points silently mis-normalise the weighted sum.
+    differs) or with a different cost resolution — stale reference points
+    silently mis-normalise the weighted sum.
     Recompute with ``scripts/compute_reference_points.py``.
     """
     path = Path(instance_path)
     with open(table) as f:
         entry = json.load(f)[path.stem]
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    if entry["sha256"] != digest:
-        raise ValueError(
-            f"reference points for {path.stem} are stale (instance file changed); "
-            "rerun scripts/compute_reference_points.py"
-        )
-    return entry["f1_T"], entry["f2_T"], entry["f1_0"], entry["f2_0"]
+    raw = path.read_bytes()
+    resolution = float(json.loads(raw).get("cost_resolution", 1e-4))
+    if entry["sha256"] != hashlib.sha256(raw).hexdigest():
+        reason = "instance file changed"
+    elif entry.get("cost_resolution") != resolution:
+        reason = "cost resolution changed"
+    else:
+        return entry["f1_T"], entry["f2_T"], entry["f1_0"], entry["f2_0"]
+    raise ValueError(
+        f"reference points for {path.stem} are stale ({reason}); "
+        "rerun scripts/compute_reference_points.py"
+    )

@@ -1,19 +1,21 @@
 {
-  "_info": "Exact weighted-sum reference points per instance, from fedhpc.pareto.weighted_sum_reference(inst, MIPGap=0). sha256 is the instance file's hash: fedhpc.data.reference_points() refuses an entry whose instance changed. Recompute with scripts/compute_reference_points.py.",
+  "_info": "Exact weighted-sum reference points per instance, from fedhpc.pareto.weighted_sum_reference(inst, min_cost_reference=True) with certified lexicographic solves. sha256 is the instance file's hash and cost_resolution the grid the costs were rounded to: fedhpc.data.reference_points() refuses an entry when either changed. Recompute with scripts/compute_reference_points.py.",
   "fedhpc_known_runtime_offline_10min": {
-    "f1_T": 11151.039999758335,
-    "f2_T": 361.9629500146889,
-    "f1_0": 16577.039999758337,
+    "f1_T": 11151.039999758334,
+    "f2_T": 1241.5031000000001,
+    "f1_0": 16577.039999758334,
     "f2_0": 0.0,
-    "sha256": "52fba39c92c843c046da9c6b233b9c6b958e261b4ef1006c97c4cfcc8bb0bbbe",
+    "cost_resolution": 0.0001,
+    "sha256": "eaca31da4e2b844e73a7eebd920205a4ef4408f9e98002f72d9ff428bc882733",
     "computed": "2026-10-27"
   },
   "pos_congestion_known_runtime_offline_10min": {
-    "f1_T": 44163.66999999999,
-    "f2_T": 496.65689166666664,
-    "f1_0": 48192.66999999999,
+    "f1_T": 44163.67,
+    "f2_T": 1703.486,
+    "f1_0": 48192.67,
     "f2_0": 0.0,
-    "sha256": "d6f2bf8b318f01bcc79c9e62e92be4ad866ed2b2fd03eaa5e0f3e465f800f257",
+    "cost_resolution": 0.0001,
+    "sha256": "35c221585ceefcd49a5d9ae973900c0aa6e2692351f3efb476d89d29540eb407",
     "computed": "2026-10-27"
   }
 }

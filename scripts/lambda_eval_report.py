@@ -107,8 +107,8 @@ def main() -> None:
             **fed,
             "title": "Instance A — fedhpc (964 jobs, moderate load)",
             "blurb": (
-                f"<p>964 window jobs, {fed['n_running']} jobs already running, 29 instance types "
-                f"(5 on-prem + 24 cloud), 48-hour horizon. All three reference points are "
+                f"<p>964 window jobs, {fed['n_running']} jobs already running, 17 instance types "
+                f"(5 on-prem + 12 on-demand cloud), 48-hour horizon. All three reference points are "
                 f"proven-exact (<span class='mono'>data/reference_points.json</span>): "
                 f"<span class='mono'>f1ᵀ={fed_raw['reference_points']['f1_T']:.0f}</span>, "
                 f"<span class='mono'>f2ᵀ={fed_raw['reference_points']['f2_T']:.1f}</span>, "
@@ -121,7 +121,7 @@ def main() -> None:
             **pos,
             "title": "Instance B — pos_congestion (3340 jobs, congestion event)",
             "blurb": (
-                f"<p>3340 window jobs, {pos['n_running']} running, 28 types, from the "
+                f"<p>3340 window jobs, {pos['n_running']} running, 16 types (4 on-prem + 12 on-demand cloud), from the "
                 f"pos/CSR1 2024-01-30 congestion event. All three reference points are "
                 f"proven-exact (<span class='mono'>data/reference_points.json</span>): "
                 f"<span class='mono'>f1ᵀ={pos_raw['reference_points']['f1_T']:.0f}</span>, "

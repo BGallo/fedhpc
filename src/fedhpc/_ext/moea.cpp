@@ -44,14 +44,13 @@ PYBIND11_MODULE(_moea, m) {
         [](int n_jobs,
            const std::vector<std::vector<std::tuple<int,int,int,double,double,double>>>& job_slots,
            const std::vector<int>& type_cap,
-           const std::vector<double>& type_risk,
            const std::vector<std::tuple<int,int,int>>& init_occ,
            int pop_size, int n_gen, int seed, int n_threads,
            double p_mut_start, double p_mut_end, int crossover_kind, int tourn_k,
            int local_search_interval, int sched_repair, int ablate,
            const std::vector<std::vector<int>>& extra_seeds) {
             auto [results, prof] = run_nsga2(
-                build_problem(n_jobs, job_slots, type_cap, type_risk, init_occ, ablate),
+                build_problem(n_jobs, job_slots, type_cap, init_occ, ablate),
                 pop_size, n_gen, seed, n_threads, p_mut_start, p_mut_end, crossover_kind,
                 tourn_k, local_search_interval, sched_repair, ablate, extra_seeds);
             return py::make_tuple(results, profile_to_dict(prof));
@@ -59,7 +58,6 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("n_jobs"),
         py::arg("job_slots"),
         py::arg("type_cap"),
-        py::arg("type_risk"),
         py::arg("init_occ"),
         py::arg("pop_size")       = 100,
         py::arg("n_gen")          = 200,
@@ -89,14 +87,13 @@ PYBIND11_MODULE(_moea, m) {
         [](int n_jobs,
            const std::vector<std::vector<std::tuple<int,int,int,double,double,double>>>& job_slots,
            const std::vector<int>& type_cap,
-           const std::vector<double>& type_risk,
            const std::vector<std::tuple<int,int,int>>& init_occ,
            int pop_size, int n_divisions, int n_gen, int seed, int n_threads,
            double p_mut_start, double p_mut_end, int crossover_kind, int tourn_k,
            int local_search_interval, int sched_repair, int ablate,
            const std::vector<std::vector<int>>& extra_seeds) {
             auto [results, prof] = run_nsga3(
-                build_problem(n_jobs, job_slots, type_cap, type_risk, init_occ, ablate),
+                build_problem(n_jobs, job_slots, type_cap, init_occ, ablate),
                 pop_size, n_divisions, n_gen, seed, n_threads, p_mut_start, p_mut_end,
                 crossover_kind, tourn_k, local_search_interval, sched_repair, ablate, extra_seeds);
             return py::make_tuple(results, profile_to_dict(prof));
@@ -104,7 +101,6 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("n_jobs"),
         py::arg("job_slots"),
         py::arg("type_cap"),
-        py::arg("type_risk"),
         py::arg("init_occ"),
         py::arg("pop_size")       = 100,
         py::arg("n_divisions")    = 99,
@@ -136,7 +132,6 @@ PYBIND11_MODULE(_moea, m) {
         [](int n_jobs,
            const std::vector<std::vector<std::tuple<int,int,int,double,double,double>>>& job_slots,
            const std::vector<int>& type_cap,
-           const std::vector<double>& type_risk,
            const std::vector<std::tuple<int,int,int>>& init_occ,
            int n_weights, int n_gen, int neighborhood_size,
            int seed, int n_threads, int max_replace,
@@ -144,7 +139,7 @@ PYBIND11_MODULE(_moea, m) {
            int local_search_interval, int sched_repair, int scalar_ls_interval, int ablate,
            const std::vector<std::vector<int>>& extra_seeds) {
             auto [results, prof] = run_moead(
-                build_problem(n_jobs, job_slots, type_cap, type_risk, init_occ, ablate),
+                build_problem(n_jobs, job_slots, type_cap, init_occ, ablate),
                 n_weights, n_gen, neighborhood_size, seed, n_threads, max_replace,
                 p_mut_start, p_mut_end, crossover_kind, archive_size, local_search_interval,
                 sched_repair, scalar_ls_interval, ablate, extra_seeds);
@@ -153,7 +148,6 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("n_jobs"),
         py::arg("job_slots"),
         py::arg("type_cap"),
-        py::arg("type_risk"),
         py::arg("init_occ"),
         py::arg("n_weights")         = 100,
         py::arg("n_gen")             = 200,
@@ -197,7 +191,6 @@ PYBIND11_MODULE(_moea, m) {
         [](int n_jobs,
            const std::vector<std::vector<std::tuple<int,int,int,double,double,double>>>& job_slots,
            const std::vector<int>& type_cap,
-           const std::vector<double>& type_risk,
            const std::vector<std::tuple<int,int,int>>& init_occ,
            double w1, double w2, double f1_cap,
            int pop_size, int n_gen, int seed, int n_threads,
@@ -205,7 +198,7 @@ PYBIND11_MODULE(_moea, m) {
            const std::vector<std::vector<int>>& extra_seeds, int xover_mode, int mut_mode,
            int decode_order, int fbi_passes, int ls_mode) {
             auto [asgn, f1, f2, g, ls_calls] = run_weighted(
-                build_problem(n_jobs, job_slots, type_cap, type_risk, init_occ, ablate),
+                build_problem(n_jobs, job_slots, type_cap, init_occ, ablate),
                 w1, w2, f1_cap, pop_size, n_gen, seed, n_threads,
                 ls_moves, restart_patience, shortlist, ablate, extra_seeds, xover_mode, mut_mode,
                 decode_order, fbi_passes, ls_mode);
@@ -214,7 +207,6 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("n_jobs"),
         py::arg("job_slots"),
         py::arg("type_cap"),
-        py::arg("type_risk"),
         py::arg("init_occ"),
         py::arg("w1"),
         py::arg("w2"),
@@ -296,7 +288,6 @@ PYBIND11_MODULE(_moea, m) {
         [](int n_jobs,
            const std::vector<std::vector<std::tuple<int,int,int,double,double,double>>>& job_slots,
            const std::vector<int>& type_cap,
-           const std::vector<double>& type_risk,
            const std::vector<std::tuple<int,int,int>>& init_occ,
            int H,
            const std::vector<std::tuple<double, double,
@@ -304,7 +295,7 @@ PYBIND11_MODULE(_moea, m) {
            double w1, double w2, double f1_cap, int pop_size, int n_gen, int seed,
            int n_threads, int ls_moves, int restart_patience, int shortlist,
            int xover_mode, int flags, double mu, int ablate, int adapt) {
-            const Problem prob = build_problem(n_jobs, job_slots, type_cap, type_risk, init_occ, ablate);
+            const Problem prob = build_problem(n_jobs, job_slots, type_cap, init_occ, ablate);
             const DProblem P = build_dproblem(H, jobs, type_cap, init_occ);
             MemeticResult R = run_weighted_memetic(prob, P, w1, w2, f1_cap, pop_size, n_gen, seed,
                                                    n_threads, ls_moves, restart_patience, shortlist,
@@ -317,7 +308,7 @@ PYBIND11_MODULE(_moea, m) {
             d["mu_hist"] = R.mu_hist; d["deadline_hist"] = R.dl_hist; d["serial_hist"] = R.dec_hist;
             return py::make_tuple(R.asgn, R.best.f1, R.best.f2, R.best.g, d);
         },
-        py::arg("n_jobs"), py::arg("job_slots"), py::arg("type_cap"), py::arg("type_risk"),
+        py::arg("n_jobs"), py::arg("job_slots"), py::arg("type_cap"),
         py::arg("init_occ"), py::arg("H"), py::arg("jobs"),
         py::arg("w1"), py::arg("w2"), py::arg("f1_cap") = 1e18,
         py::arg("pop_size") = 32, py::arg("n_gen") = 60, py::arg("seed") = 42,
@@ -340,14 +331,13 @@ PYBIND11_MODULE(_moea, m) {
         [](int n_jobs,
            const std::vector<std::vector<std::tuple<int,int,int,double,double,double>>>& job_slots,
            const std::vector<int>& type_cap,
-           const std::vector<double>& type_risk,
            const std::vector<std::tuple<int,int,int>>& init_occ,
            double w1, double w2, double f1_cap,
            int pop_size, int n_gen, int seed, int n_threads, int ablate,
            const std::vector<std::vector<int>>& extra_seeds,
            int use_delay, int local_polish) {
             auto [asgn, f1, f2, g, decodes] = run_weighted_brkga(
-                build_problem(n_jobs, job_slots, type_cap, type_risk, init_occ, ablate),
+                build_problem(n_jobs, job_slots, type_cap, init_occ, ablate),
                 w1, w2, f1_cap, pop_size, n_gen, seed, n_threads,
                 ablate, extra_seeds, use_delay, local_polish);
             return py::make_tuple(asgn, f1, f2, g, decodes);
@@ -355,7 +345,6 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("n_jobs"),
         py::arg("job_slots"),
         py::arg("type_cap"),
-        py::arg("type_risk"),
         py::arg("init_occ"),
         py::arg("w1"),
         py::arg("w2"),
@@ -471,7 +460,6 @@ PYBIND11_MODULE(_moea, m) {
         [](int n_jobs,
            const std::vector<std::vector<std::tuple<int,int,int,double,double,double>>>& job_slots,
            const std::vector<int>& type_cap,
-           const std::vector<double>& type_risk,
            const std::vector<std::tuple<int,int,int>>& init_occ) {
             struct SeedTiming {
                 std::string name;
@@ -482,7 +470,7 @@ PYBIND11_MODULE(_moea, m) {
             std::vector<SeedTiming> timings;
             {
                 py::gil_scoped_release release;
-                Problem prob = build_problem(n_jobs, job_slots, type_cap, type_risk, init_occ);
+                Problem prob = build_problem(n_jobs, job_slots, type_cap, init_occ);
                 EvalWorkspace ws;
                 ws.reset(prob.n_types, prob.max_slot);
 
@@ -536,7 +524,6 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("n_jobs"),
         py::arg("job_slots"),
         py::arg("type_cap"),
-        py::arg("type_risk"),
         py::arg("init_occ"),
         "Diagnostic: time each deterministic heuristic seed's construction,\n"
         "initial evaluation, and local_search repair individually (not used by\n"

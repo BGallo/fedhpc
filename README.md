@@ -13,7 +13,7 @@ Space-time network flow MIP formulation (non-preemptive, elastic provisioning).
 3. Time is discretized: `T = {0,1,...,H}`, `T̄ = {0,...,H-1}` (elementary intervals).
 4. Deploy/provisioning adds a **time penalty only** — no monetary cost.
 5. Idle time between uses of the same type is free and allowed.
-6. Instance provisioning is elastic — any number of concurrent instances may be used (unlimited types). There is no hard budget: cost is an objective, and a cost cap is expressed as an ε-constraint on f2.
+6. Instance provisioning is elastic — any number of concurrent instances may be used (unlimited types). Cloud capacity is on-demand only: spot/preemptible instances (revocable mid-job) are not modelled, and the real-trace instances contain only on-demand cloud types. There is no hard budget: cost is an objective, and a cost cap is expressed as an ε-constraint on f2.
 7. Capacitated (on-prem) types have `N_m` instances; jobs already running at `t = 0` (`running_jobs`) hold one instance each until they finish and are not re-optimized.
 8. Job weights `w_j` are **integral** (`Instance.build()` raises otherwise). With integer completion times, any two schedules' f1 values then differ by a whole number. The exact Pareto searches (`true_pareto_frontier`, `map_pareto_frontier`) step f1 by exactly 1, and BPC pruning uses that spacing; with fractional weights both would skip Pareto points.
 9. Costs live on a grid of resolution `δ` (`cost_resolution`, default `1e-4`): `build()` rounds every `c_jm` and `U_m` to a multiple of `δ`, so f2 moves in whole steps of `δ`. This is the same resolution the exact searches previously assumed implicitly through a fixed `1e-4` tolerance.
@@ -207,9 +207,9 @@ uv run fedhpc --instance $I --method f1 --json
 
 ## Instances
 
-- `data/pos_congestion_known_runtime_offline_10min.json` — 3340 jobs, 28 types, 1525 running jobs, 288 ten-minute slots. The stress instance: tests that exercise scale use it.
+- `data/pos_congestion_known_runtime_offline_10min.json` — 3340 jobs, 16 types (4 on-prem + 12 on-demand cloud), 1525 running jobs, 288 ten-minute slots. The stress instance: tests that exercise scale use it.
 - `data/fedhpc_known_runtime_offline_10min.json`, `data/mit_supercloud_*.json` — further real-trace instances.
-- `data/reference_points.json` — exact weighted-sum reference points `(f1_T, f2_T, f1_0, f2_0)` per instance, each with the SHA-256 of the instance file it was computed on. Load with `fedhpc.data.reference_points(path)`, which refuses an entry whose instance has changed. Recompute with `uv run python scripts/compute_reference_points.py [INSTANCE ...]`. The experiment scripts read this table instead of hard-coding values.
+- `data/reference_points.json` — exact weighted-sum reference points `(f1_T, f2_T, f1_0, f2_0)` per instance, each with the SHA-256 of the instance file and the cost resolution it was computed with. Load with `fedhpc.data.reference_points(path)`, which refuses an entry whose instance or resolution has changed. Recompute with `uv run python scripts/compute_reference_points.py [INSTANCE ...]`. The experiment scripts read this table instead of hard-coding values.
 - Tests that need a small instance use the *trap instances* defined in `tests/conftest.py` (7 and 12 jobs). They are small but hard. The optimum hinges on which jobs wait for a scarce fat node or for a running job to free capacity. Every list-scheduling baseline lands at least 9% (`trap_small`) and 14% (`trap_medium`) above the exact minimum turnaround. `tests/test_trap_instances.py` pins this property.
 
 ## Continuous integration
@@ -244,7 +244,7 @@ Instances are JSON files with the following structure:
 }
 ```
 
-`feasible_types` is no longer an input field — `F_j` is computed automatically from the resource constraints (CPU / mem / stor). Optional fields: `capacity` (absent = unlimited), `fixed_cost`, `revocation_risk` per type; `weight` (an integer, default 1) per job; `running_jobs` (each holds one instance of a capacitated type from slot 0 until `end`); top-level `cost_resolution` (default `1e-4`).
+`feasible_types` is no longer an input field — `F_j` is computed automatically from the resource constraints (CPU / mem / stor). Optional fields: `capacity` (absent = unlimited), `fixed_cost` per type; `weight` (an integer, default 1) per job; `running_jobs` (each holds one instance of a capacitated type from slot 0 until `end`); top-level `cost_resolution` (default `1e-4`).
 
 ## Quality indicators
 

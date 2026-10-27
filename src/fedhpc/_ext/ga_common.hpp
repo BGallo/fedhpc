@@ -65,7 +65,7 @@ inline double ms_since(TimePoint t0) noexcept {
 // Not part of any tuned default — purely diagnostic, like `profile`.
 enum AblateFlag {
     ABL_NO_HEURISTIC_SEEDS = 1 << 0,  // random-init only (skip make_heuristic_seeds)
-    ABL_UNIFORM_RANDOM     = 1 << 1,  // make_random uniform, not cost/risk-weighted
+    ABL_UNIFORM_RANDOM     = 1 << 1,  // make_random uniform, not cost-weighted
     ABL_NO_LOCAL_SEARCH    = 1 << 2,  // skip local_search() everywhere
     ABL_NO_SCHED_REPAIR    = 1 << 3,  // skip schedule_repair() (overrides sched_repair)
     ABL_NO_CANDIDATE_GEOM  = 1 << 4,  // job_candidates: earliest-K only, no geometric reach
@@ -108,7 +108,6 @@ struct Problem {
     std::vector<int> init_occ_flat;   // flat [type_id * (max_slot+1) + t] occupancy
                                       //   from running jobs; 0 for unlimited types
 
-    std::vector<double> type_risk;    // type_risk[m]: revocation-risk probability, 0 if unset
     std::vector<std::vector<double>> slot_cum_weight;
     // [j] = cumulative sampling weights over job_slots[j], for make_random().
     // Precomputed once here (not per draw) since job_slots is fixed for the
@@ -213,30 +212,25 @@ inline void evaluate(Individual& ind, const Problem& prob, EvalWorkspace& ws) {
 
 // ── Genetic operators ─────────────────────────────────────────────────────────
 
-// Cost-and-revocation-risk-biased sampling weights for a job's slot list.
-// Cheaper / lower-risk slots get a higher weight, but the ratio is bounded
+// Cost-biased sampling weights for a job's slot list.
+// Cheaper slots get a higher weight, but the ratio is bounded
 // (worst slot keeps 20% of the best slot's weight) so random initialization
 // still explores costlier options instead of collapsing onto the cheapest.
 //
-// Falls back to uniform weights when the job's slots show no effective-cost
+// Falls back to uniform weights when the job's slots show no cost
 // variation at all — this is not just a numerical safeguard, it is the
-// common case whenever every feasible slot is a free (cost=0), zero-risk
-// on-prem type: with no signal to weight on, uniform sampling is correct.
+// common case whenever every feasible slot is a free (cost=0) on-prem type:
+// with no signal to weight on, uniform sampling is correct.
 inline void compute_slot_weights(const std::vector<SlotInfo>& slots,
-                                  const std::vector<double>& type_risk,
                                   std::vector<double>& cum_weight) {
     const int n = static_cast<int>(slots.size());
     cum_weight.resize(n);
 
-    std::vector<double> eff_cost(n);
     double min_c = std::numeric_limits<double>::infinity();
     double max_c = -std::numeric_limits<double>::infinity();
-    for (int k = 0; k < n; k++) {
-        const int tid = slots[k].type_id;
-        const double risk = (tid < (int)type_risk.size()) ? type_risk[tid] : 0.0;
-        eff_cost[k] = slots[k].cost * (1.0 + risk);
-        min_c = std::min(min_c, eff_cost[k]);
-        max_c = std::max(max_c, eff_cost[k]);
+    for (const SlotInfo& s : slots) {
+        min_c = std::min(min_c, s.cost);
+        max_c = std::max(max_c, s.cost);
     }
 
     const double range = max_c - min_c;
@@ -244,16 +238,16 @@ inline void compute_slot_weights(const std::vector<SlotInfo>& slots,
     for (int k = 0; k < n; k++) {
         const double w = (range < 1e-12)
             ? 1.0
-            : (1.0 - 0.8 * (eff_cost[k] - min_c) / range);
+            : (1.0 - 0.8 * (slots[k].cost - min_c) / range);
         running += w;
         cum_weight[k] = running;
     }
 }
 
 // Weighted-random genome: each gene is drawn from its job's precomputed
-// cost/risk-biased distribution (see compute_slot_weights) instead of
-// uniformly, so random-initialized individuals start out already leaning
-// toward cheaper, lower-revocation-risk assignments.
+// cost-biased distribution (see compute_slot_weights) instead of uniformly,
+// so random-initialized individuals start out already leaning toward
+// cheaper assignments.
 inline Individual make_random(const Problem& prob, std::mt19937& rng,
                               bool uniform = false) {
     Individual ind;
@@ -1351,14 +1345,12 @@ inline Problem build_problem(
     int    n_jobs,
     const std::vector<std::vector<std::tuple<int,int,int,double,double,double>>>& raw_slots,
     const std::vector<int>& type_cap,
-    const std::vector<double>& type_risk,
     const std::vector<std::tuple<int,int,int>>& raw_init_occ,
     int ablate = 0
 ) {
     Problem prob;
     prob.n_jobs    = n_jobs;
     prob.type_cap  = type_cap;
-    prob.type_risk = type_risk;
     prob.n_types   = static_cast<int>(type_cap.size());
 
     prob.job_slots.resize(n_jobs);
@@ -1373,7 +1365,7 @@ inline Problem build_problem(
             prob.job_slots[j].push_back({tid, start, pocc, f1c, cost, weight});
             max_slot = std::max(max_slot, start + pocc);
         }
-        compute_slot_weights(prob.job_slots[j], prob.type_risk, prob.slot_cum_weight[j]);
+        compute_slot_weights(prob.job_slots[j], prob.slot_cum_weight[j]);
 
         // Contiguous same-type blocks of job_slots[j] (see job_type_span doc).
         {

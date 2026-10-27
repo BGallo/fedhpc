@@ -1,6 +1,7 @@
 """Recompute the exact weighted-sum reference points of instance files and
-store them, with each file's sha256, in data/reference_points.json (read by
-fedhpc.data.reference_points).
+store them, with each file's sha256 and cost resolution, in
+data/reference_points.json (read by fedhpc.data.reference_points). The
+reference solves are certified exact (fedhpc.model.certify_params).
 
 Usage: uv run python scripts/compute_reference_points.py [INSTANCE.json ...]
 (default: every instance already in the table).
@@ -27,10 +28,12 @@ def main() -> None:
     configure_env()
     for path in paths:
         t0 = time.perf_counter()
+        inst = Instance.from_file(path)
         (f1_T, f2_T, f1_0, f2_0), _ = weighted_sum_reference(
-            Instance.from_file(path), min_cost_reference=True, MIPGap=0)
+            inst, min_cost_reference=True)
         table[path.stem] = dict(
             f1_T=f1_T, f2_T=f2_T, f1_0=f1_0, f2_0=f2_0,
+            cost_resolution=inst.cost_resolution,
             sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
             computed=date.today().isoformat(),
         )

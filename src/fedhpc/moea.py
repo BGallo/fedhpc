@@ -45,10 +45,10 @@ def _require_no_fixed_costs(inst: Instance) -> None:
 
 
 def _prune_dominated_cloud_types(
-    inst: Instance, j_id: int, type_risk: list[float], cap_of: dict[int, int | None],
+    inst: Instance, j_id: int, cap_of: dict[int, int | None],
 ) -> list[int]:
     """Light pre-pruning: drop unlimited-capacity (cloud) types strictly
-    dominated — same or worse cost, occupation time, and revocation risk —
+    dominated — same or worse cost and occupation time —
     by another *unlimited-capacity* type feasible for the same job.
 
     Deliberately restricted to unlimited-capacity types. Finite-capacity
@@ -73,8 +73,7 @@ def _prune_dominated_cloud_types(
                 continue
             c1, c2 = inst.c[j_id, m], inst.c[j_id, m2]
             p1, p2 = inst.p_occ[j_id, m], inst.p_occ[j_id, m2]
-            r1, r2 = type_risk[m], type_risk[m2]
-            if c2 <= c1 and p2 <= p1 and r2 <= r1 and (c2 < c1 or p2 < p1 or r2 < r1):
+            if c2 <= c1 and p2 <= p1 and (c2 < c1 or p2 < p1):
                 dominated.add(m)
                 break
     return [m for m in feasible if m not in dominated]
@@ -92,12 +91,11 @@ def _job_slots(inst: Instance) -> list[list[tuple[int, int, int, float, float]]]
     space, never the exact MIP's.
     """
     _require_no_fixed_costs(inst)
-    type_risk = _type_risk(inst)
     cap_of = {m.id: m.capacity for m in inst.instance_types}
     slots: list[list[tuple[int, int, int, float, float]]] = []
     for j in inst.jobs:
         job_slots: list[tuple[int, int, int, float, float]] = []
-        for m_id in _prune_dominated_cloud_types(inst, j.id, type_risk, cap_of):
+        for m_id in _prune_dominated_cloud_types(inst, j.id, cap_of):
             p_occ = inst.p_occ[j.id, m_id]
             cost  = inst.c[j.id, m_id]
             for t in inst.T[j.id, m_id]:
@@ -121,15 +119,6 @@ def _type_cap(inst: Instance) -> list[int]:
         if m.capacity is not None:
             cap[m.id] = m.capacity
     return cap
-
-
-def _type_risk(inst: Instance) -> list[float]:
-    """Revocation-risk list indexed by type_id. 0.0 = no revocation risk."""
-    max_id = max(m.id for m in inst.instance_types)
-    risk = [0.0] * (max_id + 1)
-    for m in inst.instance_types:
-        risk[m.id] = m.revocation_risk
-    return risk
 
 
 def _init_occ(inst: Instance) -> list[tuple[int, int, int]]:
@@ -347,7 +336,6 @@ def nsga2_frontier(
         n_jobs         = len(inst.jobs),
         job_slots      = _job_slots_ext(inst),
         type_cap       = _type_cap(inst),
-        type_risk      = _type_risk(inst),
         init_occ       = _init_occ(inst),
         pop_size       = pop_size,
         n_gen          = n_gen,
@@ -435,7 +423,6 @@ def nsga3_frontier(
         n_jobs         = len(inst.jobs),
         job_slots      = _job_slots_ext(inst),
         type_cap       = _type_cap(inst),
-        type_risk      = _type_risk(inst),
         init_occ       = _init_occ(inst),
         pop_size       = pop_size,
         n_divisions    = n_divisions,
@@ -553,7 +540,6 @@ def moead_frontier(
         n_jobs            = len(inst.jobs),
         job_slots         = _job_slots_ext(inst),
         type_cap          = _type_cap(inst),
-        type_risk         = _type_risk(inst),
         init_occ          = _init_occ(inst),
         n_weights         = n_weights,
         n_gen             = n_gen,
@@ -685,7 +671,6 @@ def _weighted_raw(
         n_jobs          = len(inst.jobs),
         job_slots       = _job_slots_ext(inst),
         type_cap        = _type_cap(inst),
-        type_risk       = _type_risk(inst),
         init_occ        = _init_occ(inst),
         w1              = w1,
         w2              = w2,
@@ -910,7 +895,6 @@ def weighted_solve_brkga(
         n_jobs       = len(inst.jobs),
         job_slots    = _job_slots_ext(inst),
         type_cap     = _type_cap(inst),
-        type_risk    = _type_risk(inst),
         init_occ     = _init_occ(inst),
         w1           = w1,
         w2           = w2,
@@ -1070,8 +1054,7 @@ def weighted_solve_memetic(
     else:
         w1, w2, f1_cap = lam / (f1_0 - f1_T), (1.0 - lam) / f2_T, f1_0
     asgn, f1, f2, _g, stats = _ext.weighted_memetic(
-        n_jobs=len(inst.jobs), job_slots=_job_slots_ext(inst), type_cap=_type_cap(inst),
-        type_risk=_type_risk(inst), init_occ=_init_occ(inst), H=inst.horizon,
+        n_jobs=len(inst.jobs), job_slots=_job_slots_ext(inst), type_cap=_type_cap(inst), init_occ=_init_occ(inst), H=inst.horizon,
         jobs=_dispatch_jobs(inst), w1=w1, w2=w2, f1_cap=f1_cap, pop_size=pop_size,
         n_gen=n_gen, seed=seed, n_threads=n_threads, ls_moves=ls_moves,
         restart_patience=restart_patience, shortlist=shortlist, xover_mode=xover_mode,
@@ -1277,6 +1260,5 @@ def time_seeds(inst: Instance) -> list[dict]:
         n_jobs    = len(inst.jobs),
         job_slots = _job_slots_ext(inst),
         type_cap  = _type_cap(inst),
-        type_risk = _type_risk(inst),
         init_occ  = _init_occ(inst),
     )
