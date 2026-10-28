@@ -93,7 +93,7 @@ def main():
         ref_src = "gurobi"
         try:
             f1_T, f2_T, f1_0 = _reference_points(
-                inst, OutputFlag=0, TimeLimit=REF_TL, MIPGap=1e-4)
+                inst, OutputFlag=0, TimeLimit=REF_TL)
         except Exception as e:  # noqa: BLE001
             print(f"  exact reference points failed ({type(e).__name__}: {e}) "
                   f"-> heuristic estimates")

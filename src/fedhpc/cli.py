@@ -115,8 +115,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Gurobi MIPGap (used by exact and hybrid methods). Default: "
                           "unset — f1/f2/epsilon/pareto solves certify exact optima "
                           "(absolute gap under one objective step), weighted uses "
-                          "Gurobi's 1e-4. Setting it can leave lexicographic results "
-                          "unproven (status 'feasible').")
+                          "Gurobi's 1e-4 (its reference points are always certified). "
+                          "Setting it can leave lexicographic results unproven "
+                          "(status 'feasible').")
     mip.add_argument("--max-solves", type=int, default=None,
                      help=(
                          "pareto-true only: cap on box-search solves. On exit, returns a "
@@ -235,7 +236,10 @@ def main(argv: list[str] | None = None) -> None:
 
     elif method == "weighted":
         from .pareto import _reference_points
-        f1_T, f2_T, f1_0 = _reference_points(inst, formulation=formulation, **gurobi_params)
+        # Reference points must be certified, so --mip-gap applies to the
+        # weighted solve only
+        ref_params = {k: v for k, v in gurobi_params.items() if k != "MIPGap"}
+        f1_T, f2_T, f1_0 = _reference_points(inst, formulation=formulation, **ref_params)
         sol = solve_weighted_sum(
             inst, args.alpha,
             f1_T=f1_T, f2_T=f2_T, f1_0=f1_0,

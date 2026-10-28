@@ -30,8 +30,8 @@ def _make_lexmin_bounded(
     per_solve_time_limit: float | None = None,
     n_seed_retries: int = 1,
 ):
-    """Build a fresh-model-per-call lex-min solver, shared by true_pareto_frontier
-    and map_pareto_frontier.
+    """Build a fresh-model-per-call lex-min solver, shared by
+    true_pareto_frontier, map_pareto_frontier and hybrid_frontier.
 
     Returns ``(lexmin_bounded, counters)`` where ``counters`` is a dict with
     live ``"n_solves"`` and ``"build_time"`` entries the caller can read at
@@ -45,12 +45,12 @@ def _make_lexmin_bounded(
 
     ``per_solve_time_limit`` caps each individual Gurobi solve attempt (not
     the overall search — see the callers' own ``max_solves``/``time_budget``
-    for that). This matters independently of those: correctness here needs
-    a very tight MIPGap/IntFeasTol (see true_pareto_frontier's docstring for
-    why), and that combination occasionally hits a sub-problem where a good
-    incumbent is found almost instantly but *proving* it optimal takes far
-    longer — observed running over 6 hours and 100M+ B&B nodes without
-    closing the gap. Investigating that specific case rather than just
+    for that). This matters independently of those: every solve must be
+    proven to within one objective step (see true_pareto_frontier's
+    docstring for why), and some sub-problems have a good incumbent almost
+    instantly but take far longer to *prove* optimal — observed (under the
+    earlier 1e-9 relative MIPGap, before certificates) running over 6 hours
+    and 100M+ B&B nodes without closing the gap. Investigating that specific case rather than just
     capping it: re-solving the *exact same* sub-problem fresh converged
     cleanly in 144s with a proven 0.0000% gap — and re-solving it again
     with Gurobi's ``Seed`` bumped by 1 hit the time limit again, stuck at a
@@ -73,11 +73,10 @@ def _make_lexmin_bounded(
     Default 1 (no retry, single attempt) preserves prior behaviour; the
     callers set a larger value.
 
-    A solve that still hasn't reached ``GRB.OPTIMAL`` after all retries
-    returns with ``status != "optimal"`` (``"feasible"`` if some attempt at
-    least found a solution, else no solution) — callers must treat that as
-    *inconclusive*, not as a proof of anything, since MIPGap was never
-    reached.
+    A solve that still isn't certified after all retries returns with
+    ``status != "optimal"`` (``"feasible"`` if some attempt at least found a
+    solution, else no solution) — callers must treat that as
+    *inconclusive*, not as a proof of anything.
 
     Each phase is certified exactly (``model.certify_params`` /
     ``model.is_certified``): Gurobi runs to an absolute gap just under one
@@ -187,16 +186,14 @@ def _make_engine_lexmin_bounded(
     ``map_pareto_frontier``'s box-search logic needs zero engine-awareness
     beyond this one dispatch point.
 
-    ``engine="bpc"`` ignores ``formulation``/``per_solve_time_limit``/
-    ``n_seed_retries``/most of ``params`` (Gurobi-solve-specific knobs with
-    no BPC equivalent yet) and instead runs the exact branch-and-price
-    engine in ``fedhpc.bpc`` — see that module for its own known
-    limitations (no time-limited graceful degradation yet, and Ryan-Foster
-    branching not fixing every hard sub-problem).
+    ``engine="bpc"`` runs the exact branch-and-price engine in
+    ``fedhpc.bpc``, with ``per_solve_time_limit`` capping each of its
+    phases; it ignores ``formulation``/``n_seed_retries``/``params``
+    (Gurobi-solve-specific knobs with no BPC equivalent).
     """
     if engine == "bpc":
         from . import bpc
-        return bpc.make_bpc_lexmin_bounded(inst)
+        return bpc.make_bpc_lexmin_bounded(inst, time_limit=per_solve_time_limit)
     if engine != "gurobi":
         raise ValueError(f"unknown engine {engine!r} (expected 'gurobi' or 'bpc')")
     fmt = formulation or SpaceTimeFormulation()
@@ -349,14 +346,24 @@ def _weighted_sum_reference(
     f2_expr = fmt.f2_expr(inst, x)
 
     def phase(which: str, error: str) -> float:
-        """Minimise ``which`` on the current model (certified, see
-        model.certify_params) and return its exact value from the schedule."""
+        """Minimise ``which`` on the current model and return its exact value
+        from the schedule. Raises RuntimeError unless that value is certified
+        optimal (model.certify_params / is_certified): a reference point
+        every weighted sum is normalised by must be proven, not merely the
+        incumbent of a time-limited or loose-gap solve."""
         mdl.setObjective(f1_expr if which == "f1" else f2_expr, GRB.MINIMIZE)
         _apply_params(mdl, certify_params(inst, which, params))
         mdl.optimize()
-        if mdl.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
+        if mdl.Status not in (GRB.OPTIMAL, GRB.SUBOPTIMAL, GRB.TIME_LIMIT):
             raise RuntimeError(error)
-        return getattr(_extract(inst, mdl, vars_), which)
+        value = getattr(_extract(inst, mdl, vars_), which)
+        if value is None or not is_certified(inst, mdl, which, value):
+            raise RuntimeError(
+                f"{error} No certified optimum (Gurobi status {mdl.Status}, "
+                f"incumbent {value}, bound {mdl.ObjBound if mdl.SolCount else None}); "
+                "raise the time limit or drop an explicit MIPGap."
+            )
+        return value
 
     def fix(which: str, value: float, name: str):
         # which <= value as an integer row (Formulation.bound_constr)
@@ -463,8 +470,7 @@ def true_pareto_frontier(
     ε-constraint sweep because that sweep costs O(f1_range) solves
     regardless of how many Pareto-optimal points actually exist, which is
     intractable when f1's range spans thousands of integer levels but the
-    true front turns out to be sparse (as it does on this project's larger
-    instances — see hybrid_frontier's findings). Box splitting instead costs
+    true front is sparse. Box splitting instead costs
     roughly 2n solves for a front of n points: every solve either discovers
     a new point or proves the current gap contains nothing (closing it) —
     so cost tracks the size of the *answer*, not the size of the objective
@@ -482,11 +488,12 @@ def true_pareto_frontier(
        narrowing the currently-open gap alternately from each side rather
        than always walking it in one direction:
          - popped from the LEFT  → grow from L: minimise f1 s.t.
-           f2 ≤ L.f2 − ε ("bounded by L's optimal value in the *other*
-           objective"), tie-broken by minimising f2 second.
+           f2 ≤ L.f2 − δ (at least one cost step below L's value in the
+           *other* objective), tie-broken by minimising f2 second.
          - popped from the RIGHT → grow from R: minimise f2 s.t.
-           f1 ≤ R.f1 − ε, tie-broken by minimising f1 second.
-       If the result is (within ε of) the box's other endpoint, the box is
+           f1 ≤ R.f1 − 1 (one f1 step below R), tie-broken by minimising
+           f1 second.
+       If the result is the box's other endpoint (same grid values), the box is
        empty — discard it. Otherwise a genuinely new point P was found — and
        because P is the *global* optimum of that bounded sub-problem (not
        merely the best point inside this box), it must be L's (or R's)
@@ -534,18 +541,18 @@ def true_pareto_frontier(
     tested. Both default to ``None`` (unlimited — full exact enumeration,
     the original/default behaviour).
 
-    ``per_solve_time_limit`` — optional per-Gurobi-solve cap in seconds
-    (independent of ``max_solves``/``time_budget``, which only check
-    *between* solves). Needed because this function's tight MIPGap/
-    IntFeasTol can occasionally hit a sub-problem where a good incumbent
-    is found almost instantly but proving it optimal takes far longer —
-    observed in practice running 6+ hours and 100M+ B&B nodes without
-    closing the gap on one sub-problem, eventually killed (likely OOM
-    from the B&B tree). A box whose query hits this limit is treated as
-    unresolved and dropped (not retried — it would just hang again) —
-    contributing to incompleteness the same way a budget truncation does,
-    reported via the same warning. Strongly recommended whenever running
-    on an instance you haven't already characterised as tractable.
+    ``per_solve_time_limit`` — optional cap in seconds on each solve phase
+    (each Gurobi attempt, or each BPC branch-and-price call), independent
+    of ``max_solves``/``time_budget``, which only check *between* solves.
+    Needed because some sub-problems have a good incumbent almost instantly
+    but take far longer to prove optimal — observed (under the earlier
+    1e-9 relative MIPGap) running 6+ hours and 100M+ B&B nodes on one
+    sub-problem, eventually killed (likely OOM from the B&B tree). A box
+    whose query is still unproven after ``n_seed_retries`` attempts is
+    treated as unresolved and dropped — contributing to incompleteness the
+    same way a budget truncation does, reported via the same warning.
+    Strongly recommended whenever running on an instance you haven't
+    already characterised as tractable.
 
     ``checkpoint_path`` — see map_pareto_frontier's docstring; identical
     contract here (every box resolution atomically rewrites the file;
@@ -592,11 +599,9 @@ def true_pareto_frontier(
     #      (hybrid_frontier, the EAs) get checked against.
     #
     # This does cost real time on large instances (build alone measured
-    # ~29s on the biggest one) — but the whole point of this algorithm is
-    # that solve *count* tracks the front's size, not the objective range,
-    # and this project's largest instances turned out to have very sparse
-    # fronts (2-3 points — see hybrid_frontier's findings), so the total
-    # rebuild cost stays a handful of builds, not thousands.
+    # ~29s on the biggest one, ~13s on pos_congestion), paid once per solve:
+    # about 2 builds per Pareto point. That is cheap on a sparse front and
+    # dominant on a dense one — see the docstring's notes on dense fronts.
     if engine == "gurobi":
         params = {"IntFeasTol": 1e-9, **params}
     half1, half2 = objective_step(inst, "f1") / 2, objective_step(inst, "f2") / 2

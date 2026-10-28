@@ -1,6 +1,7 @@
 """Runtime schedule validation (Instance.schedule_violations / check_schedule)
 and where solvers apply it, plus hybrid_frontier's certified points."""
 import pytest
+from conftest import trap_small
 from gurobipy import GRB
 
 from fedhpc.data import ScheduleError
@@ -8,8 +9,6 @@ from fedhpc.formulations import SpaceTimeFormulation
 from fedhpc.model import _extract, solve_f1
 from fedhpc.moea import _to_solutions
 from fedhpc.pareto import hybrid_frontier, true_pareto_frontier
-
-from conftest import trap_small
 
 
 @pytest.fixture(scope="module")

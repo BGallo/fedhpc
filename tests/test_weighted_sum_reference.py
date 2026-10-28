@@ -196,3 +196,12 @@ def test_negative_costs_fall_back_to_the_solve():
     assert f2_0 == 0.0 and f2_T < 0.0
     direct = solve_weighted_sum(inst, 0.5, f1_T, f2_T, f1_0, MIPGap=0)
     assert sol.f1 == pytest.approx(direct.f1) and sol.f2 == pytest.approx(direct.f2)
+
+
+def test_uncertified_reference_points_raise(monkeypatch):
+    """A reference point every weighted sum is normalised by must be proven:
+    an incumbent without a certificate raises instead of being used."""
+    from fedhpc import pareto
+    monkeypatch.setattr(pareto, "is_certified", lambda *a: False)
+    with pytest.raises(RuntimeError, match="No certified optimum"):
+        weighted_sum_reference(_instance(0))

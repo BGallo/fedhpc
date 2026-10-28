@@ -175,7 +175,7 @@ def run_instance(path: str, args) -> None:
         t0 = time.perf_counter()
         try:
             f1_T, f2_T, f1_0 = _reference_points(
-                inst, OutputFlag=0, TimeLimit=args.ref_time_limit, MIPGap=1e-4
+                inst, OutputFlag=0, TimeLimit=args.ref_time_limit
             )
             ref_src = "gurobi"
         except Exception as e:  # noqa: BLE001

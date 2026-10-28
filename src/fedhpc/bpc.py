@@ -19,8 +19,9 @@ its ghost completion at ``e``. Pseudo-jobs add nothing to f1 or f2, do not
 activate a type's fixed cost, and are stripped from every returned
 assignment.
 
-The development notes below cite timings on ``tiny_*`` instances (5-25-job
-subsets of the fedhpc trace). Those instances have been deleted; the tests
+The development notes below, and some function docstrings, cite timings on
+``tiny_*`` instances (5-25-job subsets of the fedhpc trace). Those instances
+have been deleted; the tests
 now use the trap instances in ``tests/conftest.py`` (7 and 12 jobs, with
 running jobs).
 
@@ -424,6 +425,7 @@ instances, same as any RCSP-based column generation.
 """
 from __future__ import annotations
 
+import time
 from collections import Counter
 from dataclasses import dataclass, field, replace
 
@@ -435,10 +437,32 @@ from .data import Instance, Job
 from .model import Solution, grid_floor
 
 __all__ = [
-    "Column", "RootResult", "solve_root_relaxation",
+    "BPCTimeLimit", "Column", "RootResult", "solve_root_relaxation",
     "solve_f1_bpc", "solve_f2_bpc", "solve_weighted_sum_bpc",
     "make_bpc_lexmin_bounded",
 ]
+
+
+class BPCTimeLimit(RuntimeError):
+    """``_branch_and_price`` ran past its ``time_limit``.
+
+    ``objective``/``assignment`` hold the best schedule found by then (the
+    instance's own jobs only), or ``inf``/``None`` when there is none. It is
+    a feasible schedule, not a proven optimum.
+    """
+
+    def __init__(self, objective: float = float("inf"),
+                 assignment: dict[int, tuple[int, int]] | None = None):
+        super().__init__("BPC branch-and-price exceeded its time limit")
+        self.objective = objective
+        self.assignment = assignment
+
+
+def _check_deadline(deadline: float | None) -> None:
+    """Raise :class:`BPCTimeLimit` (no incumbent yet) once ``deadline``
+    (a ``time.perf_counter()`` value) has passed."""
+    if deadline is not None and time.perf_counter() > deadline:
+        raise BPCTimeLimit
 
 
 # ---------------------------------------------------------------------------
@@ -1348,10 +1372,14 @@ def _run_column_generation(
     differ_pairs: frozenset[tuple[int, int]] = frozenset(),
     same_pairs: frozenset[tuple[int, int]] = frozenset(),
     use_relaxed_prescreen: bool = False,
+    deadline: float | None = None,
 ) -> int:
     """Solve -> price every type -> add improving columns -> repeat, until no
     type prices out a negative-reduced-cost column. Returns the iteration
     count. Shared by the root relaxation and every branch-and-price node.
+
+    ``deadline`` — a ``time.perf_counter()`` value; checked once per
+    iteration, raising :class:`BPCTimeLimit` once passed.
 
     ``use_relaxed_prescreen`` — before calling the exact elementary
     ``_price_type`` for a type, first call the much cheaper 1-cycle-free
@@ -1363,6 +1391,7 @@ def _run_column_generation(
     how much exact-DP work is spent finding out none exist.
     """
     for it in range(max_iters):
+        _check_deadline(deadline)
         mdl.optimize()
         if mdl.Status == GRB.INFEASIBLE:
             raise _RmpInfeasible
@@ -1515,7 +1544,8 @@ def _rmp_integer_heuristic(
     (each job covered once, at most N_m timelines per type, bound rows
     respected), so its objective is a valid incumbent for pruning. Without
     one, depth-first search prunes nothing until it reaches an integral leaf
-    — on tiny_large's lex-min (f2, f1) phase 2 that took > 15 min although
+    — on tiny_large's (a deleted development instance, see the module
+    docstring) lex-min (f2, f1) phase 2 that took > 15 min although
     the root bound already equals the optimum. Changes the model in place:
     call after every LP value has been read.
 
@@ -1570,12 +1600,13 @@ def _solve_node(
     big_m: float,
     use_relaxed_prescreen: bool = False,
     heuristic_time_limit: float | None = None,
+    deadline: float | None = None,
 ) -> _NodeResult:
     """Column generation at one node, then its status and branching choice.
 
     ``heuristic_time_limit`` — when set and the node is fractional, also run
-    :func:`_rmp_integer_heuristic` with that limit; its result is the
-    returned ``incumbent``.
+    :func:`_rmp_integer_heuristic` with that limit (capped by ``deadline``);
+    its result is the returned ``incumbent``.
     """
     valid_seed = [
         c for c in seed_pool
@@ -1590,7 +1621,7 @@ def _solve_node(
             mdl, state, inst, weight1, weight2,
             arcs_by_type, arrival_of, weight_of, max_iters, tol,
             forbidden, pinned, differ_pairs, same_pairs,
-            use_relaxed_prescreen,
+            use_relaxed_prescreen, deadline,
         )
     except _RmpInfeasible:
         return _NodeResult(status="infeasible", objective=float("inf"), columns=seed_pool)
@@ -1708,6 +1739,9 @@ def _solve_node(
         result = _NodeResult(status="fractional", objective=mdl.ObjVal, columns=state.columns,
                              branch_var=(branch_j, branch_m, branch_t))
     if heuristic_time_limit is not None:
+        if deadline is not None:
+            heuristic_time_limit = min(heuristic_time_limit,
+                                       max(0.0, deadline - time.perf_counter()))
         result.incumbent = _rmp_integer_heuristic(
             mdl, state, inst, weight1, weight2, bound1_value, bound2_value,
             heuristic_time_limit,
@@ -1792,6 +1826,7 @@ def _root_cuts_and_price(
     max_cuts_per_round: int,
     max_total_cuts: int,
     use_relaxed_prescreen: bool = False,
+    deadline: float | None = None,
 ) -> tuple[bool, frozenset[frozenset[int]], list[Column]]:
     """Separate + add SR-1 cuts at the root only, before the B&B tree starts
     — the simpler, standard variant of branch-and-cut-and-price that avoids
@@ -1814,7 +1849,8 @@ def _root_cuts_and_price(
         try:
             _run_column_generation(mdl, state, inst, weight1, weight2,
                                     arcs_by_type, arrival_of, weight_of, max_iters, tol,
-                                    use_relaxed_prescreen=use_relaxed_prescreen)
+                                    use_relaxed_prescreen=use_relaxed_prescreen,
+                                    deadline=deadline)
         except _RmpInfeasible:
             return False, frozenset(), []
         pool = state.columns
@@ -1843,17 +1879,23 @@ def _branch_and_price(
     max_total_cuts: int = 5,
     use_relaxed_prescreen: bool = False,
     heuristic_time_limit: float = 5.0,
+    time_limit: float | None = None,
 ) -> tuple[float, dict[int, tuple[int, int]] | None]:
     """Exact branch-and-price. Returns ``(objective, assignment)``, or
     ``(inf, None)`` if the instance (restricted to any bound row) is
     infeasible. See the module docstring for the branching scheme.
+
+    ``time_limit`` — wall-clock seconds for this call (None: no limit),
+    checked between nodes and between column-generation iterations, so it
+    is overshot by at most one LP solve and one pricing round. Past it,
+    raises :class:`BPCTimeLimit` carrying the best schedule found so far.
 
     ``tol`` defaults looser than the root relaxation's (1e-5 vs. Phase 1's
     1e-7): with ``weight1=0`` (or any node deep in an "up"-heavy branch,
     where most jobs are pinned), f2 alone often doesn't depend on a job's
     exact start time, so many columns tie exactly — at 1e-7 that tie noise
     made column generation cycle (repeatedly re-adding near-zero-reduced-cost
-    columns) instead of converging on tiny_large/tiny_xlarge. 1e-5 is still
+    columns) instead of converging on the (deleted) tiny_large/tiny_xlarge. 1e-5 is still
     two orders of magnitude tighter than the ``abs=1e-4`` comparison
     tolerance the tests check f1/f2 against.
 
@@ -1863,7 +1905,7 @@ def _branch_and_price(
     only the bound/search order — but each *active* cut costs the pricing
     DP an extra dominance-signature bit (a label triggered on a cut and one
     that isn't become mutually non-dominating), which shrinks how much the
-    elementary-path dominance can prune. On tiny_medium.json this measurably
+    elementary-path dominance can prune. On the (deleted) tiny_medium.json this measurably
     backfires: with cuts on, the ``solve_f2_bpc`` tie-break phase (minimise
     f1 s.t. f2 <= its own minimum — the same tightly-pinned, on-prem-packing
     shape Phase 3 already found hard) went from ~seconds to not finishing in
@@ -1894,11 +1936,12 @@ def _branch_and_price(
     objectives differ by a multiple of ``weight1``. A node then holds a strictly better schedule only if its
     bound is at most ``best − weight1``; the 1e-3 margin absorbs the column
     generation's ``tol``-level bound error. Without it, bounds within that
-    error of the optimum (e.g. 187.51663 vs 187.516667 on tiny_large) never
+    error of the optimum (e.g. 187.51663 vs 187.516667 on the deleted tiny_large) never
     prune.
     Running jobs are absorbed as pinned pseudo-jobs (see the module
     docstring); the returned assignment holds the instance's own jobs only.
     """
+    deadline = None if time_limit is None else time.perf_counter() + time_limit
     inst = _absorb_running_jobs(inst)
     running_ids = _running_ids(inst)
     if big_m is None:
@@ -1917,7 +1960,7 @@ def _branch_and_price(
             inst, weight1, weight2, bound1_value, bound2_value, big_m,
             arcs_by_type, arrival_of, weight_of, max_iters_per_node, tol,
             max_cut_rounds, max_cuts_per_round, max_total_cuts,
-            use_relaxed_prescreen,
+            use_relaxed_prescreen, deadline,
         )
         if not feasible:
             return float("inf"), None
@@ -1935,20 +1978,30 @@ def _branch_and_price(
     best_assignment: dict[int, tuple[int, int]] | None = None
     n_nodes = 0
 
+    def own_jobs(assignment):
+        if assignment is None:
+            return None
+        return {jid: a for jid, a in assignment.items() if jid not in running_ids}
+
     while stack:
         if n_nodes >= max_nodes:
             raise RuntimeError("BPC branch-and-price exceeded max_nodes")
         forbidden, pinned, differ_pairs, same_pairs, forbidden_types, forced_types, pool = stack.pop()
         n_nodes += 1
 
-        node = _solve_node(
-            inst, weight1, weight2, bound1_value, bound2_value,
-            forbidden, pinned, differ_pairs, same_pairs, forbidden_types, forced_types,
-            cuts, pool,
-            arcs_by_type, arrival_of, weight_of, max_iters_per_node, tol, big_m,
-            use_relaxed_prescreen,
-            heuristic_time_limit if heuristic_time_limit > 0 else None,
-        )
+        try:
+            _check_deadline(deadline)
+            node = _solve_node(
+                inst, weight1, weight2, bound1_value, bound2_value,
+                forbidden, pinned, differ_pairs, same_pairs, forbidden_types, forced_types,
+                cuts, pool,
+                arcs_by_type, arrival_of, weight_of, max_iters_per_node, tol, big_m,
+                use_relaxed_prescreen,
+                heuristic_time_limit if heuristic_time_limit > 0 else None,
+                deadline,
+            )
+        except BPCTimeLimit:
+            raise BPCTimeLimit(best_obj, own_jobs(best_assignment)) from None
         if node.incumbent is not None and node.incumbent[0] < best_obj:
             best_obj, best_assignment = node.incumbent
         if node.status == "infeasible" or node.objective >= best_obj - prune_gap:
@@ -1978,10 +2031,7 @@ def _branch_and_price(
             stack.append((forbidden, {**pinned, jid: (mid, t)}, differ_pairs, same_pairs,
                           forbidden_types, forced_types, node.columns))                # up
 
-    if best_assignment is not None:
-        best_assignment = {jid: a for jid, a in best_assignment.items()
-                           if jid not in running_ids}
-    return best_obj, best_assignment
+    return best_obj, own_jobs(best_assignment)
 
 
 def _assignment_to_solution(inst: Instance, objective: float,
@@ -2010,14 +2060,18 @@ def _lex_tiebreak(inst: Instance, assignment1: dict[int, tuple[int, int]],
     **kwargs)`` with the bound row fixing phase 1's optimum.
 
     The result is ``"optimal"`` only when phase 2 itself finished. If it
-    raised (``max_nodes``/``max_iters_per_node``) or came back infeasible —
-    impossible in exact arithmetic, since phase 1's schedule satisfies the
-    bound — phase 1's schedule is returned as ``"feasible"``: it is
+    raised (``max_nodes``/``max_iters_per_node``/``time_limit``) or came back
+    infeasible — impossible in exact arithmetic, since phase 1's schedule
+    satisfies the bound — the result is ``"feasible"``: phase 2's incumbent
+    when it timed out with one, else phase 1's schedule. Either is
     primary-optimal, but its secondary objective is unproven, so it may be
     weakly dominated and must not be trusted as a Pareto point.
     """
     try:
         _obj2, assignment2 = _branch_and_price(inst, weight1, weight2, **kwargs)
+    except BPCTimeLimit as e:
+        fallback = e.assignment or assignment1
+        return replace(_assignment_to_solution(inst, None, fallback), status="feasible")
     except RuntimeError:
         assignment2 = None
     if assignment2 is None:
@@ -2029,7 +2083,8 @@ def solve_f1_bpc(inst: Instance, **kwargs) -> Solution:
     """Lex-min (f1, f2) via branch-and-price — mirrors ``model.solve_f1``.
 
     Status ``"feasible"`` when the tie-break phase failed (see
-    :func:`_lex_tiebreak`).
+    :func:`_lex_tiebreak`). A ``time_limit`` applies to each phase; past it
+    in phase 1, :class:`BPCTimeLimit` propagates.
     """
     f1_star, assignment1 = _branch_and_price(inst, 1.0, 0.0, **kwargs)
     if assignment1 is None:
@@ -2042,7 +2097,7 @@ def solve_f2_bpc(inst: Instance, **kwargs) -> Solution:
     """Lex-min (f2, f1) via branch-and-price — mirrors ``model.solve_f2``.
 
     Status ``"feasible"`` when the tie-break phase failed (see
-    :func:`_lex_tiebreak`).
+    :func:`_lex_tiebreak`). ``time_limit``: as :func:`solve_f1_bpc`.
     """
     f2_star, assignment1 = _branch_and_price(inst, 0.0, 1.0, **kwargs)
     if assignment1 is None:
@@ -2057,6 +2112,7 @@ def solve_f2_bpc(inst: Instance, **kwargs) -> Solution:
 
 def make_bpc_lexmin_bounded(
     inst: Instance,
+    time_limit: float | None = None,
     **bpc_kwargs,
 ):
     """Build a BPC-backed ``lexmin_bounded`` closure with the exact same
@@ -2067,16 +2123,18 @@ def make_bpc_lexmin_bounded(
     Returns ``(lexmin_bounded, counters)``, ``counters`` holding a live
     ``"n_solves"`` entry (incremented once per ``_branch_and_price`` call —
     ``"build_time"`` is always 0.0, since BPC has no single "model build"
-    step comparable to the Gurobi engine's; unlike that engine this doesn't
-    yet support ``per_solve_time_limit``/``n_seed_retries``-style graceful
-    degradation under a wall-clock cap — a hard sub-problem currently just
-    keeps running, or eventually raises via ``max_nodes``/``max_iters_per_node``
-    in ``bpc_kwargs``, which this catches and reports as an inconclusive
-    ("feasible"-status) result rather than letting it propagate and abort
-    the whole search). That holds for either phase: a schedule whose
-    tie-break phase failed is primary-optimal only, so it is returned as
-    ``"feasible"`` too (see :func:`_lex_tiebreak`) and the box search drops
-    the box instead of recording a possibly dominated point.
+    step comparable to the Gurobi engine's).
+
+    ``time_limit`` caps each ``_branch_and_price`` call (each phase), as
+    ``per_solve_time_limit`` caps each Gurobi solve. A phase that runs out of
+    time, or raises via ``max_nodes``/``max_iters_per_node`` in
+    ``bpc_kwargs``, gives an inconclusive (``"feasible"``-status) result —
+    with the best schedule found, if any — instead of aborting the whole
+    search. That holds for either phase: a schedule whose tie-break phase
+    failed is primary-optimal only, so it is returned as ``"feasible"`` too
+    (see :func:`_lex_tiebreak`) and the box search drops the box instead of
+    recording a possibly dominated point. There is no seed-retry
+    equivalent: BPC's search is deterministic.
 
     The returned closure's contract mirrors the Gurobi engine's exactly,
     with one difference forced by the representation: instead of callables
@@ -2105,14 +2163,21 @@ def make_bpc_lexmin_bounded(
         b2 = grid_floor(inst, "f2", bound_value) if bound == "f2" else None
 
         w1, w2 = (1.0, 0.0) if primary == "f1" else (0.0, 1.0)
+        counters["n_solves"] += 1
         try:
             obj1, assignment1 = _branch_and_price(
-                inst, w1, w2, bound1_value=b1, bound2_value=b2, **bpc_kwargs,
+                inst, w1, w2, bound1_value=b1, bound2_value=b2,
+                time_limit=time_limit, **bpc_kwargs,
             )
+        except BPCTimeLimit as e:
+            if e.assignment is None:
+                return Solution(status="feasible", objective=None, f1=None, f2=None,
+                                assignment={}, completion={})
+            return replace(_assignment_to_solution(inst, e.objective, e.assignment),
+                           status="feasible")
         except RuntimeError:
             return Solution(status="feasible", objective=None, f1=None, f2=None,
                              assignment={}, completion={})
-        counters["n_solves"] += 1
 
         if assignment1 is None:
             return _assignment_to_solution(inst, obj1, None)
@@ -2128,6 +2193,7 @@ def make_bpc_lexmin_bounded(
         w1s, w2s = (1.0, 0.0) if secondary == "f1" else (0.0, 1.0)
         counters["n_solves"] += 1
         return _lex_tiebreak(inst, assignment1, w1s, w2s,
-                             bound1_value=b1, bound2_value=b2, **bpc_kwargs)
+                             bound1_value=b1, bound2_value=b2,
+                             time_limit=time_limit, **bpc_kwargs)
 
     return lexmin_bounded, counters
