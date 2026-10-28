@@ -139,9 +139,17 @@ Sweeps a discrete set of ε values to approximate the Pareto frontier, handling 
 
 Since f1 moves in steps of 1 and f2 in steps of `δ`, a lexicographic phase is certified optimal once its incumbent's exact value, recomputed from the schedule, is within one step of Gurobi's dual bound. `solve_f1`, `solve_f2`, the ε-constraint solves, the reference points and the Pareto searches run each phase with `MIPGap=0` and `MIPGapAbs` just under one step (`model.certify_params`). They report `"optimal"` only when certified (`model.is_certified`) and `"feasible"` otherwise. Every objective bound is written as an integer row on its grid (`Formulation.bound_constr`), so no right-hand side ever sits a rounding error away from an achievable value. Gurobi's presolve otherwise rounded `f2 ≤ 35 − 5e-5` up to 35 on integer cost data. Passing your own `MIPGap`/`MIPGapAbs` overrides the defaults, and the status then says whether the result is still proven.
 
+Each certificate is about the schedule the solver returned, so that schedule is validated too. `Instance.check_schedule` (and `schedule_violations`) verifies the following:
+- every job is assigned exactly once;
+- each job's type is in `F_j`;
+- each start lies in `T_jm`;
+- no capacitated type exceeds its capacity in any slot, counting running jobs.
+
+It runs on every MIP extraction (`model._extract`, which also rejects a job started twice), on every BPC result and on every EA result, and raises `ScheduleError` if the schedule is infeasible. The check is not expected to fire. It guards against integrality tolerances and decoder bugs.
+
 #### Exact Pareto front
 
-`pareto.true_pareto_frontier` enumerates the complete front by box splitting: about 2 solves per Pareto point. Each solve is a lexicographic minimum under a bound on the other objective. `pareto.map_pareto_frontier` bisects the objective range instead, giving broad coverage under a solve or time budget. Both rely on f1 being integer-spaced (assumption 8). Each box solve runs on either the compact Gurobi model (`engine="gurobi"`) or the branch-price-and-cut engine in `bpc.py` (`engine="bpc"`). BPC handles running jobs by turning each into a pinned pseudo-job; it is practical only for instances of about a dozen jobs.
+`pareto.true_pareto_frontier` enumerates the complete front by box splitting: about 2 solves per Pareto point. Each solve is a lexicographic minimum under a bound on the other objective. `pareto.map_pareto_frontier` bisects the objective range instead, giving broad coverage under a solve or time budget. Both rely on f1 being integer-spaced (assumption 8). `pareto.hybrid_frontier` runs NSGA-II and MOEA/D, then solves a certified lexicographic minimum under each surviving candidate's cost. Every `"optimal"` point it returns is proven Pareto-optimal, but its front is incomplete: only trade-offs near the EA candidates are visited. Each box solve runs on either the compact Gurobi model (`engine="gurobi"`) or the branch-price-and-cut engine in `bpc.py` (`engine="bpc"`). BPC handles running jobs by turning each into a pinned pseudo-job; it is practical only for instances of about a dozen jobs.
 
 ## Project Structure
 

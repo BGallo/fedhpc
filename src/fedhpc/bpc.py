@@ -1989,6 +1989,7 @@ def _assignment_to_solution(inst: Instance, objective: float,
     if assignment is None:
         return Solution(status="infeasible", objective=None, f1=None, f2=None,
                          assignment={}, completion={})
+    inst.check_schedule(assignment)
     completion = {jid: t + inst.p_occ[jid, mid] for jid, (mid, t) in assignment.items()}
     return Solution(
         status="optimal", objective=objective,

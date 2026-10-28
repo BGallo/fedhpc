@@ -18,7 +18,7 @@ from dataclasses import dataclass, field, replace
 import gurobipy as gp
 from gurobipy import GRB
 
-from .data import Instance
+from .data import Instance, ScheduleError
 from .formulations import LEX_F1, Formulation, SpaceTimeFormulation
 
 
@@ -152,10 +152,21 @@ def _extract(
     completion: dict[int, int] = {}
 
     # One bulk attribute query: per-variable .X costs ~3x more on large models.
+    doubled = set()
     for (jid, m_id, t), val in zip(x, mdl.getAttr("X", list(x.values()))):
         if val > 0.5:
+            if jid in assignment:
+                doubled.add(jid)
             assignment[jid] = (m_id, t)
             completion[jid] = t + inst.p_occ[jid, m_id]
+
+    # The exact f1/f2 below (and every certificate built on them) describe the
+    # rounded schedule, so it must itself be feasible — a check against
+    # integrality/feasibility tolerances, never expected to fire.
+    if doubled:
+        raise ScheduleError(f"infeasible schedule: jobs {sorted(doubled)[:10]} "
+                            "started more than once")
+    inst.check_schedule(assignment)
 
     f1 = inst.f1_of(completion)
     f2 = inst.f2_of(assignment)

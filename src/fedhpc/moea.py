@@ -137,6 +137,7 @@ def _to_solutions(
         for j, (m_id, t) in zip(inst.jobs, assignment_raw):
             assignment[j.id] = (m_id, t)
             completion[j.id] = t + inst.p_occ[j.id, m_id]
+        inst.check_schedule(assignment)   # the C++ decoders' output, re-checked
         out.append(Solution(
             status="heuristic",
             objective=None,

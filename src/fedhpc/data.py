@@ -19,6 +19,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+class ScheduleError(ValueError):
+    """A schedule violates the model (see :meth:`Instance.schedule_violations`).
+
+    Raised where a solver hands back a schedule: an infeasible one would make
+    its exact objective values, and any certificate built on them, meaningless.
+    """
+
+
+
 @dataclass
 class Job:
     id: int
@@ -249,6 +258,69 @@ class Instance:
             # Occupancy during [0, end_slot): counts towards per-slot capacity usage
             for t in range(end_slot):
                 self.occupied[mid, t] = self.occupied.get((mid, t), 0) + 1
+
+    # ---- Schedule feasibility ----------------------------------------------
+
+    def schedule_violations(
+        self,
+        assignment: dict[int, tuple[int, int]],
+        *,
+        complete: bool = True,
+    ) -> list[str]:
+        """Every way the ``{job: (type, start)}`` map breaks the model, as
+        messages (empty when feasible).
+
+        Checks known job ids, an allowed type (m ∈ F_j), a start in T_jm
+        (release and horizon), and, per finite-capacity type, that new jobs
+        plus running jobs never exceed the capacity in any slot. With
+        ``complete`` (the default) every job must be assigned.
+        """
+        out: list[str] = []
+        known = {j.id for j in self.jobs}
+        if complete:
+            missing = sorted(known - assignment.keys())
+            if missing:
+                out.append(f"unassigned jobs {missing[:10]}")
+        H = self.horizon
+        cap = {m.id: m.capacity for m in self.instance_types if m.capacity is not None}
+        # per finite type, a difference array of busy slots over [0, H)
+        delta = {mid: [0] * (H + 1) for mid in cap}
+        for jid, (mid, t) in assignment.items():
+            if jid not in known:
+                out.append(f"unknown job {jid}")
+                continue
+            if mid not in self.F[jid]:
+                out.append(f"job {jid} on type {mid}, not in F_j {self.F[jid]}")
+                continue
+            if t not in self.T[jid, mid]:
+                out.append(f"job {jid} on type {mid} starts at {t}, outside T_jm "
+                           f"{self.T[jid, mid].start}..{self.T[jid, mid].stop - 1}")
+                continue
+            if mid in delta:
+                delta[mid][t] += 1
+                delta[mid][t + self.p_occ[jid, mid]] -= 1
+        for mid, d in delta.items():
+            busy = 0
+            for t in range(H):
+                busy += d[t]
+                used = busy + self.occupied.get((mid, t), 0)
+                if used > cap[mid]:
+                    out.append(f"type {mid} uses {used} > capacity {cap[mid]} "
+                               f"in slot {t}")
+                    break
+        return out
+
+    def check_schedule(
+        self,
+        assignment: dict[int, tuple[int, int]],
+        *,
+        complete: bool = True,
+    ) -> None:
+        """Raise :class:`ScheduleError` if ``assignment`` is infeasible (see
+        :meth:`schedule_violations`)."""
+        violations = self.schedule_violations(assignment, complete=complete)
+        if violations:
+            raise ScheduleError("infeasible schedule: " + "; ".join(violations[:5]))
 
     # ---- Objective evaluation ----------------------------------------------
 

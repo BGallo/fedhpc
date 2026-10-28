@@ -1066,7 +1066,7 @@ def hybrid_frontier(
     n_threads: int = 0,
     formulation: Formulation | None = None,
     time_limit: float | None = None,
-    mip_gap: float = 1e-4,
+    mip_gap: float | None = None,
     verbose: bool = False,
     **mip_params,
 ) -> list[Solution]:
@@ -1076,19 +1076,28 @@ def hybrid_frontier(
     non-dominated candidate solutions that jointly span the tradeoff space.
 
     Phase 2a — Anchors: take the EA's best-cost and best-turnaround solutions and
-    solve the complementary objective exactly (min f1 s.t. f2 ≤ f2_ea_best and
-    min f2 s.t. f1 ≤ f1_ea_best).  These two exact Pareto-frontier corners are
-    used to prune the remaining candidate pool aggressively.
+    solve lex-min (f1, f2) s.t. f2 ≤ f2 of the EA's cheapest, and lex-min
+    (f2, f1) s.t. f1 ≤ f1 of the EA's fastest. Each is a Pareto-optimal point
+    (a lex-min under a cap cannot be dominated), but not necessarily an
+    extreme of the front: the EA may have missed the true cheapest or
+    fastest schedule. They prune the candidate pool.
 
     Phase 2b — Prune: a candidate is interior only if it strictly improves on
     both anchors simultaneously (f1_c < anchor_cheap.f1 AND f2_c < anchor_fast.f2).
     All other candidates are already dominated and are discarded.
 
-    Phase 2c — MIP interior: for each surviving interior candidate's cost threshold
-    solve  min f1  s.t.  f2 ≤ f2_k  exactly with Gurobi, warm-started from the EA
-    assignment.
+    Phase 2c — MIP interior: for each surviving interior candidate's cost
+    threshold, solve lex-min (f1, f2) s.t. f2 ≤ f2_k with Gurobi, warm-started
+    from the EA assignment.
 
     Phase 3 — Filter: final Pareto filter removes duplicates and dominances.
+
+    Every solve goes through the same certified lex-min as
+    :func:`true_pareto_frontier` (``_make_lexmin_bounded``), so a point with
+    status ``"optimal"`` is proven Pareto-optimal. It is *not* a complete
+    front: only the trade-offs near the EA's candidates are visited. Points
+    whose solve hit ``time_limit`` (or ran under an explicit ``mip_gap``)
+    keep status ``"feasible"``: a schedule, not a proven Pareto point.
 
     Parameters
     ----------
@@ -1100,16 +1109,17 @@ def hybrid_frontier(
     n_threads         : OpenMP thread count; 0 = all cores.
     formulation       : MIP formulation; defaults to SpaceTimeFormulation.
     time_limit        : Gurobi time limit per ε-constraint solve (seconds); None = no limit.
-    mip_gap           : Gurobi MIPGap.
+    mip_gap           : Gurobi MIPGap; None (the default) certifies each
+                        phase exactly. Any value overrides the certificate
+                        and can leave points ``"feasible"``.
     verbose           : print phase progress and Gurobi log.
     **mip_params      : additional Gurobi parameters forwarded to every solve.
 
     Returns
     -------
-    Exact (status="optimal"/"feasible") non-dominated solutions.
+    Mutually non-dominated MIP solutions: ``"optimal"`` ones are proven
+    Pareto-optimal, ``"feasible"`` ones are not (see above).
     """
-    from gurobipy import GRB
-
     from .formulations import configure_env
     from .moea import moead_frontier, nsga2_frontier
 
@@ -1143,10 +1153,12 @@ def hybrid_frontier(
     configure_env(verbose=verbose)
     fmt = formulation or SpaceTimeFormulation()
 
-    mip_kw: dict = {"MIPGap": mip_gap, **mip_params}
-    if time_limit is not None:
-        mip_kw["TimeLimit"] = time_limit
+    # Same certified lex-min as true_pareto_frontier (IntFeasTol: see there)
+    mip_kw: dict = {"IntFeasTol": 1e-9, **mip_params}
+    if mip_gap is not None:
+        mip_kw["MIPGap"] = mip_gap
     mip_kw["OutputFlag"] = 1 if verbose else mip_kw.get("OutputFlag", 0)
+    lexmin_bounded, _ = _make_lexmin_bounded(inst, fmt, mip_kw, time_limit)
 
     def _mip_solve(
         hint: Solution | None,
@@ -1155,23 +1167,13 @@ def hybrid_frontier(
         constrain_f1: float | None = None,
         minimize_cost: bool = False,
     ) -> Solution:
-        t0 = _time.perf_counter()
-        mdl, vars_ = fmt.build(inst)
-        build_time = _time.perf_counter() - t0
-        _apply_params(mdl, mip_kw)
-        x = vars_["x"]
-        if hint is not None:
-            set_mip_start(inst, x, hint)
-        if constrain_f2 is not None:
-            mdl.addConstr(fmt.bound_constr(inst, x, "f2", constrain_f2), name="eps_cost")
-        if constrain_f1 is not None:
-            mdl.addConstr(fmt.bound_constr(inst, x, "f1", constrain_f1), name="eps_turnaround")
-        obj = fmt.f2_expr(inst, x) if minimize_cost else fmt.f1_expr(inst, x)
-        mdl.setObjective(obj, GRB.MINIMIZE)
-        t1 = _time.perf_counter()
-        mdl.optimize()
-        return _extract(inst, mdl, vars_, build_time=build_time,
-                        solve_time=_time.perf_counter() - t1)
+        """Lex-min (f2, f1) if ``minimize_cost`` else (f1, f2), under the
+        given cap, warm-started from ``hint``."""
+        primary, secondary = ("f2", "f1") if minimize_cost else ("f1", "f2")
+        bound, value = (("f2", constrain_f2) if constrain_f2 is not None
+                        else ("f1", constrain_f1) if constrain_f1 is not None
+                        else (None, None))
+        return lexmin_bounded(primary, secondary, bound, value, start=hint)
 
     # ── Phase 2a: Anchor solves — pin both extremes of the Pareto front ───────
     # ea_fast  has the lowest turnaround among EA candidates.
@@ -1188,9 +1190,9 @@ def hybrid_frontier(
             file=sys.stderr, flush=True,
         )
 
-    # min turnaround at EA's best cost level → exact right-end of front
+    # lex-min (f1, f2) within the EA's best cost: a Pareto point at or below it
     anchor_fast  = _mip_solve(ea_cheap, constrain_f2=ea_cheap.f2)
-    # min cost at EA's best turnaround level → exact left-end of front
+    # lex-min (f2, f1) within the EA's best turnaround
     anchor_cheap = _mip_solve(ea_fast,  constrain_f1=ea_fast.f1, minimize_cost=True)
 
     exact: list[Solution] = [s for s in (anchor_fast, anchor_cheap) if s.f1 is not None]

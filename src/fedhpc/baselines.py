@@ -123,8 +123,10 @@ def make_solution(inst: Instance, assignment: dict[int, tuple[int, int]]) -> Sol
 
     ``f1`` sums turnaround over *scheduled* jobs only (same convention as
     ``model._extract``); unscheduled jobs are recoverable as
-    ``inst.jobs`` minus ``assignment`` keys.
+    ``inst.jobs`` minus ``assignment`` keys. Raises
+    :class:`~fedhpc.data.ScheduleError` if the scheduled jobs break the model.
     """
+    inst.check_schedule(assignment, complete=False)
     completion = {
         jid: t + inst.p_occ[jid, mid] for jid, (mid, t) in assignment.items()
     }
