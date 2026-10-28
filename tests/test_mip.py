@@ -256,6 +256,31 @@ class TestWeightedSum:
         assert f1_vals == sorted(f1_vals, reverse=True)  # f1 non-increasing with λ
         assert f2_vals == sorted(f2_vals)                 # f2 non-decreasing with λ
 
+    def test_objective_is_normalised(self, known_pareto_inst):
+        """The reported objective is λ·f̂1 + (1−λ)·f̂2, offset included, in [0, 1]."""
+        f1_T, f2_T, f1_0 = self._ref(known_pareto_inst)
+        for lam in (0.0, 0.3, 0.7, 1.0):
+            sol = solve_weighted_sum(known_pareto_inst, lam, f1_T, f2_T, f1_0, **_GUROBI)
+            g = lam * (sol.f1 - f1_T) / (f1_0 - f1_T) + (1 - lam) * sol.f2 / f2_T
+            assert sol.objective == pytest.approx(g, abs=1e-9), lam
+            assert -1e-9 <= sol.objective <= 1 + 1e-9, lam
+
+    def test_lambda_one_breaks_cost_ties(self, known_pareto_inst):
+        """λ = 1 gives cost no weight; with a dearer type as fast as the cheap
+        cloud, the result must still be (f1_T, f2_T), not a dominated point."""
+        inst = known_pareto_inst
+        dear = InstanceType(id=2, kind="cloud", perf=2.0, io_time=0.0, deploy=0,
+                            cost_io=0.0, cost_vm=40.0, cost_stor=0.0,
+                            cpu=4, mem=8, stor=50, capacity=None)
+        inst = Instance(jobs=inst.jobs, instance_types=[*inst.instance_types, dear],
+                        horizon=inst.horizon)
+        inst.build()
+        f1_T, f2_T, f1_0 = self._ref(inst)
+        sol = solve_weighted_sum(inst, 1.0, f1_T, f2_T, f1_0, **_GUROBI)
+        assert sol.status == "optimal"
+        assert (sol.f1, sol.f2) == (pytest.approx(f1_T), pytest.approx(f2_T))
+        assert sol.objective == pytest.approx(0.0, abs=1e-9)
+
     def test_reference_points_exact_values(self, known_pareto_inst):
         """On the known 2×2 instance: f1_T=10, f2_T=100, f1_0=30."""
         f1_T, f2_T, f1_0 = self._ref(known_pareto_inst)

@@ -38,3 +38,8 @@ profile_logs/
 /*_machine_schedule.txt
 /*_gantt.png
 /*_graph.png
+
+# Generated instances (scripts/build_generated_instances.py) — 58 MB, rebuilt
+# exactly from their names; the manifest with their sha256 is tracked
+data/generated/*.json
+!data/generated/manifest.json

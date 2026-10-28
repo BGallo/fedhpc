@@ -3,6 +3,7 @@ from .data import Instance, InstanceType, Job, RunningJob
 from .metrics import pareto_metrics
 from .moea import (
     heuristic_weighted_reference_points,
+    heuristic_weighted_sum_reference,
     moead_frontier,
     nsga2_frontier,
     weighted_solve,
@@ -16,6 +17,7 @@ __all__ = [
     "Job",
     "RunningJob",
     "heuristic_weighted_reference_points",
+    "heuristic_weighted_sum_reference",
     "hybrid_frontier",
     "main",
     "map_pareto_frontier",

@@ -115,7 +115,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Gurobi MIPGap (used by exact and hybrid methods). Default: "
                           "unset — f1/f2/epsilon/pareto solves certify exact optima "
                           "(absolute gap under one objective step), weighted uses "
-                          "Gurobi's 1e-4 (its reference points are always certified). "
+                          "Gurobi's 1e-4 on the normalised objective (its reference "
+                          "points are always certified). "
                           "Setting it can leave lexicographic results unproven "
                           "(status 'feasible').")
     mip.add_argument("--max-solves", type=int, default=None,

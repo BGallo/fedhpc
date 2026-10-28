@@ -2,10 +2,12 @@
 offline baselines, on the two 10-minute instances.
 
 For each instance and each lambda in --lams:
-  1. compute (or load) the three weighted-sum reference points;
+  1. compute (or load) the four weighted-sum reference points;
   2. warm-start Gurobi from the memetic metaheuristic (fedhpc.weighted_solve)
-     and solve the normalised scalar  (lam/(f1_0-f1_T))*f1 + ((1-lam)/f2_T)*f2
-     s.t. f1 <= f1_0  with a per-solve TimeLimit; record the incumbent + MIPGap;
+     and solve the normalised scalar
+     (lam/(f1_0-f1_T))*(f1-f1_T) + ((1-lam)/(f2_T-f2_0))*(f2-f2_0)
+     s.t. f1 <= f1_0, f2 <= f2_T (lam = 1: lex-min (f1, f2)) with a per-solve
+     TimeLimit; record the incumbent + MIPGap;
   3. compute the full KPI block (fedhpc.viz.compute_stats) for the incumbent.
 
 Then the instance-level baselines (fedhpc.baselines):
@@ -34,32 +36,49 @@ from fedhpc.baselines import (
 )
 from fedhpc.data import Instance, reference_points
 from fedhpc.formulations import SpaceTimeFormulation, configure_env
-from fedhpc.model import Solution, _extract, set_mip_start
-from fedhpc.moea import heuristic_weighted_reference_points, weighted_solve
-from fedhpc.pareto import _reference_points
+from fedhpc.model import (
+    Solution,
+    _extract,
+    set_mip_start,
+    solve_weighted_sum,
+    weighted_sum_degenerate,
+    weighted_sum_scale,
+    weighted_sum_terms,
+)
+from fedhpc.moea import heuristic_weighted_sum_reference, weighted_solve
+from fedhpc.pareto import weighted_sum_reference
 from fedhpc.viz import compute_stats
 
 sys.stdout.reconfigure(line_buffering=True)
 
-def _known_reference_points(path) -> tuple[float, float, float] | None:
-    """(f1_T, f2_T, f1_0) from data/reference_points.json, or None when the
-    instance has no entry or its entry is stale (then they are recomputed)."""
+def _known_reference_points(path) -> tuple[float, float, float, float] | None:
+    """(f1_T, f2_T, f1_0, f2_0) from data/reference_points.json, or None when
+    the instance has no entry or its entry is stale (then they are recomputed)."""
     try:
-        f1_T, f2_T, f1_0, _f2_0 = reference_points(path)
+        return reference_points(path)
     except KeyError:
         return None
     except ValueError as e:
         print(f"  {e}")
         return None
-    return f1_T, f2_T, f1_0
 
 
-def _gurobi_weighted(inst, lam, f1_T, f2_T, f1_0, *, time_limit, mip_gap, hint):
+def _gurobi_weighted(inst, lam, f1_T, f2_T, f1_0, f2_0, *, time_limit, mip_gap, hint):
     """Solve model.solve_weighted_sum's scalar with a warm start; return
     (Solution, mip_gap, obj_bound, wall_s, degenerate)."""
+    degenerate = weighted_sum_degenerate(f1_T, f2_T, f1_0, f2_0)
+    if lam == 1.0 and not degenerate:
+        # solve_weighted_sum's lex-min (f1, f2) path; certified, so gap 0
+        t0 = time.perf_counter()
+        sol = solve_weighted_sum(inst, lam, f1_T, f2_T, f1_0, hint=hint, f2_0=f2_0,
+                                 OutputFlag=0, TimeLimit=time_limit)
+        return sol, 0.0, sol.objective, time.perf_counter() - t0, degenerate
     fmt = SpaceTimeFormulation()
-    degenerate = f1_0 <= f1_T + 1e-8 or f2_T <= 1e-8
-    weights = None if degenerate else (lam / (f1_0 - f1_T), (1 - lam) / f2_T)
+    scale = 1.0
+    if not degenerate:
+        w1, w2, c = weighted_sum_terms(lam, f1_T, f2_T, f1_0, f2_0)
+        scale = weighted_sum_scale(inst, w1, w2)
+    weights = None if degenerate else (w1, w2)
     t0 = time.perf_counter()
     mdl, vars_ = fmt.build(inst, objective=weights)
     build_s = time.perf_counter() - t0
@@ -70,11 +89,12 @@ def _gurobi_weighted(inst, lam, f1_T, f2_T, f1_0, *, time_limit, mip_gap, hint):
     if hint is not None:
         set_mip_start(inst, x, hint)
     f1e, f2e = fmt.f1_expr(inst, x), fmt.f2_expr(inst, x)
-    mdl.addConstr(f1e <= f1_0, name="pareto_region")
+    mdl.addConstr(fmt.bound_constr(inst, x, "f1", f1_0), name="pareto_region")
     if degenerate:
         mdl.setObjective(f2e, GRB.MINIMIZE)
     else:
-        mdl.setObjective(weights[0] * f1e + weights[1] * f2e, GRB.MINIMIZE)
+        mdl.addConstr(fmt.bound_constr(inst, x, "f2", f2_T), name="pareto_region_f2")
+        mdl.setObjective(scale * (w1 * f1e + w2 * f2e + c), GRB.MINIMIZE)
     t1 = time.perf_counter()
     mdl.optimize()
     solve_s = time.perf_counter() - t1
@@ -84,16 +104,18 @@ def _gurobi_weighted(inst, lam, f1_T, f2_T, f1_0, *, time_limit, mip_gap, hint):
     except Exception:  # noqa: BLE001
         mgap = float("nan")
     try:
-        bound = float(mdl.ObjBound)
+        bound = float(mdl.ObjBound) / scale
     except Exception:  # noqa: BLE001
         bound = float("nan")
     return sol, mgap, bound, build_s + solve_s, degenerate
 
 
-def _scalar_g(lam, f1, f2, f1_T, f2_T, f1_0, degenerate):
+def _scalar_g(lam, f1, f2, f1_T, f2_T, f1_0, f2_0, degenerate):
+    """The normalised ĝ Gurobi minimises (constant included)."""
     if degenerate:
         return f2
-    return (lam / (f1_0 - f1_T)) * f1 + ((1 - lam) / f2_T) * f2
+    w1, w2, c = weighted_sum_terms(lam, f1_T, f2_T, f1_0, f2_0)
+    return w1 * f1 + w2 * f2 + c
 
 
 def _kpi_row(name, key, sol: Solution, inst: Instance, extra: dict) -> dict:
@@ -166,24 +188,26 @@ def run_instance(path: str, args) -> None:
 
     # ── reference points ────────────────────────────────────────────────────
     if args.ref_points:
-        f1_T, f2_T, f1_0 = (float(v) for v in args.ref_points.split(","))
+        f1_T, f2_T, f1_0, *f2_0 = (float(v) for v in args.ref_points.split(","))
+        f2_0 = f2_0[0] if f2_0 else 0.0
         ref_src = "cli"
     elif not args.recompute_ref and (known := _known_reference_points(path)) is not None:
-        f1_T, f2_T, f1_0 = known
+        f1_T, f2_T, f1_0, f2_0 = known
         ref_src = "known-exact"
     else:
         t0 = time.perf_counter()
         try:
-            f1_T, f2_T, f1_0 = _reference_points(
-                inst, OutputFlag=0, TimeLimit=args.ref_time_limit
+            (f1_T, f2_T, f1_0, f2_0), _ = weighted_sum_reference(
+                inst, min_cost_reference=True, OutputFlag=0, TimeLimit=args.ref_time_limit
             )
             ref_src = "gurobi"
         except Exception as e:  # noqa: BLE001
             print(f"  exact reference points failed ({type(e).__name__}: {e})")
-            f1_T, f2_T, f1_0 = heuristic_weighted_reference_points(inst)
+            f1_T, f2_T, f1_0, f2_0 = heuristic_weighted_sum_reference(inst)
             ref_src = "heuristic"
         print(f"  reference-point solve: {time.perf_counter()-t0:.1f}s")
-    print(f"  reference points [{ref_src}]: f1_T={f1_T:.2f}  f2_T={f2_T:.2f}  f1_0={f1_0:.2f}")
+    print(f"  reference points [{ref_src}]: f1_T={f1_T:.2f}  f2_T={f2_T:.2f}  "
+          f"f1_0={f1_0:.2f}  f2_0={f2_0:.2f}")
 
     records: list[dict] = []
     rows: list[dict] = []
@@ -193,22 +217,22 @@ def run_instance(path: str, args) -> None:
         print(f"\n  --- lambda = {lam} ---")
         t0 = time.perf_counter()
         he = weighted_solve(
-            inst, lam, f1_T=f1_T, f2_T=f2_T, f1_0=f1_0,
+            inst, lam, f1_T=f1_T, f2_T=f2_T, f1_0=f1_0, f2_0=f2_0,
             pop_size=args.heur_pop, n_gen=args.heur_gen,
         )
         t_he = time.perf_counter() - t0
         print(f"    metaheuristic warm start: f1={he.f1:.1f} f2={he.f2:.2f}  ({t_he:.1f}s)")
 
         sol, mgap, bound, wall, degen = _gurobi_weighted(
-            inst, lam, f1_T, f2_T, f1_0,
+            inst, lam, f1_T, f2_T, f1_0, f2_0,
             time_limit=args.time_limit, mip_gap=args.mip_gap, hint=he,
         )
         if not sol.assignment:
             print(f"    Gurobi: no incumbent in {args.time_limit:.0f}s — using warm start")
             sol = he
             mgap = float("nan")
-        g = _scalar_g(lam, sol.f1, sol.f2, f1_T, f2_T, f1_0, degen)
-        g_he = _scalar_g(lam, he.f1, he.f2, f1_T, f2_T, f1_0, degen)
+        g = _scalar_g(lam, sol.f1, sol.f2, f1_T, f2_T, f1_0, f2_0, degen)
+        g_he = _scalar_g(lam, he.f1, he.f2, f1_T, f2_T, f1_0, f2_0, degen)
         print(f"    Gurobi incumbent: f1={sol.f1:.1f} f2={sol.f2:.2f}  "
               f"g={g:.5f}  MIPgap={mgap*100:.2f}%  ({wall:.1f}s)")
 
@@ -260,7 +284,7 @@ def run_instance(path: str, args) -> None:
         dict(instance=stem, path=path,
              n_jobs=len(inst.jobs), n_running=len(inst.running_jobs),
              horizon=inst.horizon, slot_size_seconds=inst.slot_size_seconds,
-             reference_points=dict(f1_T=f1_T, f2_T=f2_T, f1_0=f1_0, source=ref_src),
+             reference_points=dict(f1_T=f1_T, f2_T=f2_T, f1_0=f1_0, f2_0=f2_0, source=ref_src),
              records=records),
         indent=2, default=float,
     ))
@@ -290,7 +314,7 @@ def main() -> None:
     p.add_argument("--mip-gap", type=float, default=1e-4)
     p.add_argument("--ref-time-limit", type=float, default=300.0,
                    help="Gurobi TimeLimit per reference-point phase (s).")
-    p.add_argument("--ref-points", default=None, help="f1_T,f2_T,f1_0 (skip solve).")
+    p.add_argument("--ref-points", default=None, help="f1_T,f2_T,f1_0[,f2_0] (skip solve).")
     p.add_argument("--recompute-ref", action="store_true",
                    help="Ignore the known-exact reference-point table.")
     p.add_argument("--heur-pop", type=int, default=32)

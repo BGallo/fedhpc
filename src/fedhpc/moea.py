@@ -323,7 +323,7 @@ def nsga2_frontier(
                      *uncongested* 964-job instance, neutral-to-negative on
                      the congested 3340-job one, and it hurts MOEA/D on
                      both — opt-in, off by default.
-    lp_ref         : (f1_T, f2_T, f1_0) to normalise the LP λ sweep; a rough
+    lp_ref         : (f1_T, f2_T, f1_0[, f2_0]) to normalise the LP λ sweep; a rough
                      estimate from the repaired heuristic seeds is used if None.
     profile        : if True, print a per-phase timing breakdown to stderr.
 
@@ -572,13 +572,14 @@ def _lp_relaxation_seeds(
     f1_T: float | None = None,
     f2_T: float | None = None,
     f1_0: float | None = None,
+    f2_0: float = 0.0,
     **gurobi_params,
 ) -> list[list[int]]:
     """Round the LP relaxation of the weighted-sum MIP into EA seed genomes.
 
     For each ``lam`` in ``lambdas`` the (already-built) space-time model's
     objective is set to the normalised weighted sum
-    ``(lam/(f1_0-f1_T))·f1 + ((1-lam)/f2_T)·f2`` (falling back to unnormalised
+    ``(lam/(f1_0-f1_T))·f1 + ((1-lam)/(f2_T-f2_0))·f2`` (falling back to unnormalised
     ``lam·f1 + (1-lam)·f2`` when reference points are not given), integrality is
     relaxed, the barrier LP is solved, and each job is assigned to the
     ``(type, start)`` slot carrying the most LP mass. The result is a gene
@@ -609,13 +610,13 @@ def _lp_relaxation_seeds(
         mdl.setParam(k, val)
 
     norm = f1_T is not None and f2_T is not None and f1_0 is not None \
-        and f1_0 > f1_T + 1e-8 and f2_T > 1e-8
+        and f1_0 > f1_T + 1e-8 and f2_T - f2_0 > 1e-8
 
     slots = _job_slots(inst)   # pruned per-job slot tables — gene index domain
     out: list[list[int]] = []
     for lam in lambdas:
         if norm:
-            obj = (lam / (f1_0 - f1_T)) * f1e + ((1.0 - lam) / f2_T) * f2e
+            obj = (lam / (f1_0 - f1_T)) * f1e + ((1.0 - lam) / (f2_T - f2_0)) * f2e
         else:
             obj = lam * f1e + (1.0 - lam) * f2e
         mdl.setObjective(obj, GRB.MINIMIZE)
@@ -651,9 +652,10 @@ def _mo_lp_seeds(inst: Instance, lp_seeds: int, lp_ref, **gp) -> list[list[int]]
     if lp_seeds <= 0:
         return []
     import numpy as _np
-    f1_T, f2_T, f1_0 = lp_ref if lp_ref else _rough_ref_points(inst)
+    f1_T, f2_T, f1_0, *f2_0 = lp_ref if lp_ref else _rough_ref_points(inst)
     lams = _np.linspace(0.0, 1.0, lp_seeds).tolist()
-    return _lp_relaxation_seeds(inst, lams, f1_T=f1_T, f2_T=f2_T, f1_0=f1_0, **gp)
+    return _lp_relaxation_seeds(inst, lams, f1_T=f1_T, f2_T=f2_T, f1_0=f1_0,
+                                f2_0=f2_0[0] if f2_0 else 0.0, **gp)
 
 
 def _weighted_raw(
@@ -693,19 +695,22 @@ def _weighted_raw(
     )
 
 
-def heuristic_weighted_reference_points(
+def heuristic_weighted_sum_reference(
     inst: Instance, *, seed: int = 42, n_threads: int = 0,
     pop_size: int = 24, n_gen: int = 40, ls_moves: int = 6,
     restart_patience: int = 6, shortlist: int = 24,
-) -> tuple[float, float, float]:
-    """Heuristic estimates of the three weighted-sum reference points.
+) -> tuple[float, float, float, float]:
+    """Heuristic estimates of the four weighted-sum reference points
+    ``(f1_T, f2_T, f1_0, f2_0)``.
 
-    Mirrors ``pareto._reference_points`` (which solves them exactly with
-    Gurobi) using the memetic metaheuristic instead:
+    Mirrors ``pareto.weighted_sum_reference(min_cost_reference=True)`` (which
+    solves them exactly with Gurobi) using the memetic metaheuristic instead:
 
     - ``f1_T``  ≈ minimum total turnaround        (weights w1=1, w2=0)
     - ``f2_T``  ≈ minimum cost at that turnaround  (w1 huge, w2=1, f1 capped at f1_T)
-    - ``f1_0``  ≈ minimum turnaround at zero cost  (w1=1, w2 huge)
+    - ``f1_0``, ``f2_0`` ≈ the lex-min (f2, f1) point (w1=1, w2 huge): the
+      turnaround and cost of the cheapest schedule found — f2_0 = 0 whenever
+      the search finds a free one
 
     These are upper bounds on / close approximations of the true reference
     points — good enough to scale the weighted-sum objective for
@@ -716,8 +721,39 @@ def heuristic_weighted_reference_points(
               xover_mode=2)
     _, f1_T, _, _, _ = _weighted_raw(inst, 1.0, 0.0, 1e18, **kw)
     _, _, f2_T, _, _ = _weighted_raw(inst, 1e6, 1.0, f1_T + 0.5, **kw)
-    _, f1_0, _, _, _ = _weighted_raw(inst, 1.0, 1e6, 1e18, **kw)
-    return float(f1_T), float(f2_T), float(f1_0)
+    _, f1_0, f2_0, _, _ = _weighted_raw(inst, 1.0, 1e6, 1e18, **kw)
+    return float(f1_T), float(f2_T), float(f1_0), float(f2_0)
+
+
+def heuristic_weighted_reference_points(
+    inst: Instance, *, seed: int = 42, n_threads: int = 0,
+    pop_size: int = 24, n_gen: int = 40, ls_moves: int = 6,
+    restart_patience: int = 6, shortlist: int = 24,
+) -> tuple[float, float, float]:
+    """``(f1_T, f2_T, f1_0)`` of :func:`heuristic_weighted_sum_reference`,
+    as ``pareto._reference_points`` is of ``pareto.weighted_sum_reference``."""
+    return heuristic_weighted_sum_reference(
+        inst, seed=seed, n_threads=n_threads, pop_size=pop_size, n_gen=n_gen,
+        ls_moves=ls_moves, restart_patience=restart_patience, shortlist=shortlist,
+    )[:3]
+
+
+def _heuristic_weights(inst, lam, f1_T, f2_T, f1_0, f2_0, *, seed, n_threads):
+    """``((f1_T, f2_T, f1_0, f2_0), (w1, w2, f1_cap))`` for the C++ weighted
+    solvers: the weights of model.weighted_sum_terms (its offset cannot change
+    a heuristic's ranking), or min f2 when degenerate
+    (model.weighted_sum_degenerate). Missing reference points — any of f1_T,
+    f2_T, f1_0 None — are all estimated by
+    :func:`heuristic_weighted_sum_reference`, f2_0 included."""
+    if f1_T is None or f2_T is None or f1_0 is None:
+        # rough reference points only need light settings, not the solver's
+        f1_T, f2_T, f1_0, f2_0 = heuristic_weighted_sum_reference(
+            inst, seed=seed, n_threads=n_threads,
+        )
+    refs = (f1_T, f2_T, f1_0, f2_0)
+    if f1_0 <= f1_T + 1e-8 or f2_T - f2_0 <= 1e-8:
+        return refs, (1e-6, 1.0, f1_0)
+    return refs, (lam / (f1_0 - f1_T), (1.0 - lam) / (f2_T - f2_0), f1_0)
 
 
 def weighted_solve(
@@ -727,6 +763,7 @@ def weighted_solve(
     f1_T: float | None = None,
     f2_T: float | None = None,
     f1_0: float | None = None,
+    f2_0: float = 0.0,
     pop_size: int = 32,
     n_gen: int = 60,
     seed: int = 42,
@@ -752,7 +789,7 @@ def weighted_solve(
     964-job instance, ~0.3 pp on the 3340-job one.
 
     Solves the *same* normalised objective as :func:`model.solve_weighted_sum`
-    — ``(lam/(f1_0−f1_T))·f1 + ((1−lam)/f2_T)·f2`` subject to ``f1 ≤ f1_0`` —
+    — ``(lam/(f1_0−f1_T))·f1 + ((1−lam)/(f2_T−f2_0))·f2`` subject to ``f1 ≤ f1_0`` —
     but with a memetic metaheuristic (see ``_ext/weighted.hpp``): a small
     population of per-job type-assignment vectors, each decoded to a schedule
     by the SPT list-scheduling repair plus (``decode_order=1``, the default) an
@@ -773,9 +810,12 @@ def weighted_solve(
     ----------
     lam              : trade-off weight in ``[0, 1]`` (1 → pure turnaround).
     f1_T, f2_T, f1_0 : weighted-sum reference points (see
-                       ``pareto._reference_points``). If any is ``None`` all
-                       three are estimated via
-                       :func:`heuristic_weighted_reference_points`.
+                       ``pareto.weighted_sum_reference``). If any is ``None``
+                       all four are estimated via
+                       :func:`heuristic_weighted_sum_reference`.
+    f2_0             : cost at the cheap end (``f2_0`` of
+                       ``pareto.weighted_sum_reference``); 0 unless no
+                       schedule is free.
     pop_size, n_gen  : memetic-GA population and generation count.
     ls_moves         : max improving type-flips per local-search call
                        (``·3`` for the final polish).
@@ -810,23 +850,12 @@ def weighted_solve(
     if not 0.0 <= lam <= 1.0:
         raise ValueError("lam must be in [0, 1]")
 
-    if f1_T is None or f2_T is None or f1_0 is None:
-        # rough reference points only need light settings, not weighted_solve's
-        f1_T, f2_T, f1_0 = heuristic_weighted_reference_points(
-            inst, seed=seed, n_threads=n_threads,
-        )
-
-    degenerate = f1_0 <= f1_T + 1e-8 or f2_T <= 1e-8
-    if degenerate:
-        w1, w2, f1_cap = 1e-6, 1.0, f1_0
-    else:
-        w1 = lam / (f1_0 - f1_T)
-        w2 = (1.0 - lam) / f2_T
-        f1_cap = f1_0
+    (f1_T, f2_T, f1_0, f2_0), (w1, w2, f1_cap) = _heuristic_weights(
+        inst, lam, f1_T, f2_T, f1_0, f2_0, seed=seed, n_threads=n_threads)
 
     extra = None
     if lp_seed:
-        extra = _lp_relaxation_seeds(inst, [lam], f1_T=f1_T, f2_T=f2_T, f1_0=f1_0)
+        extra = _lp_relaxation_seeds(inst, [lam], f1_T=f1_T, f2_T=f2_T, f1_0=f1_0, f2_0=f2_0)
 
     asgn, f1, f2, _g, _ls = _weighted_raw(
         inst, w1, w2, f1_cap, pop_size=pop_size, n_gen=n_gen, seed=seed,
@@ -845,6 +874,7 @@ def weighted_solve_brkga(
     f1_T: float | None = None,
     f2_T: float | None = None,
     f1_0: float | None = None,
+    f2_0: float = 0.0,
     pop_size: int = 48,
     n_gen: int = 100,
     seed: int = 42,
@@ -875,22 +905,12 @@ def weighted_solve_brkga(
         raise ValueError("lam must be in [0, 1]")
     _require_ext()
 
-    if f1_T is None or f2_T is None or f1_0 is None:
-        f1_T, f2_T, f1_0 = heuristic_weighted_reference_points(
-            inst, seed=seed, n_threads=n_threads,
-        )
-
-    degenerate = f1_0 <= f1_T + 1e-8 or f2_T <= 1e-8
-    if degenerate:
-        w1, w2, f1_cap = 1e-6, 1.0, f1_0
-    else:
-        w1 = lam / (f1_0 - f1_T)
-        w2 = (1.0 - lam) / f2_T
-        f1_cap = f1_0
+    (f1_T, f2_T, f1_0, f2_0), (w1, w2, f1_cap) = _heuristic_weights(
+        inst, lam, f1_T, f2_T, f1_0, f2_0, seed=seed, n_threads=n_threads)
 
     extra = None
     if lp_seed:
-        extra = _lp_relaxation_seeds(inst, [lam], f1_T=f1_T, f2_T=f2_T, f1_0=f1_0)
+        extra = _lp_relaxation_seeds(inst, [lam], f1_T=f1_T, f2_T=f2_T, f1_0=f1_0, f2_0=f2_0)
 
     asgn, f1, f2, _g, _dec = _ext.weighted_brkga(
         n_jobs       = len(inst.jobs),
@@ -934,6 +954,7 @@ def weighted_solve_dispatch(
     f1_T: float | None = None,
     f2_T: float | None = None,
     f1_0: float | None = None,
+    f2_0: float = 0.0,
     K: int = 256,
     max_iters: int = 100_000,
     n_kicks: int = 60,
@@ -973,14 +994,8 @@ def weighted_solve_dispatch(
     if not 0.0 <= lam <= 1.0:
         raise ValueError("lam must be in [0, 1]")
     _require_ext()
-    if f1_T is None or f2_T is None or f1_0 is None:
-        f1_T, f2_T, f1_0 = heuristic_weighted_reference_points(
-            inst, seed=seed, n_threads=n_threads,
-        )
-    if f1_0 <= f1_T + 1e-8 or f2_T <= 1e-8:
-        w1, w2, f1_cap = 1e-6, 1.0, f1_0
-    else:
-        w1, w2, f1_cap = lam / (f1_0 - f1_T), (1.0 - lam) / f2_T, f1_0
+    _, (w1, w2, f1_cap) = _heuristic_weights(
+        inst, lam, f1_T, f2_T, f1_0, f2_0, seed=seed, n_threads=n_threads)
     asgn, f1, f2, _g, stats = _ext.weighted_dispatch(
         H=inst.horizon, jobs=_dispatch_jobs(inst), type_cap=_type_cap(inst),
         init_occ=_init_occ(inst), w1=w1, w2=w2, f1_cap=f1_cap, seed=seed,
@@ -998,6 +1013,7 @@ def weighted_solve_memetic(
     f1_T: float | None = None,
     f2_T: float | None = None,
     f1_0: float | None = None,
+    f2_0: float = 0.0,
     pop_size: int = 32,
     n_gen: int = 60,
     seed: int = 42,
@@ -1046,14 +1062,8 @@ def weighted_solve_memetic(
     if not 0.0 <= lam <= 1.0:
         raise ValueError("lam must be in [0, 1]")
     _require_ext()
-    if f1_T is None or f2_T is None or f1_0 is None:
-        f1_T, f2_T, f1_0 = heuristic_weighted_reference_points(
-            inst, seed=seed, n_threads=n_threads,
-        )
-    if f1_0 <= f1_T + 1e-8 or f2_T <= 1e-8:
-        w1, w2, f1_cap = 1e-6, 1.0, f1_0
-    else:
-        w1, w2, f1_cap = lam / (f1_0 - f1_T), (1.0 - lam) / f2_T, f1_0
+    _, (w1, w2, f1_cap) = _heuristic_weights(
+        inst, lam, f1_T, f2_T, f1_0, f2_0, seed=seed, n_threads=n_threads)
     asgn, f1, f2, _g, stats = _ext.weighted_memetic(
         n_jobs=len(inst.jobs), job_slots=_job_slots_ext(inst), type_cap=_type_cap(inst), init_occ=_init_occ(inst), H=inst.horizon,
         jobs=_dispatch_jobs(inst), w1=w1, w2=w2, f1_cap=f1_cap, pop_size=pop_size,

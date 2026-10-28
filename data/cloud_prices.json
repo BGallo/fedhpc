@@ -1,0 +1,105 @@
+{
+ "_info": {
+  "description": "On-demand Linux list prices (USD/hour) of the cloud types used by fedhpc.instance_gen; written by scripts/fetch_cloud_prices.py.",
+  "fetched_at": "2026-10-28T12:06:21+00:00",
+  "aws_source": "https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/ec2/USD/current/ec2-ondemand-without-sec-sel/US%20East%20%28N.%20Virginia%29/Linux/index.json",
+  "azure_source": "https://prices.azure.com/api/retail/prices (eastus, Consumption, Linux)"
+ },
+ "prices": {
+  "Standard_D128s_v6": {
+   "provider": "azure",
+   "sku": "Standard_D128s_v6",
+   "region": "eastus",
+   "vcpu": 128,
+   "mem_gib": 512.0,
+   "usd_per_hour": 6.451,
+   "meter_id": "098a37af-2bcf-5e4c-96cc-2559d67cb384",
+   "effective_start": "2024-10-01T00:00:00Z"
+  },
+  "Standard_D32s_v5": {
+   "provider": "azure",
+   "sku": "Standard_D32s_v5",
+   "region": "eastus",
+   "vcpu": 32,
+   "mem_gib": 128.0,
+   "usd_per_hour": 1.536,
+   "meter_id": "28244f6b-a2de-5875-b843-0f47a351ebbd",
+   "effective_start": "2021-11-01T00:00:00Z"
+  },
+  "Standard_D64s_v5": {
+   "provider": "azure",
+   "sku": "Standard_D64s_v5",
+   "region": "eastus",
+   "vcpu": 64,
+   "mem_gib": 256.0,
+   "usd_per_hour": 3.072,
+   "meter_id": "5a49de84-e933-56ed-9268-f5f4945cca38",
+   "effective_start": "2021-11-01T00:00:00Z"
+  },
+  "Standard_D96s_v5": {
+   "provider": "azure",
+   "sku": "Standard_D96s_v5",
+   "region": "eastus",
+   "vcpu": 96,
+   "mem_gib": 384.0,
+   "usd_per_hour": 4.608,
+   "meter_id": "bd0669fc-5bde-56af-8b51-eb05de80a33b",
+   "effective_start": "2021-11-01T00:00:00Z"
+  },
+  "Standard_E64s_v5": {
+   "provider": "azure",
+   "sku": "Standard_E64s_v5",
+   "region": "eastus",
+   "vcpu": 64,
+   "mem_gib": 512.0,
+   "usd_per_hour": 4.032,
+   "meter_id": "28c8d186-cb1d-5389-9b69-92584aba650f",
+   "effective_start": "2021-11-01T00:00:00Z"
+  },
+  "m6i.16xlarge": {
+   "provider": "aws",
+   "sku": "m6i.16xlarge",
+   "region": "us-east-1",
+   "vcpu": 64,
+   "mem_gib": 256.0,
+   "usd_per_hour": 3.072,
+   "rate_code": "PNGKEJBAR4FVYCR3.JRTCKXETXF.6YS6EN2CT7"
+  },
+  "m6i.24xlarge": {
+   "provider": "aws",
+   "sku": "m6i.24xlarge",
+   "region": "us-east-1",
+   "vcpu": 96,
+   "mem_gib": 384.0,
+   "usd_per_hour": 4.608,
+   "rate_code": "UQHX883TA56R4TQN.JRTCKXETXF.6YS6EN2CT7"
+  },
+  "m6i.32xlarge": {
+   "provider": "aws",
+   "sku": "m6i.32xlarge",
+   "region": "us-east-1",
+   "vcpu": 128,
+   "mem_gib": 512.0,
+   "usd_per_hour": 6.144,
+   "rate_code": "9WSX8PP3ATU94V36.JRTCKXETXF.6YS6EN2CT7"
+  },
+  "m6i.8xlarge": {
+   "provider": "aws",
+   "sku": "m6i.8xlarge",
+   "region": "us-east-1",
+   "vcpu": 32,
+   "mem_gib": 128.0,
+   "usd_per_hour": 1.536,
+   "rate_code": "8NPUTYG479RPDVPK.JRTCKXETXF.6YS6EN2CT7"
+  },
+  "r6i.16xlarge": {
+   "provider": "aws",
+   "sku": "r6i.16xlarge",
+   "region": "us-east-1",
+   "vcpu": 64,
+   "mem_gib": 512.0,
+   "usd_per_hour": 4.032,
+   "rate_code": "J4EBNS2ZR7N8TB8T.JRTCKXETXF.6YS6EN2CT7"
+  }
+ }
+}

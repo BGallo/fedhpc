@@ -1059,10 +1059,12 @@ class TestSchedRepair:
 from fedhpc.model import solve_weighted_sum
 from fedhpc.moea import (
     heuristic_weighted_reference_points,
+    heuristic_weighted_sum_reference,
     weighted_solve,
     weighted_solve_brkga,
+    weighted_solve_dispatch,
 )
-from fedhpc.pareto import _reference_points
+from fedhpc.pareto import _reference_points, weighted_sum_reference
 
 
 class TestWeightedSolve:
@@ -1124,6 +1126,47 @@ class TestWeightedSolve:
                 assert not dominated, (
                     f"lam={lam}: ({s.f1},{s.f2}) dominated by known ({kf1},{kf2})"
                 )
+
+    @staticmethod
+    def _no_free_inst():
+        """known_pareto_inst with a paid on-prem type: no schedule is free, so
+        f2_0 = 20 (both jobs on-prem). Front (10, 100), (15, 60), (30, 20)."""
+        inst = Instance(
+            jobs=[Job(id=i, arrival=0, exec_time=10, io_volume=0, cpu=2, mem=4, stor=20)
+                  for i in (0, 1)],
+            instance_types=[
+                InstanceType(id=0, kind="on-prem", perf=1.0, io_time=0.0, deploy=0,
+                             cost_io=0.0, cost_vm=1.0, cost_stor=0.0,
+                             cpu=4, mem=8, stor=50, capacity=1),
+                InstanceType(id=1, kind="cloud", perf=2.0, io_time=0.0, deploy=0,
+                             cost_io=0.0, cost_vm=10.0, cost_stor=0.0,
+                             cpu=4, mem=8, stor=50, capacity=None),
+            ],
+            horizon=30,
+        )
+        inst.build()
+        return inst
+
+    def test_f2_0_normalises_like_the_mip(self):
+        """At λ = 0.35, ĝ with f2_0 = 20 picks (30, 20); dividing by f2_T
+        instead (f2_0 ignored) would pick (15, 60). Every heuristic must
+        follow the exact solve."""
+        inst = self._no_free_inst()
+        (f1_T, f2_T, f1_0, f2_0), _ = weighted_sum_reference(
+            inst, min_cost_reference=True, OutputFlag=0)
+        assert (f1_T, f2_T, f1_0, f2_0) == (10.0, 100.0, 30.0, 20.0)
+        refs = dict(f1_T=f1_T, f2_T=f2_T, f1_0=f1_0, f2_0=f2_0)
+        ex = solve_weighted_sum(inst, 0.35, f1_T, f2_T, f1_0, f2_0=f2_0, OutputFlag=0)
+        assert (ex.f1, ex.f2) == (30.0, 20.0)
+        for s in (weighted_solve(inst, 0.35, pop_size=16, n_gen=20, **refs),
+                  weighted_solve_brkga(inst, 0.35, pop_size=16, n_gen=20, **refs),
+                  weighted_solve_dispatch(inst, 0.35, **refs),
+                  weighted_solve(inst, 0.35, pop_size=16, n_gen=20)):  # estimated refs
+            assert (s.f1, s.f2) == (30.0, 20.0)
+
+    def test_heuristic_reference_estimates_f2_0(self):
+        assert heuristic_weighted_sum_reference(
+            self._no_free_inst(), pop_size=16, n_gen=20) == (10.0, 100.0, 30.0, 20.0)
 
     def test_heuristic_reference_points_bracket_the_front(self, known_pareto_inst):
         f1_T, f2_T, f1_0 = heuristic_weighted_reference_points(

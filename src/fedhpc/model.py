@@ -191,14 +191,14 @@ def _solve(
     secondary: str | None = None,
     *,
     hint_objective=None,
-    bound: tuple[str, float, str] | None = None,
+    bounds: tuple[tuple[str, float, str], ...] = (),
 ) -> Solution:
     """Build a fresh model and minimise ``primary``; with ``secondary``, then
     fix primary at its optimum and minimise secondary (lex-min).
 
     ``primary``/``secondary`` are ``"f1"``/``"f2"``; ``primary`` may also be a
-    callable ``(f1_expr, f2_expr) -> expr``. ``bound=(which, value, name)``
-    adds ``which <= value`` as an integer row (Formulation.bound_constr). ``hint_objective`` is passed to
+    callable ``(f1_expr, f2_expr) -> expr``. Each ``(which, value, name)`` of
+    ``bounds`` adds ``which <= value`` as an integer row (Formulation.bound_constr). ``hint_objective`` is passed to
     :meth:`Formulation.build` (it must be valid for the problem solved).
 
     For ``"f1"``/``"f2"`` objectives each phase runs with
@@ -217,8 +217,7 @@ def _solve(
     if hint is not None:
         set_mip_start(inst, x, hint)
     exprs = {"f1": fmt.f1_expr(inst, x), "f2": fmt.f2_expr(inst, x)}
-    if bound is not None:
-        which, value, name = bound
+    for which, value, name in bounds:
         mdl.addConstr(fmt.bound_constr(inst, x, which, value), name=name)
 
     primary_expr = primary(exprs["f1"], exprs["f2"]) if callable(primary) else exprs[primary]
@@ -294,6 +293,30 @@ def weighted_sum_degenerate(f1_T: float, f2_T: float, f1_0: float, f2_0: float =
     return f1_0 <= f1_T + 1e-8 or f2_T - f2_0 <= 1e-8
 
 
+def weighted_sum_terms(lam: float, f1_T: float, f2_T: float, f1_0: float,
+                       f2_0: float = 0.0) -> tuple[float, float, float]:
+    """``(w1, w2, c)`` with w1·f1 + w2·f2 + c = λ·f̂1 + (1−λ)·f̂2, where
+    f̂1 = (f1 − f1_T)/(f1_0 − f1_T) and f̂2 = (f2 − f2_0)/(f2_T − f2_0).
+
+    The constant c matters to Gurobi, not to the optimum: MIPGap is relative
+    to the objective, and without c a front far from zero turnaround
+    (f1_T ≫ f1_0 − f1_T) inflates it — 34× on pos_congestion at λ = 0.75,
+    where a schedule 0.009 dearer than (f1_T, f2_T) passed as optimal.
+    """
+    w1 = lam / (f1_0 - f1_T)
+    w2 = (1 - lam) / (f2_T - f2_0)
+    return w1, w2, -(w1 * f1_T + w2 * f2_0)
+
+
+def weighted_sum_scale(inst: Instance, w1: float, w2: float) -> float:
+    """Factor Gurobi's copy of ĝ is multiplied by: one step of the coarser
+    objective (w1·1 or w2·δ) becomes 1. Unscaled, ĝ's cost coefficients
+    (w2·c, ~3e-7 on pos_congestion) sit below OptimalityTol (1e-6): the LP
+    reads cost differences as zero and branch and bound prunes the optimum,
+    even at MIPGap 0. The relative gap is unchanged by the factor."""
+    return 1.0 / max(w1 * objective_step(inst, "f1"), w2 * objective_step(inst, "f2"))
+
+
 def solve_weighted_sum(
     inst: Instance,
     lam: float,
@@ -317,9 +340,21 @@ def solve_weighted_sum(
                 ``pareto.weighted_sum_reference``). f̂2 = (f2 − f2_0)/(f2_T − f2_0)
                 differs from f2/(f2_T − f2_0) by a constant only.
 
+    The objective is the normalised ĝ = λ·f̂1 + (1−λ)·f̂2 itself, constant
+    included (:func:`weighted_sum_terms`), so Gurobi's relative MIPGap is on
+    ĝ and the returned ``objective`` is ĝ ∈ [0, 1]; Gurobi sees it times
+    :func:`weighted_sum_scale`. Besides f1 ≤ f1_0 the
+    model carries f2 ≤ f2_T: every Pareto point satisfies both, so they cut
+    no optimum, but a gap-tolerant incumbent dominated by (f1_T, f2_T) is
+    excluded.
+
     Degenerate cases (Section 1.11, :func:`weighted_sum_degenerate`):
         f1_0 == f1_T  → no turnaround trade-off; minimise f2 subject to f1 ≤ f1_0.
         f2_T == f2_0  → implied by the above; same handling.
+
+    λ = 1 gives cost no weight, so any minimum-turnaround schedule would do,
+    however dear: it is solved as the lex-min (f1, f2) of :func:`solve_f1`
+    instead, whose optimum is (f1_T, f2_T).
 
     ``hint`` — an optional prior/heuristic Solution used to seed Gurobi's MIP
     start; see :func:`solve_f1`.
@@ -328,14 +363,22 @@ def solve_weighted_sum(
         raise ValueError("lam must be in [0, 1]")
     if weighted_sum_degenerate(f1_T, f2_T, f1_0, f2_0):
         # No turnaround/cost trade-off exists; minimise cost only
-        weights, primary = None, "f2"
-    else:
-        weights = (lam / (f1_0 - f1_T), (1 - lam) / (f2_T - f2_0))
-        def primary(f1, f2):
-            return weights[0] * f1 + weights[1] * f2
-    # Restrict to Pareto-relevant region (eq. 34)
-    return _solve(inst, formulation, hint, params, primary, hint_objective=weights,
-                  bound=("f1", f1_0, "pareto_region"))
+        return _solve(inst, formulation, hint, params, "f2",
+                      bounds=[("f1", f1_0, "pareto_region")])
+    w1, w2, c = weighted_sum_terms(lam, f1_T, f2_T, f1_0, f2_0)
+    if lam == 1.0:
+        sol = solve_f1(inst, formulation, hint, **params)
+        return sol if sol.f1 is None else replace(sol, objective=w1 * sol.f1 + c)
+
+    scale = weighted_sum_scale(inst, w1, w2)
+
+    def primary(f1, f2):
+        return scale * (w1 * f1 + w2 * f2 + c)
+    # Restrict to the Pareto-relevant box (eq. 34): valid for λ < 1, whose
+    # optima are Pareto optimal (λ > 0) or cost f2_0 (λ = 0)
+    sol = _solve(inst, formulation, hint, params, primary, hint_objective=(w1, w2),
+                 bounds=[("f1", f1_0, "pareto_region"), ("f2", f2_T, "pareto_region_f2")])
+    return sol if sol.objective is None else replace(sol, objective=sol.objective / scale)
 
 
 def solve_epsilon_cost(
@@ -350,7 +393,7 @@ def solve_epsilon_cost(
     ``hint`` — an optional prior/heuristic Solution used to seed Gurobi's MIP
     start; see :func:`solve_f1`.
     """
-    return _solve(inst, formulation, hint, params, "f1", bound=("f2", epsilon, "eps_cost"))
+    return _solve(inst, formulation, hint, params, "f1", bounds=[("f2", epsilon, "eps_cost")])
 
 
 def solve_epsilon_turnaround(
@@ -365,7 +408,7 @@ def solve_epsilon_turnaround(
     ``hint`` — an optional prior/heuristic Solution used to seed Gurobi's MIP
     start; see :func:`solve_f1`.
     """
-    return _solve(inst, formulation, hint, params, "f2", bound=("f1", epsilon, "eps_turnaround"))
+    return _solve(inst, formulation, hint, params, "f2", bounds=[("f1", epsilon, "eps_turnaround")])
 
 
 def solve_true_pareto_step(
@@ -387,4 +430,4 @@ def solve_true_pareto_step(
     ``hint`` — an optional prior/heuristic Solution used to seed Gurobi's MIP
     start; see :func:`solve_f1`.
     """
-    return _solve(inst, formulation, hint, params, "f2", "f1", bound=("f1", f1_bound, "eps_f1"))
+    return _solve(inst, formulation, hint, params, "f2", "f1", bounds=[("f1", f1_bound, "eps_f1")])

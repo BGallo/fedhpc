@@ -155,7 +155,7 @@ It runs on every MIP extraction (`model._extract`, which also rejects a job star
 
 ```
 fedhpc/
-├── data/                     # Real-trace instances (see "Instances" below)
+├── data/                     # Real-trace instances, cloud prices, generated/ (see "Instances")
 ├── src/fedhpc/
 │   ├── data.py               # Instance data structures and derived parameters
 │   ├── formulations.py       # SpaceTime / Occupancy MIP builders + dominance reductions
@@ -164,6 +164,7 @@ fedhpc/
 │   ├── bpc.py                # Branch-price-and-cut exact engine
 │   ├── moea.py               # NSGA-II / NSGA-III / MOEA/D and weighted-sum heuristics
 │   ├── baselines.py          # List-scheduling baselines (greedy, threshold bursting)
+│   ├── instance_gen.py       # Permutative generated instance classes A / B
 │   ├── metrics.py, viz.py    # Front indicators, plots, reports
 │   ├── cg_bound.py, ilssp.py, rm_benchmark.py  # Rm||TWCT+TMUC benchmark
 │   ├── cli.py                # Entry point
@@ -218,6 +219,7 @@ uv run fedhpc --instance $I --method f1 --json
 - `data/pos_congestion_known_runtime_offline_10min.json` — 3340 jobs, 16 types (4 on-prem + 12 on-demand cloud), 1525 running jobs, 288 ten-minute slots. The stress instance: tests that exercise scale use it.
 - `data/fedhpc_known_runtime_offline_10min.json`, `data/mit_supercloud_*.json` — further real-trace instances.
 - `data/reference_points.json` — exact weighted-sum reference points `(f1_T, f2_T, f1_0, f2_0)` per instance, each with the SHA-256 of the instance file and the cost resolution it was computed with. Load with `fedhpc.data.reference_points(path)`, which refuses an entry whose instance or resolution has changed. Recompute with `uv run python scripts/compute_reference_points.py [INSTANCE ...]`. The experiment scripts read this table instead of hard-coding values.
+- **Generated classes** (`src/fedhpc/instance_gen.py`): a permutative family built from the two real workloads above (jobs, horizon and slot length unchanged). Class `A` has two on-prem types (40c/300 GB and 64c/480 GB, as csr1 / csr3), each with one AWS equivalent (m6i.24xlarge, m6i.32xlarge). Class `B` has five (16c/128, 32c/256, 40c/300, 64c/480, 32c/512 GB), each with an AWS and an Azure equivalent (m6i/r6i ↔ Dsv5/Esv5; D128s_v6 for the 64-core node). Per on-prem type the count `N_m` is any integer in [100, 500] (default levels 100/300/500) and the load at `t = 0` is `F` free, `H` half (⌊N_m/2⌋ running jobs) or `E` entirely full. Running-job end times are drawn from the workload's own running-job end distribution, nested across loads. A name such as `B_pos_n100-300-500-100-300_lFHEEH` fully determines its instance: `instance_gen.build(name)`. Specs that describe the same problem are collapsed: on-prem types differ only in which jobs they fit, so a type no job fits is irrelevant (c16 for `fedhpc`) and types fitting the same jobs are interchangeable (c32 and m32); `instance_gen.canonical` picks one representative and the enumerations yield representatives only. Class A's full factorial has 162 distinct instances; class B's 118 098 combinations collapse to 36 450, so `scripts/build_generated_instances.py` writes A in full plus B's pairwise-covering set (an orthogonal array over its 10 factors, plus uniform corners: 70) to `data/generated/` (untracked; `manifest.json` holds each file's SHA-256). Cloud prices are on-demand Linux list prices (AWS us-east-1, Azure eastus) in `data/cloud_prices.json`, fetched from the AWS price map and the Azure Retail Prices API by `scripts/fetch_cloud_prices.py` (raw responses in `data/cloud_prices_raw/`). `tests/test_instance_gen.py` checks structure, reproducibility and baseline feasibility on all of these, plus exact properties: min turnaround is configuration-independent, and the cost of reaching it, like the turnaround at minimum cost, grows with load.
 - Tests that need a small instance use the *trap instances* defined in `tests/conftest.py` (7 and 12 jobs). They are small but hard. The optimum hinges on which jobs wait for a scarce fat node or for a running job to free capacity. Every list-scheduling baseline lands at least 9% (`trap_small`) and 14% (`trap_medium`) above the exact minimum turnaround. `tests/test_trap_instances.py` pins this property.
 
 ## Continuous integration
