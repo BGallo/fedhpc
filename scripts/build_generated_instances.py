@@ -1,16 +1,17 @@
 """Write generated instances (fedhpc.instance_gen) to data/generated/.
 
-Default set: class A's full factorial (2 workloads × 3² counts × 3² loads =
-162) and class B's pairwise-covering set (an orthogonal array over its 10
-factors plus the uniform corners, per workload = 70) — B's full factorial
-(118 098 instances) is reachable by name through ``instance_gen.build``.
+Default set: class A's full factorial (2 workloads × 3² counts × 3 loads ×
+3 io levels = 162) and class B's pairwise-covering set (an orthogonal array
+over its k + 2 factors plus the 27 uniform corners, per workload; k = 4
+on-prem types for fedhpc, 5 for pos = 104) — B's full factorial (1,944
+distinct instances) is reachable by name through ``instance_gen.build``.
 
     uv run python scripts/build_generated_instances.py                # default set
     uv run python scripts/build_generated_instances.py --full B       # B's full factorial
-    uv run python scripts/build_generated_instances.py --name B_pos_n100-200-300-400-500_lFHEFH
+    uv run python scripts/build_generated_instances.py --name B_pos_n100-200-300-400-500_lH_iM
 
 The files are deterministic functions of their names and of
-data/cloud_prices.json; manifest.json records each file's sha256 so a
+data/cloud_prices.json and data/job_classes_<workload>.json; manifest.json records each file's sha256 so a
 rebuild can be checked against it.
 """
 from __future__ import annotations
@@ -56,7 +57,7 @@ def main() -> None:
         raw = json.dumps(g.generate(spec), separators=(",", ":")).encode()
         (args.out / f"{name}.json").write_bytes(raw)
         manifest[name] = dict(cls=spec.cls, workload=spec.workload, counts=list(spec.counts),
-                              loads="".join(spec.loads), sha256=hashlib.sha256(raw).hexdigest())
+                              load=spec.load, io=spec.io, sha256=hashlib.sha256(raw).hexdigest())
     manifest_path.write_text(json.dumps(dict(sorted(manifest.items())), indent=1) + "\n")
     print(f"wrote {len(specs)} instances to {args.out} ({len(manifest)} in manifest)")
 

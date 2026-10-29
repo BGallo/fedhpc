@@ -13,7 +13,12 @@ Per instance, one JSON line in results/generated_bench/<run>.jsonl:
 Instances are solved in parallel worker processes, each pinned to THREADS
 Gurobi / heuristic threads so the timings are comparable.
 
-    uv run python scripts/bench_generated.py [--names-from manifest] [--workers 4]
+``--no-reductions`` builds every Gurobi model without the SpaceTime dominance
+reductions (R1 collapse_unbounded, R2 pareto_unbounded, R3
+rejection_deadlines, lex_deadlines), i.e. the plain space-time network. The
+dispatch heuristic never uses them (it sees the full Instance.F).
+
+    uv run python scripts/bench_generated.py [--manifest] [--workers 4] [--no-reductions]
 """
 from __future__ import annotations
 
@@ -38,24 +43,31 @@ def _g(lam, f1, f2, ref):
     return lam * (f1 - f1_T) / (f1_0 - f1_T) + (1 - lam) * f2 / f2_T
 
 
-def run_one(name: str, threads: int, time_limit: float) -> dict:
+def run_one(name: str, threads: int, time_limit: float, reductions: bool = True) -> dict:
     from fedhpc import baselines
     from fedhpc import instance_gen as g
     from fedhpc.data import Instance
+    from fedhpc.formulations import SpaceTimeFormulation
     from fedhpc.model import solve_f1, solve_f2, solve_weighted_sum
     from fedhpc.moea import weighted_solve_dispatch
+
+    fmt = SpaceTimeFormulation() if reductions else SpaceTimeFormulation(
+        collapse_unbounded=False, pareto_unbounded=False,
+        rejection_deadlines=False, lex_deadlines=False)
 
     path = g.DATA / "generated" / f"{name}.json"
     inst = Instance.from_file(path) if path.exists() else g.build(name)
     spec = g.InstanceSpec.parse(name)
     grb = dict(OutputFlag=0, Threads=threads, TimeLimit=time_limit, MIPGap=0)
     rec = dict(name=name, cls=spec.cls, workload=spec.workload, counts=list(spec.counts),
-               loads="".join(spec.loads), n_jobs=len(inst.jobs),
-               n_running=sum(inst.n_running.values()), onprem_nodes=sum(spec.counts))
+               load=spec.load, io=spec.io, n_jobs=len(inst.jobs),
+               io_gb=sum(j.io_volume for j in inst.jobs),
+               n_running=sum(inst.n_running.values()), onprem_nodes=sum(spec.counts),
+               reductions=reductions)
 
-    t = time.perf_counter(); s1 = solve_f1(inst, **grb)
+    t = time.perf_counter(); s1 = solve_f1(inst, formulation=fmt, **grb)
     rec["lex_f1"] = dict(status=s1.status, f1=s1.f1, f2=s1.f2, t=time.perf_counter() - t)
-    t = time.perf_counter(); s2 = solve_f2(inst, hint=None, **grb)
+    t = time.perf_counter(); s2 = solve_f2(inst, formulation=fmt, hint=None, **grb)
     rec["lex_f2"] = dict(status=s2.status, f1=s2.f1, f2=s2.f2, t=time.perf_counter() - t)
     for s in (s1, s2):
         inst.check_schedule(s.assignment)
@@ -79,7 +91,7 @@ def run_one(name: str, threads: int, time_limit: float) -> dict:
     for lam in LAMS:
         r = {}
         t = time.perf_counter()
-        sw = solve_weighted_sum(inst, lam, *ref, f2_0=s2.f2, **grb)
+        sw = solve_weighted_sum(inst, lam, *ref, formulation=fmt, f2_0=s2.f2, **grb)
         r["gurobi"] = dict(status=sw.status, f1=sw.f1, f2=sw.f2, g=_g(lam, sw.f1, sw.f2, ref),
                            t=time.perf_counter() - t)
         inst.check_schedule(sw.assignment)
@@ -103,8 +115,14 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--time-limit", type=float, default=600)
-    ap.add_argument("--out", type=Path, default=ROOT / "results" / "generated_bench" / "bench.jsonl")
+    ap.add_argument("--no-reductions", action="store_true",
+                    help="plain SpaceTime models (no R1/R2/R3/lex reductions)")
+    ap.add_argument("--out", type=Path, default=None,
+                    help="default results/generated_bench/bench[_noreduc].jsonl")
     args = ap.parse_args()
+    if args.out is None:
+        args.out = ROOT / "results" / "generated_bench" / (
+            "bench_noreduc.jsonl" if args.no_reductions else "bench.jsonl")
     names = list(args.names)
     if args.manifest:
         names += sorted(json.loads((ROOT / "data" / "generated" / "manifest.json").read_text()))
@@ -117,7 +135,7 @@ def main() -> None:
     todo.sort(key=lambda n: (("pos" not in n), not n.startswith("B"), n))
     print(f"{len(todo)} to run ({len(done)} already in {args.out.name})", flush=True)
     with ProcessPoolExecutor(args.workers) as ex, open(args.out, "a") as f:
-        futs = {ex.submit(run_one, n, args.threads, args.time_limit): n for n in todo}
+        futs = {ex.submit(run_one, n, args.threads, args.time_limit, not args.no_reductions): n for n in todo}
         for k, fut in enumerate(as_completed(futs), 1):
             n = futs[fut]
             try:

@@ -1,5 +1,5 @@
 """Permutative instance generator: two machine catalogues × two real workloads ×
-per-type machine counts × per-type initial load.
+per-type machine counts × initial load × result-data level.
 
 Every instance is named by its :class:`InstanceSpec`, and the name alone
 determines the instance (``generate(InstanceSpec.parse(name))`` is
@@ -21,11 +21,21 @@ SMT) and memory cover the on-prem node. Azure has no 128-vCPU Dsv5, so the
 cost per slot. Same-shape Ice Lake sizes are priced identically by both
 providers; only D128s_v6 differs from m6i.32xlarge.
 
-Factors (per on-prem type)
---------------------------
-count  ``N_m`` — any integer in [100, 500]; the default levels are 100/300/500.
-load   at t = 0 — ``F`` free (no running jobs), ``H`` half full (⌊N_m/2⌋
-       running jobs) or ``E`` entirely full (N_m running jobs).
+Factors
+-------
+count  ``N_m`` per on-prem type — any integer in [100, 500]; the default
+       levels are 100/300/500.
+load   at t = 0, one level for every on-prem type — ``F`` free (no running
+       jobs), ``H`` half full (⌊N_m/2⌋ running jobs per type) or ``E``
+       entirely full (N_m running jobs per type).
+io     result-data level ``L`` / ``M`` / ``H`` (:mod:`fedhpc.io_model`): the
+       output volume ι_j each job must bring home if it runs in the cloud,
+       priced at the provider's internet egress (κ^IO) and moved at the
+       cloud disk's baseline rate (τ^IO). On-prem types have κ^IO = τ^IO = 0.
+
+Load and io apply to the whole instance rather than per type, which keeps the
+space small enough to cover every io level (the real cluster's load is a
+snapshot of one queue, not set per partition).
 
 Running-job end times are drawn from the empirical end-time distribution of
 the workload's own ``running_jobs`` (the real cluster state of that
@@ -33,26 +43,37 @@ snapshot), with an RNG seeded by (class, workload, type group, count) only —
 not by the load — so the half-full set is the first half of the full one:
 raising a type's load only ever removes capacity.
 
+Pickable types only
+-------------------
+A type no job of the workload would ever be placed on is left out of that
+workload's instances (:func:`onprem_types`, :func:`cloud_types`):
+
+* an on-prem type no job fits (class B, ``fedhpc``: no job fits c16);
+* a cloud size that fits no job, or that is strictly dearer, for every job it
+  fits, than another size of the *same provider* (all types run at perf 1, so
+  price decides): r6i.16xlarge and E64s_v5 (m32's equivalents) lose to
+  m6i.16xlarge / D64s_v5 because no job needs more than 256 GB on 32 cores.
+  Dominance is checked within a provider so each provider keeps a complete
+  offer (D128s_v6, dearer than m6i.32xlarge, stays).
+
+So the number of counts in a spec depends on the workload: class B
+has 4 on-prem types for ``fedhpc`` (c32, c40, c64, m32) and 5 for ``pos``.
+
 Equivalent instances
 --------------------
 On-prem types differ only in which jobs they can run (all are free, perf 1,
-no deploy; the cloud types do not depend on the factors). Per workload:
+no deploy; the cloud types depend only on the io level). Types that fit
+exactly the same jobs are *interchangeable*: swapping their counts relabels
+the instance (their running jobs are drawn per group, so the swap is exact).
+In class B, c32 and m32 fit the same jobs in both workloads.
+:func:`canonical` maps a spec to its class representative (interchangeable
+types sorted), and the enumerations below yield representatives only.
 
-* a type no job fits is *irrelevant*: its count and load change nothing;
-* types that fit exactly the same jobs are *interchangeable*: swapping their
-  (count, load) pairs relabels the instance (their running jobs are drawn per
-  group, so the swap is exact).
-
-In class B, no ``fedhpc`` job fits c16, and c32 and m32 fit the same jobs in
-both workloads. :func:`canonical` maps a spec to its class representative
-(irrelevant types at the lowest count and free, interchangeable ones sorted),
-and the enumerations below yield representatives only: class B's raw 118 098
-combinations collapse to 36 450 distinct instances.
-
-Benchmark sets: class A's full factorial (162) and, for class B, the
-pairwise-covering set :func:`covering_specs` (70) — the on-prem types differ
-in shape, so which type carries which load changes the optimum and no further
-collapse is exact; the remaining B instances stay reachable by name.
+Benchmark sets: class A's full factorial (2 × 9 × 3 × 3 = 162) and, for
+class B (1,944 distinct), the pairwise-covering set :func:`covering_specs` —
+the on-prem types differ in shape, so which type has which count changes the
+optimum and no further collapse is exact; the remaining B instances stay
+reachable by name.
 
 Workloads
 ---------
@@ -72,6 +93,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+from . import io_model
 from .data import Instance
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -83,6 +105,7 @@ WORKLOADS = {
     "pos": DATA / "pos_congestion_known_runtime_offline_10min.json",
 }
 LOADS = {"F": 0.0, "H": 0.5, "E": 1.0}
+IO_LEVELS = tuple(io_model.IO_LEVELS)
 COUNT_RANGE = (100, 500)
 COUNT_LEVELS = (100, 300, 500)
 ONPREM_STOR = CLOUD_STOR = 10000
@@ -118,81 +141,110 @@ CLOUD_SKUS: list[tuple[str, str]] = sorted(
 class InstanceSpec:
     cls: str
     workload: str
-    counts: tuple[int, ...]   # N_m per on-prem type, in CLASSES[cls] order
-    loads: tuple[str, ...]    # "F" / "H" / "E" per on-prem type
+    counts: tuple[int, ...]   # N_m per on-prem type, in onprem_types() order
+    load: str                 # "F" / "H" / "E", every on-prem type
+    io: str                   # "L" / "M" / "H" result-data level
 
     def __post_init__(self):
         if self.cls not in CLASSES:
             raise ValueError(f"unknown class {self.cls!r}")
         if self.workload not in WORKLOADS:
             raise ValueError(f"unknown workload {self.workload!r}")
-        k = len(CLASSES[self.cls])
-        if len(self.counts) != k or len(self.loads) != k:
-            raise ValueError(f"class {self.cls} needs {k} counts and {k} loads")
+        k = len(onprem_types(self.cls, self.workload))
+        if len(self.counts) != k:
+            raise ValueError(f"class {self.cls} / {self.workload} needs {k} counts")
         lo, hi = COUNT_RANGE
         if not all(isinstance(n, int) and lo <= n <= hi for n in self.counts):
             raise ValueError(f"counts must be integers in [{lo}, {hi}], got {self.counts}")
-        if not all(l in LOADS for l in self.loads):
-            raise ValueError(f"loads must be among {''.join(LOADS)}, got {self.loads}")
+        if self.load not in LOADS:
+            raise ValueError(f"load must be one of {''.join(LOADS)}, got {self.load!r}")
+        if self.io not in IO_LEVELS:
+            raise ValueError(f"io must be one of {''.join(IO_LEVELS)}, got {self.io!r}")
 
     @property
     def name(self) -> str:
-        """e.g. ``A_pos_n100-500_lFE`` — round-trips through :meth:`parse`."""
+        """e.g. ``A_pos_n100-500_lE_iM`` — round-trips through :meth:`parse`."""
         return (f"{self.cls}_{self.workload}_n{'-'.join(map(str, self.counts))}"
-                f"_l{''.join(self.loads)}")
+                f"_l{self.load}_i{self.io}")
 
-    _NAME = re.compile(r"([A-Z])_([a-z]+)_n([\d-]+)_l([A-Z]+)")
+    _NAME = re.compile(r"([A-Z])_([a-z]+)_n([\d-]+)_l([A-Z])_i([A-Z])")
 
     @classmethod
     def parse(cls, name: str) -> InstanceSpec:
         m = cls._NAME.fullmatch(name)
         if not m:
             raise ValueError(f"not an instance name: {name!r}")
-        c, w, counts, loads = m.groups()
-        return cls(c, w, tuple(int(n) for n in counts.split("-")), tuple(loads))
+        c, w, counts, load, io = m.groups()
+        return cls(c, w, tuple(int(n) for n in counts.split("-")), load, io)
 
     def running_counts(self) -> tuple[int, ...]:
-        return tuple(int(n * LOADS[l]) for n, l in zip(self.counts, self.loads))
+        return tuple(int(n * LOADS[self.load]) for n in self.counts)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Equivalence
+# Pickable types and equivalence
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _fits(job: dict, cpu: float, mem: float, stor: float) -> bool:
+    return job["cpu"] <= cpu and job["mem"] <= mem and job["stor"] <= stor
+
 
 @lru_cache(maxsize=None)
-def type_groups(cls: str, workload: str) -> tuple[tuple[int, ...], tuple[tuple[int, ...], ...]]:
-    """``(irrelevant, groups)``: the on-prem type indices no job of the
-    workload fits, and the partition of the others into types that fit
-    exactly the same jobs (each group sorted, groups by first index)."""
+def onprem_types(cls: str, workload: str) -> tuple[OnPremType, ...]:
+    """``CLASSES[cls]`` without the types no job of the workload fits."""
+    jobs = _workload(workload)["jobs"]
+    return tuple(t for t in CLASSES[cls]
+                 if any(_fits(j, t.cpu, t.mem, ONPREM_STOR) for j in jobs))
+
+
+def cloud_types(cls: str, workload: str,
+                prices: dict[str, dict] | None = None) -> tuple[tuple[str, str, str], ...]:
+    """``(provider, sku, equivalent on-prem type)`` of every cloud equivalent
+    in the class that some job of the workload would pick: it fits the job
+    and no size of the same provider that fits it is strictly cheaper."""
+    prices = load_prices() if prices is None else prices
+    jobs = _workload(workload)["jobs"]
+    offer = [(p, sku, t.name) for t in CLASSES[cls] for p, sku in t.clouds]
+
+    def fits(j, sku):
+        return _fits(j, prices[sku]["vcpu"] // 2, prices[sku]["mem_gib"], CLOUD_STOR)
+
+    picked = set()
+    for j in jobs:
+        for provider in {p for p, _, _ in offer}:
+            fit = [sku for p, sku, _ in offer if p == provider and fits(j, sku)]
+            if fit:
+                best = min(prices[sku]["usd_per_hour"] for sku in fit)
+                picked.update(sku for sku in fit if prices[sku]["usd_per_hour"] == best)
+    return tuple(c for c in offer if c[1] in picked)
+
+
+@lru_cache(maxsize=None)
+def type_groups(cls: str, workload: str) -> tuple[tuple[int, ...], ...]:
+    """The partition of :func:`onprem_types` (by index) into types that fit
+    exactly the same jobs of the workload (each group sorted, groups by first
+    index)."""
     jobs = _workload(workload)["jobs"]
     by_fit: dict[frozenset, list[int]] = {}
-    for i, t in enumerate(CLASSES[cls]):
-        fit = frozenset(j["id"] for j in jobs
-                        if j["cpu"] <= t.cpu and j["mem"] <= t.mem and j["stor"] <= ONPREM_STOR)
+    for i, t in enumerate(onprem_types(cls, workload)):
+        fit = frozenset(j["id"] for j in jobs if _fits(j, t.cpu, t.mem, ONPREM_STOR))
         by_fit.setdefault(fit, []).append(i)
-    irrelevant = tuple(by_fit.pop(frozenset(), ()))
-    return irrelevant, tuple(sorted(tuple(g) for g in by_fit.values()))
+    return tuple(sorted(tuple(g) for g in by_fit.values()))
 
 
 def _group_of(cls: str, workload: str, i: int) -> int:
-    """First index of type ``i``'s group (``i`` itself when irrelevant)."""
-    return next((g[0] for g in type_groups(cls, workload)[1] if i in g), i)
+    """First index of type ``i``'s group."""
+    return next(g[0] for g in type_groups(cls, workload) if i in g)
 
 
 def canonical(spec: InstanceSpec) -> InstanceSpec:
-    """The representative of ``spec``'s equivalence class: irrelevant types at
-    the lowest count and free, each interchangeable group's (count, load)
-    pairs sorted over the group's indices."""
-    irrelevant, groups = type_groups(spec.cls, spec.workload)
-    counts, loads = list(spec.counts), list(spec.loads)
-    for i in irrelevant:
-        counts[i], loads[i] = COUNT_RANGE[0], "F"
-    order = {l: k for k, l in enumerate(LOADS)}
-    for g in groups:
-        pairs = sorted(((counts[i], loads[i]) for i in g), key=lambda p: (p[0], order[p[1]]))
-        for i, (n, l) in zip(g, pairs):
-            counts[i], loads[i] = n, l
-    return InstanceSpec(spec.cls, spec.workload, tuple(counts), tuple(loads))
+    """The representative of ``spec``'s equivalence class: each
+    interchangeable group's counts sorted over the group's indices."""
+    counts = list(spec.counts)
+    for g in type_groups(spec.cls, spec.workload):
+        for i, n in zip(g, sorted(counts[i] for i in g)):
+            counts[i] = n
+    return InstanceSpec(spec.cls, spec.workload, tuple(counts), spec.load, spec.io)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -200,35 +252,34 @@ def canonical(spec: InstanceSpec) -> InstanceSpec:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def space_size(cls: str, *, workloads=tuple(WORKLOADS), count_levels=COUNT_LEVELS,
-               load_levels=tuple(LOADS), distinct: bool = True) -> int:
+               load_levels=tuple(LOADS), io_levels=IO_LEVELS, distinct: bool = True) -> int:
     """Size of :func:`iter_specs`. With ``distinct`` (the default) one per
-    equivalence class: an irrelevant type contributes 1, a group of g
-    interchangeable types the C(L+g−1, g) multisets of its L level pairs
-    (assumes ``count_levels`` contains the lowest count, 100)."""
-    L = len(count_levels) * len(load_levels)
-    if not distinct:
-        return len(workloads) * L ** len(CLASSES[cls])
+    equivalence class: a group of g interchangeable types contributes the
+    C(L+g−1, g) multisets of its L count levels."""
+    L = len(count_levels)
     total = 0
     for w in workloads:
-        n = 1
-        for g in type_groups(cls, w)[1]:
-            n *= math.comb(L + len(g) - 1, len(g))
-        total += n
+        if distinct:
+            n = math.prod(math.comb(L + len(g) - 1, len(g)) for g in type_groups(cls, w))
+        else:
+            n = L ** len(onprem_types(cls, w))
+        total += n * len(load_levels) * len(io_levels)
     return total
 
 
 def iter_specs(cls: str, *, workloads=tuple(WORKLOADS), count_levels=COUNT_LEVELS,
-               load_levels=tuple(LOADS), distinct: bool = True):
-    """The full factorial: every workload × count per type × load per type —
-    with ``distinct`` (the default) only the canonical representative of each
-    equivalence class (see :func:`canonical`)."""
-    k = len(CLASSES[cls])
+               load_levels=tuple(LOADS), io_levels=IO_LEVELS, distinct: bool = True):
+    """The full factorial: every workload × count per type × load × io level
+    — with ``distinct`` (the default) only the canonical representative of
+    each equivalence class (see :func:`canonical`)."""
     for w in workloads:
+        k = len(onprem_types(cls, w))
         for counts in itertools.product(count_levels, repeat=k):
-            for loads in itertools.product(load_levels, repeat=k):
-                spec = InstanceSpec(cls, w, counts, loads)
-                if not distinct or canonical(spec) == spec:
-                    yield spec
+            for load in load_levels:
+                for io in io_levels:
+                    spec = InstanceSpec(cls, w, counts, load, io)
+                    if not distinct or canonical(spec) == spec:
+                        yield spec
 
 
 def _orthogonal_array(n_factors: int) -> list[tuple[int, ...]]:
@@ -245,39 +296,44 @@ def _orthogonal_array(n_factors: int) -> list[tuple[int, ...]]:
 
 
 def covering_specs(cls: str, *, workloads=tuple(WORKLOADS), count_levels=COUNT_LEVELS,
-                   load_levels=tuple(LOADS), corners: bool = True) -> list[InstanceSpec]:
+                   load_levels=tuple(LOADS), io_levels=IO_LEVELS,
+                   corners: bool = True) -> list[InstanceSpec]:
     """A pairwise-covering subset of :func:`iter_specs`: per workload, an
-    orthogonal array over the 2k factors (every pair of factors meets every
-    pair of levels), plus — with ``corners`` — the uniform configurations
-    (all types at the same count and the same load), each row replaced by its
-    canonical representative and duplicates dropped. Coverage then holds up
-    to equivalence: every array row's class is represented."""
-    if len(count_levels) != 3 or len(load_levels) != 3:
-        raise ValueError("covering_specs needs exactly 3 count and 3 load levels")
-    k = len(CLASSES[cls])
+    orthogonal array over the k + 2 factors (k counts, load, io: every pair
+    of factors meets every pair of levels), plus — with ``corners`` — the
+    uniform configurations (all types at the same count, for every load and
+    io level), each row replaced by its canonical representative and
+    duplicates dropped. Coverage then holds up to equivalence: every array
+    row's class is represented. k follows the workload's
+    :func:`onprem_types`."""
+    if len(count_levels) != 3 or len(load_levels) != 3 or len(io_levels) != 3:
+        raise ValueError("covering_specs needs exactly 3 count, 3 load and 3 io levels")
     out: dict[str, InstanceSpec] = {}
     for w in workloads:
-        rows = _orthogonal_array(2 * k)
+        k = len(onprem_types(cls, w))
+        rows = _orthogonal_array(k + 2)
         if corners:
-            rows += [(i,) * k + (j,) * k for i in range(3) for j in range(3)]
+            rows += [(i,) * k + (j, l) for i in range(3) for j in range(3) for l in range(3)]
         for row in rows:
             spec = canonical(InstanceSpec(cls, w, tuple(count_levels[i] for i in row[:k]),
-                                          tuple(load_levels[i] for i in row[k:])))
+                                          load_levels[row[k]], io_levels[row[k + 1]]))
             out.setdefault(spec.name, spec)
     return list(out.values())
 
 
 def sample_specs(cls: str, n: int, seed: int = 0, *, workloads=tuple(WORKLOADS)) -> list[InstanceSpec]:
     """``n`` specs with counts drawn uniformly from the whole range [100, 500]
-    (not just the default levels) and loads uniformly from F/H/E, mapped to
-    their canonical representatives."""
+    (not just the default levels), load and io level uniformly from their
+    levels, mapped to their canonical representatives."""
     rng = random.Random(seed)
-    k = len(CLASSES[cls])
     lo, hi = COUNT_RANGE
-    return [canonical(InstanceSpec(cls, rng.choice(workloads),
-                                   tuple(rng.randint(lo, hi) for _ in range(k)),
-                                   tuple(rng.choice(tuple(LOADS)) for _ in range(k))))
-            for _ in range(n)]
+    out = []
+    for _ in range(n):
+        w = rng.choice(workloads)
+        k = len(onprem_types(cls, w))
+        out.append(canonical(InstanceSpec(cls, w, tuple(rng.randint(lo, hi) for _ in range(k)),
+                                          rng.choice(tuple(LOADS)), rng.choice(IO_LEVELS))))
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -318,26 +374,32 @@ def generate(spec: InstanceSpec, prices: dict[str, dict] | None = None) -> dict:
     prices = load_prices() if prices is None else prices
     src = _workload(spec.workload)
     slot_s = float(src["_info"]["fedhpc_settings"]["time_scale_seconds"])
-    onprem = CLASSES[spec.cls]
+    onprem = onprem_types(spec.cls, spec.workload)
 
     types, names = [], {}
     for i, (t, n) in enumerate(zip(onprem, spec.counts)):
         types.append(dict(id=i, kind="on-prem", perf=1.0, io_time=0.0, deploy=0.0,
                           cost_io=0.0, cost_vm=0.0, cost_stor=0.0,
                           cpu=t.cpu, mem=t.mem, stor=ONPREM_STOR, capacity=n))
-        names[str(i)] = dict(name=f"onprem_{t.name}", count=n, load=spec.loads[i])
-    for i, t in enumerate(onprem):
-        for provider, sku in t.clouds:
-            p = prices[sku]
-            mid = len(types)
-            cost_vm = p["usd_per_hour"] * slot_s / 3600
-            types.append(dict(id=mid, kind="cloud", perf=1.0, io_time=0.0, deploy=0.0,
-                              cost_io=0.0, cost_vm=cost_vm, cost_stor=0.0,
-                              cpu=p["vcpu"] // 2, mem=p["mem_gib"], stor=CLOUD_STOR,
-                              capacity=None))
-            names[str(mid)] = dict(name=f"{provider}_{sku}", provider=provider,
-                                   equivalent_of=i, usd_per_hour=p["usd_per_hour"],
-                                   vcpu=p["vcpu"])
+        names[str(i)] = dict(name=f"onprem_{t.name}", count=n, load=spec.load)
+    clouds = cloud_types(spec.cls, spec.workload, prices)
+    for provider, sku, equivalent in clouds:
+        p = prices[sku]
+        mid = len(types)
+        cost_vm = p["usd_per_hour"] * slot_s / 3600
+        types.append(dict(id=mid, kind="cloud", perf=1.0,
+                          io_time=io_model.io_time(provider, slot_s), deploy=0.0,
+                          cost_io=io_model.EGRESS_USD_PER_GB[provider], cost_vm=cost_vm,
+                          cost_stor=0.0, cpu=p["vcpu"] // 2, mem=p["mem_gib"],
+                          stor=CLOUD_STOR, capacity=None))
+        names[str(mid)] = dict(name=f"{provider}_{sku}", provider=provider,
+                               equivalent_of=f"onprem_{equivalent}",
+                               usd_per_hour=p["usd_per_hour"], vcpu=p["vcpu"])
+
+    tau_max = max(io_model.io_time(provider, slot_s) for provider, _, _ in clouds)
+    io_volume, capped = io_model.volumes(spec.workload, src["jobs"], spec.io, slot_s,
+                                         src["horizon"], tau_max)
+    jobs = [dict(j, io_volume=v) for j, v in zip(src["jobs"], io_volume)]
 
     running = [dict(id=1_000_000 * (i + 1) + k, type_id=i, end=end)
                for i in range(len(onprem))
@@ -346,10 +408,12 @@ def generate(spec: InstanceSpec, prices: dict[str, dict] | None = None) -> dict:
     return dict(
         _info=dict(
             description=f"Generated by fedhpc.instance_gen: class {spec.cls}, workload "
-                        f"{spec.workload}, counts {list(spec.counts)}, loads "
-                        f"{''.join(spec.loads)} (F free / H half / E full at t=0).",
+                        f"{spec.workload}, counts {list(spec.counts)}, load {spec.load} "
+                        f"(F free / H half / E full at t=0), io level {spec.io} "
+                        f"(fedhpc.io_model; io_volume in GB).",
             spec=dict(name=spec.name, cls=spec.cls, workload=spec.workload,
-                      counts=list(spec.counts), loads=list(spec.loads)),
+                      counts=list(spec.counts), load=spec.load, io=spec.io),
+            io=dict(level=spec.io, total_gb=sum(io_volume), capped=capped),
             source_workload=str(WORKLOADS[spec.workload].relative_to(ROOT)),
             fedhpc_settings=dict(time_scale_seconds=slot_s,
                                  horizon_slots=src["horizon"], onprem_cost=0.0),
@@ -357,7 +421,7 @@ def generate(spec: InstanceSpec, prices: dict[str, dict] | None = None) -> dict:
         ),
         horizon=src["horizon"],
         instance_types=types,
-        jobs=[dict(j) for j in src["jobs"]],
+        jobs=jobs,
         running_jobs=running,
     )
 
