@@ -379,17 +379,26 @@ performance is not priced in the formulation ($\kappa^{\mathrm S}=0$), so the
 default tier is the consistent choice.
 
 \section{Instance design}\label{sec:design}
-An instance is named by its factors and rebuilt bit for bit from the name. Node
-counts take 100/300/500 per on-prem type. Initial load (F free, H half, E full) and
-io level (L/M/H) each take one value for the whole instance; one value per type
-would multiply the space beyond what can be covered at every io level. Class~A
-(c40, c64 + AWS) has 162 distinct instances, all benchmarked. Class~B (c32, c40,
-c64, m32, plus c16 in \code{pos}, each with an AWS and an Azure equivalent) has
-\num{1944} distinct instances, down from \num{36450} with load per type. Its
-benchmark set is a strength-2 orthogonal array over the $k+2$ three-level factors
-(Rao--Hamming construction \citep{hedayat1999orthogonal}) plus the 27 uniform
-corners: 104 instances. Types that fit exactly the same jobs are collapsed to a
-canonical order.
+An instance is named by its factors (e.g.\ \code{B\_pos\_n300\_lE\_iM}) and
+rebuilt bit for bit from the name. Every factor takes one value for the whole
+instance: node count $N\in\{100,300,500\}$ for every on-prem type, initial load
+(F free, H $\lfloor N/2\rfloor$ running, E all $N$ running) and io level (L/M/H).
+Class~A (c40, c64 + AWS) and class~B (c32, c40, c64, plus c16 in \code{pos}, each
+with an AWS and an Azure equivalent) then have $2\times3\times3\times3=54$ instances
+each, and both run as full factorials.
+
+The count was previously set per type. That made the space grow as $3^k$ in the
+number of on-prem types $k$: \num{1944} distinct class~B instances, and \num{36450}
+when load was also set per type, which required an orthogonal-array covering subset
+\citep{hedayat1999orthogonal}. The jobs cannot tell most of those instances apart.
+Every job fits c64 and the fit sets are nested (c16 $\subset$ c32 $\subset$ c40
+$\subset$ c64). Only 5 \code{fedhpc} and 26 \code{pos} jobs need c64 rather than
+c40, and swapping the c40 and c64 counts moved greedy cost by a median of
+0.3--1.8\,\%. A memory-heavy 32c/512\,GB type fit exactly the same jobs as c32, so
+it only split c32's capacity, and it was removed. Under the per-type design,
+41\,\% of class~B \code{fedhpc} instances and 10\,\% of \code{pos} instances were
+trivial: every job could start on-prem at its release, so the Pareto front was a
+single point.
 
 Running-job draws are nested across loads (the half-full set is a prefix of the full
 one), and volumes are nested across io levels. Optimal turnaround and optimal cost

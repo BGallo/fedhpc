@@ -31,6 +31,10 @@
 
 #include "ga_common.hpp"
 
+#include <climits>
+#include <cstdint>
+#include <memory>
+
 struct DOpt { int type, p; double cost; int earliest, latest; };
 
 struct DJob {
@@ -117,16 +121,32 @@ struct DScalar {
 // on-prem at release (capped when j has no cloud option). mu = 0 is WSPT —
 // optimal-order for sum w_j C_j — and ignores the cloud alternative; larger mu
 // hands contended capacity to the jobs whose cloud option is dearest.
-inline void set_priority(const DProblem& P, DScalar& S, double mu) {
+//
+// edf: instead, earliest indifference deadline first — the last start at which
+// on-prem still scores better than cloud, release + regret_j / (w1·w_j),
+// capped at the job's latest on-prem start (and that cap alone when it has no
+// cloud option or w1 = 0). It keeps every job that can beat cloud ahead of its
+// own deadline, where WSPT lets long jobs wait past theirs and get offloaded.
+inline void set_priority(const DProblem& P, DScalar& S, double mu, bool edf = false) {
     S.mu = mu;
     std::vector<double> v(P.n, 0.0);
     for (int j = 0; j < P.n; j++) {
         const DJob& J = P.jobs[j];
         if (J.onprem.empty()) continue;
         double s_on = std::numeric_limits<double>::infinity();
-        for (const DOpt& o : J.onprem)
+        int last = 0;
+        for (const DOpt& o : J.onprem) {
             s_on = std::min(s_on, S.w1 * J.weight * (o.earliest + o.p - J.arrival) + S.w2 * o.cost);
+            last = std::max(last, o.latest);
+        }
         double regret = S.cloud_score[j] - s_on;
+        if (edf) {
+            double dl = last;
+            if (std::isfinite(regret) && S.w1 * J.weight > 0)
+                dl = std::min<double>(last, P.release[j] + std::max(regret, 0.0) / (S.w1 * J.weight));
+            v[j] = -dl;
+            continue;
+        }
         if (!std::isfinite(regret)) regret = 1e6 * (S.w1 + S.w2);
         regret = std::max(regret, 0.0);
         v[j] = (S.w1 * J.weight + mu * regret) / std::max(P.pmin[j], 1);
@@ -169,13 +189,26 @@ enum DFlag {
                                  //     (w1·Δp + w2·Δcost, improving only), ranked
     DF_SERIAL        = 1 << 8,   // decoder: serial SGS instead of dispatch
     DF_BEST_OF       = 1 << 9,   // decoder: both, keep the lower pen_g
+    DF_WHY           = 1 << 10,  // diagnostics: record why each job went to cloud
+    DF_EDF           = 1 << 11,  // priority: indifference-deadline EDF only (no mu grid)
+    DF_EDF_ADD       = 1 << 12,  // priority: EDF as an extra start beside the mu starts
+    DF_EDF_NODL      = 1 << 13,  // the EDF start decodes with DF_NO_DEADLINE (mu starts keep it)
+    DF_REF_DECODE    = 1 << 14,  // LS: reference decoder (no DEngine)
+    DF_NO_RESTART    = 1 << 15,  // LS: DEngine full decode per candidate
+    DF_PRUNE         = 1 << 16,  // LS: stop a candidate once its lower bound exceeds the incumbent
+    DF_FOCUS_KICKS   = 1 << 17,  // all kicks to the best start after LS (default: split over the starts)
 };
+
+// DSched::why codes (dispatch decoder, DF_WHY only)
+enum DWhy : char { DW_ONPREM = 0, DW_GENE = 1, DW_OFF_PLACE = 2, DW_OFF_WAIT = 3,
+                   DW_HORIZON = 4, DW_LEFTOVER = 5 };
 
 struct DSched {
     double f1 = 0, f2 = 0, g = 0, pen_g = 0;
     int cv = 0, n_cloud = 0, n_auto_off = 0;
     std::vector<int> type, start;
     std::vector<char> on;              // 1 = placed on-prem
+    std::vector<char> why;             // DWhy per job (DF_WHY only)
 };
 
 struct DWork {
@@ -197,14 +230,17 @@ inline void dispatch(const DProblem& P, const DScalar& S, const std::vector<char
                      int flags, DWork& W, DSched& out) {
     const int H = P.H, np = (int)P.pool_type.size();
     const bool deadline = !(flags & DF_NO_DEADLINE);
+    const bool why = flags & DF_WHY;
     W.free = P.free0;
     W.maxrun.assign(np, 0);
     out.type.assign(P.n, -1); out.start.assign(P.n, -1); out.on.assign(P.n, 0);
     out.f1 = out.f2 = 0; out.cv = out.n_cloud = out.n_auto_off = 0;
+    if (why) out.why.assign(P.n, DW_ONPREM);
 
-    auto to_cloud = [&](int j) -> bool {
+    auto to_cloud = [&](int j, char reason) -> bool {
         const int k = S.cloud_opt[j];
         if (k < 0) return false;
+        if (why) out.why[j] = reason;
         const DOpt& o = P.jobs[j].cloud[k];
         out.type[j] = o.type; out.start[j] = o.earliest;
         out.f1 += P.jobs[j].weight * (o.earliest + o.p - P.jobs[j].arrival);
@@ -217,7 +253,7 @@ inline void dispatch(const DProblem& P, const DScalar& S, const std::vector<char
     for (auto& b : W.rel_bucket) b.clear();
     for (int j : S.order) {
         if (gen[j] == 1 || P.jobs[j].onprem.empty()) {
-            if (!to_cloud(j)) {
+            if (!to_cloud(j, DW_GENE)) {
                 if (P.jobs[j].onprem.empty()) { out.cv++; continue; }
             } else continue;
         }
@@ -264,7 +300,7 @@ inline void dispatch(const DProblem& P, const DScalar& S, const std::vector<char
                 }
             }
             if (best_k >= 0) {
-                if (deadline && gen[j] == 0 && best_s >= S.cloud_score[j] && to_cloud(j)) {
+                if (deadline && gen[j] == 0 && best_s >= S.cloud_score[j] && to_cloud(j, DW_OFF_PLACE)) {
                     out.n_auto_off++;
                     continue;
                 }
@@ -291,19 +327,19 @@ inline void dispatch(const DProblem& P, const DScalar& S, const std::vector<char
             for (const DOpt& o : J.onprem) { last = std::max(last, o.latest); cmin = std::min(cmin, o.cost); }
             if (deadline && gen[j] == 0 &&
                 S.w1 * J.weight * (t + 1 + P.pmin[j] - J.arrival) + S.w2 * cmin >= S.cloud_score[j] &&
-                to_cloud(j)) {
+                to_cloud(j, DW_OFF_WAIT)) {
                 out.n_auto_off++;
                 continue;
             }
             if (t + 1 > last) {             // horizon: no on-prem start left
-                if (!to_cloud(j)) out.cv++;
+                if (!to_cloud(j, DW_HORIZON)) out.cv++;
                 continue;
             }
             W.waiting[keep++] = j;
         }
         W.waiting.resize(keep);
     }
-    for (int j : W.waiting) if (!to_cloud(j)) out.cv++;
+    for (int j : W.waiting) if (!to_cloud(j, DW_LEFTOVER)) out.cv++;
     out.g = S.w1 * out.f1 + S.w2 * out.f2;
     out.pen_g = pen(S, out.f1, out.f2, out.cv);
 }
@@ -383,22 +419,530 @@ inline void decode(const DProblem& P, const DScalar& S, const std::vector<char>&
     W.alt_type.swap(alt.type); W.alt_start.swap(alt.start); W.alt_on.swap(alt.on);
 }
 
+// ── Fast dispatch engine (DF_REF_DECODE off) ─────────────────────────────────
+//
+// Same decisions as dispatch(), cheaper per decode (2026-11-03,
+// results/generated_bench/dispatch_study):
+//
+//   queue    waiting jobs are a bitset over priority rank, so merging a slot's
+//            releases and dropping a job are O(1) and a scan visits only set
+//            bits; a job's deadline/horizon removal slot is precomputed, so a
+//            slot with no free room only touches the jobs with an event there.
+//   restart  an LS candidate differs from the incumbent in one gene, so it
+//            decodes identically up to the first slot t* that gene can change.
+//            The incumbent is recorded (state every DF_CKPT slots, outcome and
+//            decision slot per job); a candidate resumes from the checkpoint at
+//            or before t* and stops once its state equals the incumbent's again
+//            (every job decided differently is decided in both and its on-prem
+//            footprint has ended), taking the rest from the incumbent.
+//   prune    (DF_PRUNE) while a candidate runs, decided scores + each waiting job's
+//            min(cloud, start next slot) + each unreleased job's
+//            min(cloud, start at release) bound its final score from below;
+//            once that exceeds the incumbent's pen_g it cannot be accepted.
+//
+// f1/f2 of a recorded schedule are summed in job-index order (independent of
+// the decode path); a candidate's are the incumbent's plus the change over the
+// jobs it re-decided — equal to a full decode up to rounding (~1e-14 relative).
+
+constexpr int DF_CKPT = 4;
+
+// Per (scalar, priority, deadline mode) precomputation, jobs indexed by rank.
+struct DFast {
+    int nw = 0;
+    std::vector<int> last;               // [j] latest on-prem start
+    std::vector<double> cmin;            // [j] cheapest on-prem cost
+    std::vector<int> evt0, evt2;         // [j] removal slot when waiting (gene 0 / otherwise), INT_MAX if none
+    // score lower bound of a job waiting at the end of slot t: min(cs, al + be·(t+1)),
+    // equal to cs from slot xc on; of an unreleased job: lbrel
+    std::vector<double> al, be, cs, lbrel, lbrel_suf;   // lbrel_suf[t]: jobs released at or after t
+    std::vector<int> xc;
+    struct Word { int w; uint64_t rel, e0, e2, xc; };
+    std::vector<std::vector<Word>> sp;   // [t] nonzero words of the per-slot rank bitsets
+};
+
+inline DFast build_dfast(const DProblem& P, const DScalar& S, bool deadline) {
+    DFast F;
+    const int H = P.H, nw = (P.n + 63) / 64;
+    F.nw = nw;
+    std::vector<uint64_t> rel((size_t)(H + 1) * nw, 0), e0((size_t)H * nw, 0), e2((size_t)H * nw, 0), xb((size_t)H * nw, 0);
+    auto set = [&](std::vector<uint64_t>& b, int t, int r) { b[(size_t)t * nw + (r >> 6)] |= 1ULL << (r & 63); };
+    F.last.assign(P.n, -1); F.cmin.assign(P.n, std::numeric_limits<double>::infinity());
+    F.evt0.assign(P.n, INT_MAX); F.evt2.assign(P.n, INT_MAX);
+    F.al.assign(P.n, 0); F.be.assign(P.n, 0); F.cs.assign(P.n, 0); F.lbrel.assign(P.n, 0);
+    F.xc.assign(P.n, INT_MAX); F.lbrel_suf.assign(H + 2, 0);
+    for (int j = 0; j < P.n; j++) {
+        const DJob& J = P.jobs[j];
+        if (J.onprem.empty()) continue;
+        double a = std::numeric_limits<double>::infinity(), lr = S.cloud_score[j];
+        for (const DOpt& o : J.onprem) {
+            F.last[j] = std::max(F.last[j], o.latest); F.cmin[j] = std::min(F.cmin[j], o.cost);
+            a = std::min(a, S.w1 * J.weight * (o.p - J.arrival) + S.w2 * o.cost);
+            lr = std::min(lr, S.w1 * J.weight * (o.earliest + o.p - J.arrival) + S.w2 * o.cost);
+        }
+        const int r = S.rank[j], t_rel = std::min(P.release[j], H);
+        set(rel, t_rel, r);
+        F.al[j] = a; F.be[j] = S.w1 * J.weight; F.cs[j] = S.cloud_score[j]; F.lbrel[j] = lr;
+        F.lbrel_suf[t_rel] += lr;
+        int x = INT_MAX;                 // first t with al + be·(t+1) >= cs
+        if (std::isfinite(F.cs[j])) {
+            if (F.be[j] <= 0) x = (a >= F.cs[j]) ? 0 : INT_MAX;
+            else {
+                x = std::max(0, (int)std::ceil((F.cs[j] - a) / F.be[j] - 1.0));
+                while (x > 0 && a + F.be[j] * x >= F.cs[j]) x--;
+                while (a + F.be[j] * (x + 1.0) < F.cs[j]) x++;
+            }
+        }
+        F.xc[j] = x;
+        if (x < H) set(xb, x, r);
+        if (t_rel >= H) continue;
+        // the first slot >= release at which a waiting, unplaced job leaves the queue
+        const int tl = std::max(t_rel, F.last[j]);           // horizon: t + 1 > last
+        if (tl < H) { set(e2, tl, r); F.evt2[j] = tl; }
+        int td = INT_MAX;                                     // deadline (gene 0)
+        if (deadline)
+            for (int t = t_rel; t <= std::min(tl, H - 1); t++)
+                if (S.w1 * J.weight * (t + 1 + P.pmin[j] - J.arrival) + S.w2 * F.cmin[j] >= S.cloud_score[j]) { td = t; break; }
+        const int t0 = std::min(td, tl);
+        if (t0 < H) { set(e0, t0, r); F.evt0[j] = t0; }
+    }
+    for (int t = H - 1; t >= 0; t--) F.lbrel_suf[t] += F.lbrel_suf[t + 1];
+    F.sp.assign(H + 1, {});
+    for (int t = 0; t <= H; t++)
+        for (int w = 0; w < nw; w++) {
+            const size_t i = (size_t)t * nw + w;
+            const uint64_t a = rel[i], b = t < H ? e0[i] : 0, c = t < H ? e2[i] : 0, d = t < H ? xb[i] : 0;
+            if (a | b | c | d) F.sp[t].push_back({w, a, b, c, d});
+        }
+    return F;
+}
+
+// Waiting jobs' bound: sums over the linear-phase jobs (al, be) and capped ones (cs).
+struct DBound { double A = 0, B = 0, C = 0; };
+
+// A recorded incumbent.
+struct DInc {
+    std::vector<char> gen;
+    std::vector<uint64_t> g0, g1;        // rank bitsets: gene 0 / effective gene-cloud
+    std::vector<size_t> foff;            // [t / DF_CKPT] offset of the u >= t free rows
+    std::vector<int> free_snap;          // checkpointed free capacity, rows u >= t
+    std::vector<uint64_t> wait_snap;     // checkpointed queue
+    std::vector<DBound> bnd;             // checkpointed waiting bound
+    std::vector<int> nwait, cv;          // [t] at the start of slot t, t in [0, H]
+    std::vector<double> dsc;             // [t] score of the decisions before slot t
+    std::vector<double> gc_suf;          // [t] lbrel of the gene-cloud jobs released at or after t
+    std::vector<int> dslot, type, start, fend;   // per job; dslot -1 = init, H = leftover; fend 0 = cloud
+    std::vector<double> c1, c2;
+    std::vector<int> dec_ptr, dec_job;   // CSR: jobs decided at slot t
+    DSched s;                            // the schedule, f1/f2 in job-index order
+};
+
+struct DFlipWork {
+    std::vector<std::vector<int>> free;
+    std::vector<uint64_t> wait, g0, g1;
+    std::vector<int> maxrun;
+    std::vector<char> gen;
+    std::vector<int> stamp, pstamp, sstamp, ctype, cstart, cfend;   // == id: decided / tracked / settled
+    std::vector<double> c1, c2, gc_suf;
+    std::vector<int> decided, slot_dec, touched;
+    std::vector<std::vector<int>> settle_at;    // [t] tracked jobs that settle at the end of t
+    int id = 0;
+    long long slots = 0, pruned = 0, converged = 0;
+};
+
+struct DEngine {
+    const DProblem& P; const DScalar& S; const DFast& F; const int flags; const bool deadline;
+    DEngine(const DProblem& P_, const DScalar& S_, const DFast& F_, int fl)
+        : P(P_), S(S_), F(F_), flags(fl), deadline(!(fl & DF_NO_DEADLINE)) {}
+
+    // Slots [t0, H) and the leftovers from the given state, deciding as
+    // dispatch() does. decide(j, type, start, fend, c1, c2, slot, kind) reports
+    // each decision (kind 0 on-prem, 1 cloud, 2 cv, 3 deadline offload);
+    // end_slot(t) returns true to stop after slot t. lb, when given, is kept.
+    template <class Decide, class EndSlot>
+    bool run(int t0, std::vector<std::vector<int>>& free, std::vector<uint64_t>& wait, int& n_wait,
+             const std::vector<char>& gen, const std::vector<uint64_t>& g0, const std::vector<uint64_t>& g1,
+             std::vector<int>& maxrun, DBound* lb, Decide&& decide, EndSlot&& end_slot) const {
+        const int H = P.H, np = (int)P.pool_type.size(), nw = F.nw;
+        int tcur = t0;
+        auto lb_add = [&](int j, int t, double sgn) {
+            if (F.xc[j] < t) lb->C += sgn * F.cs[j]; else { lb->A += sgn * F.al[j]; lb->B += sgn * F.be[j]; }
+        };
+        auto drop = [&](int r) {
+            wait[r >> 6] &= ~(1ULL << (r & 63)); n_wait--;
+            if (lb) lb_add(S.order[r], tcur, -1.0);
+        };
+        auto cloud = [&](int j, int t, int kind) -> bool {
+            const int k = S.cloud_opt[j];
+            if (k < 0) return false;
+            const DOpt& o = P.jobs[j].cloud[k];
+            decide(j, o.type, o.earliest, 0, P.jobs[j].weight * (o.earliest + o.p - P.jobs[j].arrival), o.cost, t, kind);
+            return true;
+        };
+        auto event = [&](int r, int t) {      // waiting, not placed, removal slot t
+            const int j = S.order[r];
+            const DJob& J = P.jobs[j];
+            if (deadline && gen[j] == 0 &&
+                S.w1 * J.weight * (t + 1 + P.pmin[j] - J.arrival) + S.w2 * F.cmin[j] >= S.cloud_score[j] &&
+                cloud(j, t, 3)) { drop(r); return; }
+            if (t + 1 > F.last[j]) { if (!cloud(j, t, 1)) decide(j, -1, -1, 0, 0.0, 0.0, t, 2); drop(r); }
+        };
+        for (int t = t0; t < H; t++) {
+            tcur = t;
+            const auto& sp = F.sp[t];
+            for (const auto& e : sp) {
+                const uint64_t add = e.rel & ~g1[e.w];
+                if (!add) continue;
+                wait[e.w] |= add; n_wait += __builtin_popcountll(add);
+                if (lb) for (uint64_t y = add; y; y &= y - 1) lb_add(S.order[(e.w << 6) | __builtin_ctzll(y)], t, 1.0);
+            }
+            if (n_wait > 0) {
+                // removals at t among the waiting jobs ranked at or after (cw, cbits)
+                auto events_from = [&](int cw, uint64_t cbits) {
+                    for (const auto& e : sp) {
+                        if (e.w < cw) continue;
+                        uint64_t y = (deadline ? ((e.e0 & g0[e.w]) | (e.e2 & ~g0[e.w])) : e.e2) & wait[e.w];
+                        if (e.w == cw) y &= cbits;
+                        for (; y; y &= y - 1) event((e.w << 6) | __builtin_ctzll(y), t);
+                    }
+                };
+                int any_room = 0;
+                for (int q = 0; q < np; q++) {
+                    int r = 0;
+                    const auto& f = free[q];
+                    while (t + r < H && f[t + r] > 0) r++;
+                    maxrun[q] = r; any_room |= (r > 0);
+                }
+                int w = 0;
+                uint64_t x = 0;
+                if (any_room) {
+                    for (; w < nw && any_room; w++) {
+                        x = wait[w];
+                        while (x && any_room) {
+                            const int b = __builtin_ctzll(x); x &= x - 1;
+                            const int r = (w << 6) | b, j = S.order[r];
+                            const DJob& J = P.jobs[j];
+                            int best_k = -1; double best_s = 0; int best_free = 0;
+                            for (int k = 0; k < (int)J.onprem.size(); k++) {
+                                const DOpt& o = J.onprem[k];
+                                const int q = P.opt_pool[j][k];
+                                if (t < o.earliest || t > o.latest || o.p > maxrun[q]) continue;
+                                const double s = S.w1 * J.weight * (t + o.p - J.arrival) + S.w2 * o.cost;
+                                const int fr = free[q][t];
+                                bool better = best_k < 0 || s < best_s - 1e-12;
+                                if (!better && std::abs(s - best_s) <= 1e-12) {
+                                    if (flags & DF_TIE_MOST_FREE) better = fr > best_free;
+                                    else if (flags & DF_TIE_BEST_FIT) better = fr < best_free;
+                                }
+                                if (better) { best_k = k; best_s = s; best_free = fr; }
+                            }
+                            if (best_k >= 0) {
+                                if (deadline && gen[j] == 0 && best_s >= S.cloud_score[j] && cloud(j, t, 3)) {
+                                    drop(r); continue;
+                                }
+                                const DOpt& o = J.onprem[best_k];
+                                const int q = P.opt_pool[j][best_k];
+                                auto& f = free[q];
+                                int newrun = maxrun[q];
+                                for (int u = t; u < t + o.p; u++)
+                                    if (--f[u] == 0 && u - t < newrun) newrun = u - t;
+                                maxrun[q] = newrun;
+                                if (newrun == 0) {
+                                    any_room = 0;
+                                    for (int qq = 0; qq < np; qq++) any_room |= (maxrun[qq] > 0);
+                                }
+                                decide(j, o.type, t, t + o.p, J.weight * (t + o.p - J.arrival), o.cost, t, 0);
+                                drop(r);
+                                continue;
+                            }
+                            if (((deadline && gen[j] == 0) ? F.evt0[j] : F.evt2[j]) == t) event(r, t);
+                        }
+                    }
+                    if (!any_room) events_from(w - 1, x);   // the rest of word w-1 and later words
+                } else {
+                    events_from(0, ~0ULL);
+                }
+            }
+            if (lb)                           // waiting jobs whose bound caps at the end of t
+                for (const auto& e : sp)
+                    for (uint64_t y = e.xc & wait[e.w]; y; y &= y - 1) {
+                        const int j = S.order[(e.w << 6) | __builtin_ctzll(y)];
+                        lb->A -= F.al[j]; lb->B -= F.be[j]; lb->C += F.cs[j];
+                    }
+            if (end_slot(t)) return true;
+        }
+        for (int w = 0; w < nw; w++)
+            for (uint64_t y = wait[w]; y; y &= y - 1) {
+                const int j = S.order[(w << 6) | __builtin_ctzll(y)];
+                if (!cloud(j, H, 1)) decide(j, -1, -1, 0, 0.0, 0.0, H, 2);
+            }
+        return false;
+    }
+
+    // Init decisions (gene cloud, no on-prem option) in priority order and the gene bitsets.
+    template <class Decide>
+    void init(const std::vector<char>& gen, std::vector<uint64_t>& g0, std::vector<uint64_t>& g1,
+              Decide&& decide) const {
+        g0.assign(F.nw, 0); g1.assign(F.nw, 0);
+        for (int r = 0; r < P.n; r++) {
+            const int j = S.order[r];
+            if (gen[j] == 1 || P.jobs[j].onprem.empty()) {
+                const int k = S.cloud_opt[j];
+                if (k >= 0) {
+                    const DOpt& o = P.jobs[j].cloud[k];
+                    decide(j, o.type, o.earliest, 0, P.jobs[j].weight * (o.earliest + o.p - P.jobs[j].arrival), o.cost, -1, 1);
+                    g1[r >> 6] |= 1ULL << (r & 63);
+                    continue;
+                }
+                if (P.jobs[j].onprem.empty()) { decide(j, -1, -1, 0, 0.0, 0.0, -1, 2); continue; }
+            }
+            if (gen[j] == 0) g0[r >> 6] |= 1ULL << (r & 63);
+        }
+    }
+
+    // Full decode of gen, recorded for restarts (R.s holds the schedule).
+    void record(const std::vector<char>& gen, DInc& R, DFlipWork& W) const {
+        const int H = P.H, np = (int)P.pool_type.size(), nw = F.nw, nck = H / DF_CKPT + 1;
+        R.gen = gen;
+        R.dslot.assign(P.n, -1); R.type.assign(P.n, -1); R.start.assign(P.n, -1); R.fend.assign(P.n, 0);
+        R.c1.assign(P.n, 0); R.c2.assign(P.n, 0);
+        R.foff.assign(nck + 1, 0);
+        for (int c = 0; c < nck; c++) R.foff[c + 1] = R.foff[c] + (size_t)np * (H - c * DF_CKPT);
+        R.free_snap.resize(R.foff[nck]); R.wait_snap.resize((size_t)nck * nw); R.bnd.resize(nck);
+        R.nwait.resize(H + 1); R.cv.resize(H + 1); R.dsc.assign(H + 1, 0); R.gc_suf.assign(H + 2, 0);
+        R.dec_ptr.assign(H + 2, 0);
+        std::vector<int> cnt(H + 1, 0);
+        double dsum = 0;
+        int cv = 0, ncl = 0, noff = 0;
+        auto decide = [&](int j, int ty, int st, int fe, double a, double b, int slot, int kind) {
+            R.dslot[j] = slot; R.type[j] = ty; R.start[j] = st; R.fend[j] = fe; R.c1[j] = a; R.c2[j] = b;
+            dsum += S.w1 * a + S.w2 * b;
+            if (slot >= 0) cnt[slot]++;
+            if (kind == 2) cv++; else if (kind != 0) ncl++;
+            if (kind == 3) noff++;
+        };
+        init(gen, R.g0, R.g1, decide);
+        for (int r = 0; r < P.n; r++)
+            if (R.g1[r >> 6] >> (r & 63) & 1) {
+                const int j = S.order[r];
+                if (!P.jobs[j].onprem.empty()) R.gc_suf[std::min(P.release[j], H)] += F.lbrel[j];
+            }
+        for (int t = H - 1; t >= 0; t--) R.gc_suf[t] += R.gc_suf[t + 1];
+        W.free = P.free0; W.wait.assign(nw, 0); W.maxrun.assign(np, 0);
+        int n_wait = 0;
+        DBound lb;
+        auto snap = [&](int t) {
+            R.nwait[t] = n_wait; R.cv[t] = cv; R.dsc[t] = dsum;
+            if (t % DF_CKPT) return;
+            const int c = t / DF_CKPT;
+            R.bnd[c] = lb;
+            for (int q = 0; q < np; q++)
+                std::copy(W.free[q].begin() + t, W.free[q].end(), R.free_snap.begin() + R.foff[c] + (size_t)q * (H - t));
+            std::copy(W.wait.begin(), W.wait.end(), R.wait_snap.begin() + (size_t)c * nw);
+        };
+        snap(0);
+        run(0, W.free, W.wait, n_wait, gen, R.g0, R.g1, W.maxrun, &lb, decide,
+            [&](int t) { snap(t + 1); return false; });
+        // decisions by slot (CSR)
+        for (int t = 0; t <= H; t++) R.dec_ptr[t + 1] = R.dec_ptr[t] + cnt[t];
+        R.dec_job.resize(R.dec_ptr[H + 1]);
+        for (int j = 0; j < P.n; j++)
+            if (R.dslot[j] >= 0) R.dec_job[R.dec_ptr[R.dslot[j]] + --cnt[R.dslot[j]]] = j;
+        DSched& s = R.s;
+        s.type = R.type; s.start = R.start;
+        s.on.assign(P.n, 0);
+        for (int j = 0; j < P.n; j++) s.on[j] = R.fend[j] > 0;
+        s.f1 = s.f2 = 0;
+        for (int j = 0; j < P.n; j++) { s.f1 += R.c1[j]; s.f2 += R.c2[j]; }
+        s.cv = cv; s.n_cloud = ncl; s.n_auto_off = noff;
+        s.g = S.w1 * s.f1 + S.w2 * s.f2;
+        s.pen_g = pen(S, s.f1, s.f2, s.cv);
+    }
+
+    // pen_g of a full decode of gen (no recording); with a finite thr, +inf
+    // once the lower bound exceeds thr.
+    double full_pen(const std::vector<char>& gen, DFlipWork& W,
+                    double thr = std::numeric_limits<double>::infinity()) const {
+        const int H = P.H, np = (int)P.pool_type.size();
+        const bool prune = std::isfinite(thr);
+        if ((int)W.c1.size() != P.n) { W.c1.assign(P.n, 0); W.c2.assign(P.n, 0); }
+        std::fill(W.c1.begin(), W.c1.end(), 0.0); std::fill(W.c2.begin(), W.c2.end(), 0.0);
+        int cv = 0;
+        double dsum = 0;
+        auto decide = [&](int j, int, int, int, double a, double b, int, int kind) {
+            W.c1[j] = a; W.c2[j] = b; cv += kind == 2; dsum += S.w1 * a + S.w2 * b;
+        };
+        init(gen, W.g0, W.g1, decide);
+        if (prune) {
+            W.gc_suf.assign(H + 2, 0.0);
+            for (int j = 0; j < P.n; j++)
+                if (gen[j] == 1 && S.cloud_opt[j] >= 0 && !P.jobs[j].onprem.empty())
+                    W.gc_suf[std::min(P.release[j], H)] += F.lbrel[j];
+            for (int t = H - 1; t >= 0; t--) W.gc_suf[t] += W.gc_suf[t + 1];
+        }
+        W.free = P.free0; W.wait.assign(F.nw, 0); W.maxrun.assign(np, 0);
+        int n_wait = 0;
+        DBound lb;
+        const bool cut = run(0, W.free, W.wait, n_wait, gen, W.g0, W.g1, W.maxrun, prune ? &lb : nullptr, decide,
+            [&](int t) {
+                W.slots++;
+                return prune && dsum + lb.A + lb.B * (t + 1) + lb.C + F.lbrel_suf[t + 1] - W.gc_suf[t + 1] > thr;
+            });
+        if (cut) { W.pruned++; return std::numeric_limits<double>::infinity(); }
+        double f1 = 0, f2 = 0;
+        for (int j = 0; j < P.n; j++) { f1 += W.c1[j]; f2 += W.c2[j]; }
+        return pen(S, f1, f2, cv);
+    }
+
+    // pen_g of the incumbent with job j's gene set to `to` (+inf when pruned).
+    double flip(const DInc& R, int j, char to, DFlipWork& W, bool prune) const {
+        const int H = P.H, np = (int)P.pool_type.size(), nw = F.nw;
+        if (P.jobs[j].onprem.empty()) return R.s.pen_g;
+        // effective gene: 1 cloud (has a cloud option), 0 auto (deadline rule on), 2 on-prem
+        auto eff = [&](char x) { return (x == 1 && S.cloud_opt[j] >= 0) ? 1 : (x == 0 && deadline ? 0 : 2); };
+        const int eg = eff(R.gen[j]), et = eff(to);
+        if (eg == et) return R.s.pen_g;
+        // t*: the first slot the gene can change a decision
+        const int d = R.dslot[j];
+        int ts;
+        if (et == 1) ts = d;                                  // leaves the queue: from its decision
+        else if (eg == 1) ts = std::min(P.release[j], H);     // joins the queue at release
+        else if (eg == 0) {                                   // auto -> on-prem
+            if (R.fend[j] > 0) return R.s.pen_g;              //   placed: same either way
+            ts = d;
+        } else ts = std::min(d, F.evt0[j] == INT_MAX ? H : F.evt0[j]);   // on-prem -> auto
+        ts = std::max(ts, 0) / DF_CKPT * DF_CKPT;
+        if ((int)W.stamp.size() != P.n) {
+            W.stamp.assign(P.n, 0); W.pstamp.assign(P.n, 0); W.sstamp.assign(P.n, 0); W.ctype.assign(P.n, 0);
+            W.cstart.assign(P.n, 0); W.cfend.assign(P.n, 0); W.c1.assign(P.n, 0); W.c2.assign(P.n, 0);
+        }
+        if ((int)W.settle_at.size() != H + 1) W.settle_at.assign(H + 1, {});
+        for (int t : W.touched) W.settle_at[t].clear();
+        W.touched.clear();
+        const int id = ++W.id, c = ts / DF_CKPT;
+        W.free.resize(np);
+        for (int q = 0; q < np; q++) {
+            W.free[q].resize(H);
+            const int* src = &R.free_snap[R.foff[c] + (size_t)q * (H - ts)];
+            std::copy(src, src + (H - ts), W.free[q].begin() + ts);
+        }
+        W.wait.assign(R.wait_snap.begin() + (size_t)c * nw, R.wait_snap.begin() + (size_t)(c + 1) * nw);
+        W.maxrun.resize(np);
+        int n_wait = R.nwait[ts];
+        DBound lb = R.bnd[c];
+        double csum = 0;                                      // score of the candidate's decisions
+        const double dbase = R.dsc[ts] - (eg == 1 ? S.w1 * R.c1[j] + S.w2 * R.c2[j] : 0.0);
+        const int relj = std::min(P.release[j], H), r = S.rank[j];
+        const uint64_t bit = 1ULL << (r & 63);
+        W.g0 = R.g0; W.g1 = R.g1;
+        W.g0[r >> 6] &= ~bit; W.g1[r >> 6] &= ~bit;
+        if (et == 0) W.g0[r >> 6] |= bit;
+        W.gen = R.gen; W.gen[j] = to;
+        W.decided.clear(); W.slot_dec.clear();
+        int dcv = 0, n_open = 0;              // tracked jobs not settled yet
+        // a tracked job settles once decided in both runs, identically or with
+        // both on-prem footprints over: at the end of slot max(fend) - 1
+        auto track = [&](int k) { if (W.pstamp[k] != id) { W.pstamp[k] = id; n_open++; } };
+        auto check = [&](int k, int t) {
+            if (W.sstamp[k] == id || W.stamp[k] != id || R.dslot[k] > t) return;
+            const int at = (W.ctype[k] == R.type[k] && W.cstart[k] == R.start[k])
+                               ? t : std::max({t, W.cfend[k] - 1, R.fend[k] - 1});
+            W.sstamp[k] = id;
+            if (at <= t) { n_open--; return; }
+            if (W.settle_at[at].empty()) W.touched.push_back(at);
+            W.settle_at[at].push_back(k);
+        };
+        auto decide = [&](int k, int ty, int st, int fe, double a, double b, int, int kind) {
+            W.stamp[k] = id; W.ctype[k] = ty; W.cstart[k] = st; W.cfend[k] = fe; W.c1[k] = a; W.c2[k] = b;
+            csum += S.w1 * a + S.w2 * b;
+            dcv += kind == 2;
+            W.decided.push_back(k);
+            W.slot_dec.push_back(k);
+            track(k);
+        };
+        if (et == 1) {                                        // decided at init instead
+            if (W.wait[r >> 6] & bit) {
+                W.wait[r >> 6] &= ~bit; n_wait--;
+                if (F.xc[j] < ts) lb.C -= F.cs[j]; else { lb.A -= F.al[j]; lb.B -= F.be[j]; }
+            }
+            W.g1[r >> 6] |= bit;
+            const DOpt& o = P.jobs[j].cloud[S.cloud_opt[j]];
+            decide(j, o.type, o.earliest, 0, P.jobs[j].weight * (o.earliest + o.p - P.jobs[j].arrival), o.cost, -1, 1);
+            W.slot_dec.clear();
+        } else track(j);
+        int conv_t = -1;
+        bool pruned = false;
+        const double thr = R.s.pen_g + 1e-9 * std::max(1.0, std::abs(R.s.pen_g));
+        auto end_slot = [&](int t) {
+            W.slots++;
+            for (int i = R.dec_ptr[t]; i < R.dec_ptr[t + 1]; i++) { const int k = R.dec_job[i]; track(k); check(k, t); }
+            for (int k : W.slot_dec) check(k, t);
+            W.slot_dec.clear();
+            n_open -= (int)W.settle_at[t].size();
+            if (n_open == 0 && t + 1 < H) { conv_t = t; return true; }
+            if (prune) {
+                double unrel = F.lbrel_suf[t + 1] - R.gc_suf[t + 1];
+                if (relj > t) { if (et == 1) unrel -= F.lbrel[j]; if (eg == 1) unrel += F.lbrel[j]; }
+                if (dbase + csum + lb.A + lb.B * (t + 1) + lb.C + unrel > thr) { pruned = true; return true; }
+            }
+            return false;
+        };
+        run(ts, W.free, W.wait, n_wait, W.gen, W.g0, W.g1, W.maxrun, prune ? &lb : nullptr, decide, end_slot);
+        if (pruned) { W.pruned++; return std::numeric_limits<double>::infinity(); }
+        double f1 = R.s.f1, f2 = R.s.f2;
+        for (int k : W.decided) { f1 += W.c1[k] - R.c1[k]; f2 += W.c2[k] - R.c2[k]; }
+        int cv = R.cv[ts] + dcv;
+        if (conv_t >= 0) { W.converged++; cv += R.s.cv - R.cv[conv_t + 1]; }
+        return pen(S, f1, f2, cv);
+    }
+};
+
 struct DStats {
     long long decodes = 0;
+    long long flip_slots = 0, pruned = 0, converged = 0, records = 0;   // DEngine LS
     int ls_moves = 0, kicks = 0, iters = 0;
     double mu = 0;
     double decode_ms = 0;
     std::vector<std::pair<double, double>> trace;   // (elapsed ms, best pen_g)
 };
 
+// Index of the lowest value improving on cur (by more than 1e-12), or -1. A
+// later candidate must beat the best so far by a relative 1e-12: equal-valued
+// candidates (interchangeable jobs) then resolve to the first index whatever
+// order the decoder summed f1/f2 in, so all decode engines take the same path.
+template <class Val>
+inline int best_improving(size_t k, Val&& val, double cur) {
+    int bi = -1;
+    double bg = cur - 1e-12;
+    for (int i = 0; i < (int)k; i++) {
+        const double v = val(i);
+        if (v < bg - (bi < 0 ? 0.0 : 1e-12 * std::max(1.0, std::abs(bg)))) { bg = v; bi = i; }
+    }
+    return bi;
+}
+
 // Best-improvement LS over single genome flips; leaves the result in gen/cur.
+// Each step decodes candidates in batches of K until one improves, up to
+// K_max (<= K: one batch). With F (and neither DF_REF_DECODE nor the serial decoders) candidates are
+// decoded by DEngine: restarted from the recorded incumbent unless
+// DF_NO_RESTART, pruned by the lower bound with DF_PRUNE; cur is re-recorded.
 inline void dispatch_ls(const DProblem& P, const DScalar& S, std::vector<char>& gen,
                         DSched& cur, int flags, int K, int max_iters,
                         std::mt19937& rng, std::vector<DWork>& works, DStats& st,
-                        TimePoint t0) {
+                        TimePoint t0, const DFast* F = nullptr, int K_max = 0) {
     struct Cand { double est; int j; char to; };
     std::vector<Cand> cand;
     std::vector<DSched> res;
+    const bool fast = F && !(flags & (DF_REF_DECODE | DF_SERIAL | DF_BEST_OF | DF_WHY));
+    std::unique_ptr<DEngine> E;
+    DInc inc;
+    std::vector<double> pens;
+    std::vector<DFlipWork> fws(works.size());
+    if (fast) {
+        E = std::make_unique<DEngine>(P, S, *F, flags);
+        E->record(gen, inc, fws[0]);
+        st.records++;
+        cur = inc.s;
+    }
     for (int it = 0; it < max_iters; it++) {
         st.iters++;
         cand.clear();
@@ -433,7 +977,11 @@ inline void dispatch_ls(const DProblem& P, const DScalar& S, std::vector<char>& 
             }
         }
         if (cand.empty()) break;
-        const int k = std::min<int>(K, (int)cand.size());
+        // K_max candidates in batches of K: a batch is decoded only when the
+        // previous ones had no improving move, so the LS stops after K_max
+        // non-improving candidates but an improving step costs only K
+        const int k = std::min<int>(std::max(K, K_max), (int)cand.size());
+        std::vector<int> pos;              // candidate indices in batch order
         if ((flags & DF_MIX_RANK) && !(flags & DF_RANDOM_RANK)) {
             const int h = k / 2;
             std::partial_sort(cand.begin(), cand.begin() + h, cand.end(),
@@ -442,62 +990,113 @@ inline void dispatch_ls(const DProblem& P, const DScalar& S, std::vector<char>& 
                 std::uniform_int_distribution<int> d(i, (int)cand.size() - 1);
                 std::swap(cand[i], cand[d(rng)]);
             }
-        } else if (flags & DF_RANDOM_RANK) {
-            for (int i = 0; i < k; i++) {
-                std::uniform_int_distribution<int> d(i, (int)cand.size() - 1);
-                std::swap(cand[i], cand[d(rng)]);
+            // each batch: the next K/2 by estimate, then the next random ones
+            const int he = std::max(K / 2, 1);
+            for (int e = 0, r = h; e < h || r < k;) {
+                for (int c = 0; c < he && e < h; c++) pos.push_back(e++);
+                for (int c = 0; c < K - he && r < k; c++) pos.push_back(r++);
             }
         } else {
-            std::partial_sort(cand.begin(), cand.begin() + k, cand.end(),
-                              [](const Cand& a, const Cand& b) { return a.est < b.est; });
-        }
-        res.resize(k);
-        const TimePoint td = Clock::now();
-#ifdef _OPENMP
-        // Already inside a parallel region (one memetic child per thread):
-        // decode serially on this thread's workspace.
-        #pragma omp parallel if (!omp_in_parallel())
-        {
-            DWork& W = works[omp_get_thread_num()];   // 0 in a nested (inactive) team
-            std::vector<char> g2;
-            #pragma omp for schedule(dynamic, 1)
-            for (int i = 0; i < k; i++) {
-                g2 = gen;
-                g2[cand[i].j] = cand[i].to;
-                decode(P, S, g2, flags, W, res[i]);
+            if (flags & DF_RANDOM_RANK) {
+                for (int i = 0; i < k; i++) {
+                    std::uniform_int_distribution<int> d(i, (int)cand.size() - 1);
+                    std::swap(cand[i], cand[d(rng)]);
+                }
+            } else {
+                std::partial_sort(cand.begin(), cand.begin() + k, cand.end(),
+                                  [](const Cand& a, const Cand& b) { return a.est < b.est; });
             }
+            pos.resize(k);
+            std::iota(pos.begin(), pos.end(), 0);
         }
+        bool moved = false;
+        for (int b0 = 0; b0 < k && !moved; b0 += K) {
+            const int m = std::min(K, k - b0);
+            const int* ix = pos.data() + b0;
+            const TimePoint td = Clock::now();
+            if (fast) {
+                pens.assign(m, 0.0);
+                const bool restart = !(flags & DF_NO_RESTART), prune = flags & DF_PRUNE;
+                const double thr = prune ? cur.pen_g + 1e-9 * std::max(1.0, std::abs(cur.pen_g))
+                                         : std::numeric_limits<double>::infinity();
+#ifdef _OPENMP
+                #pragma omp parallel if (!omp_in_parallel())
+                {
+                    DFlipWork& W = fws[omp_get_thread_num()];
+                    std::vector<char> g2;
+                    #pragma omp for schedule(dynamic, 1)
+                    for (int i = 0; i < m; i++) {
+                        const Cand& c = cand[ix[i]];
+                        if (restart) pens[i] = E->flip(inc, c.j, c.to, W, prune);
+                        else { g2 = gen; g2[c.j] = c.to; pens[i] = E->full_pen(g2, W, thr); }
+                    }
+                }
 #else
-        for (int i = 0; i < k; i++) {
-            std::vector<char> g2 = gen;
-            g2[cand[i].j] = cand[i].to;
-            decode(P, S, g2, flags, works[0], res[i]);
-        }
+                for (int i = 0; i < m; i++) {
+                    const Cand& c = cand[ix[i]];
+                    if (restart) pens[i] = E->flip(inc, c.j, c.to, fws[0], prune);
+                    else { std::vector<char> g2 = gen; g2[c.j] = c.to; pens[i] = E->full_pen(g2, fws[0], thr); }
+                }
 #endif
-        st.decode_ms += ms_since(td);
-        st.decodes += k;
-        int bi = -1;
-        double bg = cur.pen_g - 1e-12;
-        for (int i = 0; i < k; i++) if (res[i].pen_g < bg) { bg = res[i].pen_g; bi = i; }
-        if (bi < 0) break;
-        gen[cand[bi].j] = cand[bi].to;
-        cur = std::move(res[bi]);
-        st.ls_moves++;
-        st.trace.emplace_back(ms_since(t0), cur.pen_g);
+                st.decode_ms += ms_since(td);
+                st.decodes += m;
+                const int bi = best_improving(m, [&](int i) { return pens[i]; }, cur.pen_g);
+                if (bi < 0) continue;
+                gen[cand[ix[bi]].j] = cand[ix[bi]].to;
+                E->record(gen, inc, fws[0]);
+                st.records++;
+                cur = inc.s;
+            } else {
+                res.resize(m);
+#ifdef _OPENMP
+                // Already inside a parallel region (one memetic child per thread):
+                // decode serially on this thread's workspace.
+                #pragma omp parallel if (!omp_in_parallel())
+                {
+                    DWork& W = works[omp_get_thread_num()];   // 0 in a nested (inactive) team
+                    std::vector<char> g2;
+                    #pragma omp for schedule(dynamic, 1)
+                    for (int i = 0; i < m; i++) {
+                        g2 = gen;
+                        g2[cand[ix[i]].j] = cand[ix[i]].to;
+                        decode(P, S, g2, flags, W, res[i]);
+                    }
+                }
+#else
+                for (int i = 0; i < m; i++) {
+                    std::vector<char> g2 = gen;
+                    g2[cand[ix[i]].j] = cand[ix[i]].to;
+                    decode(P, S, g2, flags, works[0], res[i]);
+                }
+#endif
+                st.decode_ms += ms_since(td);
+                st.decodes += m;
+                const int bi = best_improving(m, [&](int i) { return res[i].pen_g; }, cur.pen_g);
+                if (bi < 0) continue;
+                gen[cand[ix[bi]].j] = cand[ix[bi]].to;
+                cur = std::move(res[bi]);
+            }
+            moved = true;
+            st.ls_moves++;
+            st.trace.emplace_back(ms_since(t0), cur.pen_g);
+        }
+        if (!moved) break;
     }
+    for (const DFlipWork& W : fws) { st.flip_slots += W.slots; st.pruned += W.pruned; st.converged += W.converged; }
 }
 
 struct DispatchResult {
     std::vector<std::tuple<int,int>> asgn;
     DSched best;
+    std::vector<char> gen;             // genome of `best`
     DStats st;
     double total_ms = 0;
 };
 
 inline DispatchResult run_weighted_dispatch(
     const DProblem& P, double w1, double w2, double f1_cap, int seed, int n_threads,
-    int K, int max_iters, int n_kicks, int kick_size, int flags, int ls, double mu,
-    int n_mu) {
+    int K, int max_iters, int n_kicks, int kick_size, int flags_in, int ls, double mu,
+    int n_mu, int kick_patience = 0, int K_max = 0) {
     py::gil_scoped_release release;
     set_num_threads(n_threads);
     const TimePoint t0 = Clock::now();
@@ -513,58 +1112,91 @@ inline DispatchResult run_weighted_dispatch(
     // Starting priority mixes: the given mu, or the n_mu best of a grid by
     // the all-auto decode.
     static const double grid[] = {0.0, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0};
+    // mu = -2 marks the EDF start (set_priority's edf order)
     std::vector<std::pair<double, double>> starts;   // (decode pen_g, mu)
-    if (mu >= 0) {
+    if (flags_in & DF_EDF) {
+        starts.push_back({0.0, -2.0});
+    } else if (mu >= 0) {
         starts.push_back({0.0, mu});
     } else {
         std::vector<char> g0(P.n, 0);
         for (double m : grid) {
             set_priority(P, S, m);
             DSched c;
-            decode(P, S, g0, flags, works[0], c);
+            decode(P, S, g0, flags_in, works[0], c);
             st.decodes++;
             starts.push_back({c.pen_g, m});
         }
         std::stable_sort(starts.begin(), starts.end());
         starts.resize(std::min<int>(std::max(n_mu, 1), (int)starts.size()));
     }
+    if ((flags_in & DF_EDF_ADD) && !(flags_in & DF_EDF)) starts.push_back({0.0, -2.0});
 
     std::vector<char> best_gen;
     DSched best;
     double best_mu = starts[0].second;
+    // per-start priority, flags and fast-decoder tables; the EDF order serves
+    // jobs before their indifference deadline, so its start may drop the
+    // deadline offload (DF_EDF_NODL)
+    auto start_flags = [&](double m) {
+        return (m == -2.0 && (flags_in & DF_EDF_NODL)) ? (flags_in | DF_NO_DEADLINE) : flags_in;
+    };
+    // ILS kicks from (gen, cur) of start m; kick_patience > 0 stops after that
+    // many kicks in a row without improving
+    auto kicks = [&](double m, int flags, const DFast& F, int nk, std::vector<char>& lbest_gen, DSched& lbest) {
+        if (!ls || (flags & DF_NO_KICK)) return;
+        for (int kk = 0, stale = 0; kk < nk; kk++) {
+            if (kick_patience > 0 && stale >= kick_patience) break;
+            st.kicks++;
+            std::vector<char> g2 = lbest_gen;
+            // flip kick_size jobs: offload random on-prem jobs / recall random cloud jobs
+            for (int f = 0; f < kick_size; f++) {
+                const int j = rng() % P.n;
+                if (lbest.on[j] && S.cloud_opt[j] >= 0) g2[j] = 1;
+                else if (!lbest.on[j] && !P.jobs[j].onprem.empty()) g2[j] = (g2[j] == 1) ? 0 : 2;
+            }
+            DSched c;
+            decode(P, S, g2, flags, works[0], c);
+            st.decodes++;
+            dispatch_ls(P, S, g2, c, flags, K, max_iters, rng, works, st, t0, &F, K_max);
+            if (c.pen_g < lbest.pen_g - 1e-12) {
+                lbest = std::move(c); lbest_gen = std::move(g2); stale = 0;
+            } else stale++;
+        }
+        (void)m;
+    };
+    auto keep = [&](double m, std::vector<char>& g, DSched& c) {
+        if (best.type.empty() || c.pen_g < best.pen_g - 1e-12) {
+            best = c; best_gen = g; best_mu = m;
+            st.trace.emplace_back(ms_since(t0), best.pen_g);
+        }
+    };
+    // Each start: local search, then its share of the kicks (DF_FOCUS_KICKS:
+    // local search from every start, then all kicks to the best start).
+    const bool split = !(flags_in & DF_FOCUS_KICKS);
     const int kicks_per = n_kicks / (int)starts.size();
-    for (auto& [_, m] : starts) {
-        set_priority(P, S, m);
+    for (auto& [_, m0] : starts) {
+        const double m = m0;
+        set_priority(P, S, m, m == -2.0);
+        const int flags = start_flags(m);
+        const DFast F = build_dfast(P, S, !(flags & DF_NO_DEADLINE));
         std::vector<char> gen(P.n, 0);
         DSched cur;
         decode(P, S, gen, flags, works[0], cur);
         st.decodes++;
-        if (ls) dispatch_ls(P, S, gen, cur, flags, K, max_iters, rng, works, st, t0);
-        std::vector<char> lbest_gen = gen;
-        DSched lbest = cur;
-        if (ls && !(flags & DF_NO_KICK)) {
-            for (int kk = 0; kk < kicks_per; kk++) {
-                st.kicks++;
-                std::vector<char> g2 = lbest_gen;
-                // flip kick_size jobs: offload random on-prem jobs / recall random cloud jobs
-                for (int f = 0; f < kick_size; f++) {
-                    const int j = rng() % P.n;
-                    if (lbest.on[j] && S.cloud_opt[j] >= 0) g2[j] = 1;
-                    else if (!lbest.on[j] && !P.jobs[j].onprem.empty()) g2[j] = (g2[j] == 1) ? 0 : 2;
-                }
-                DSched c;
-                decode(P, S, g2, flags, works[0], c);
-                st.decodes++;
-                dispatch_ls(P, S, g2, c, flags, K, max_iters, rng, works, st, t0);
-                if (c.pen_g < lbest.pen_g - 1e-12) {
-                    lbest = std::move(c); lbest_gen = std::move(g2);
-                }
-            }
-        }
-        if (best.type.empty() || lbest.pen_g < best.pen_g - 1e-12) {
-            best = std::move(lbest); best_gen = std::move(lbest_gen); best_mu = m;
-            st.trace.emplace_back(ms_since(t0), best.pen_g);
-        }
+        if (ls) dispatch_ls(P, S, gen, cur, flags, K, max_iters, rng, works, st, t0, &F, K_max);
+        if (split) kicks(m, flags, F, kicks_per, gen, cur);
+        keep(m, gen, cur);
+    }
+    if (!split) {
+        const double m = best_mu;
+        set_priority(P, S, m, m == -2.0);
+        const int flags = start_flags(m);
+        const DFast F = build_dfast(P, S, !(flags & DF_NO_DEADLINE));
+        std::vector<char> gen = best_gen;
+        DSched cur = best;
+        kicks(m, flags, F, n_kicks, gen, cur);
+        keep(m, gen, cur);
     }
     st.mu = best_mu;
 
@@ -572,6 +1204,7 @@ inline DispatchResult run_weighted_dispatch(
     R.asgn.resize(P.n);
     for (int j = 0; j < P.n; j++) R.asgn[j] = {best.type[j], best.start[j]};
     R.best = std::move(best);
+    R.gen = std::move(best_gen);
     R.st = std::move(st);
     R.total_ms = ms_since(t0);
     return R;

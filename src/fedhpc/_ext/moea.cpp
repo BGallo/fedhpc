@@ -254,16 +254,21 @@ PYBIND11_MODULE(_moea, m) {
            const std::vector<int>& type_cap,
            const std::vector<std::tuple<int,int,int>>& init_occ,
            double w1, double w2, double f1_cap, int seed, int n_threads,
-           int K, int max_iters, int n_kicks, int kick_size, int flags, int ls, double mu, int n_mu) {
+           int K, int max_iters, int n_kicks, int kick_size, int flags, int ls, double mu, int n_mu,
+           int kick_patience, int K_max) {
             const DProblem P = build_dproblem(H, jobs, type_cap, init_occ);
             DispatchResult R = run_weighted_dispatch(P, w1, w2, f1_cap, seed, n_threads,
-                                                     K, max_iters, n_kicks, kick_size, flags, ls, mu, n_mu);
+                                                     K, max_iters, n_kicks, kick_size, flags, ls, mu, n_mu,
+                                                     kick_patience, K_max);
             py::dict d;
             d["decodes"] = R.st.decodes; d["ls_moves"] = R.st.ls_moves; d["kicks"] = R.st.kicks;
+            d["flip_slots"] = R.st.flip_slots; d["pruned"] = R.st.pruned;
+            d["converged"] = R.st.converged; d["records"] = R.st.records;
             d["iters"] = R.st.iters; d["decode_ms"] = R.st.decode_ms; d["total_ms"] = R.total_ms;
             d["cv"] = R.best.cv; d["n_cloud"] = R.best.n_cloud;
             d["n_auto_off"] = R.best.n_auto_off; d["pen_g"] = R.best.pen_g;
             d["trace"] = R.st.trace; d["mu"] = R.st.mu;
+            d["gen"] = std::vector<int>(R.gen.begin(), R.gen.end());
             return py::make_tuple(R.asgn, R.best.f1, R.best.f2, R.best.g, d);
         },
         py::arg("H"), py::arg("jobs"), py::arg("type_cap"), py::arg("init_occ"),
@@ -272,16 +277,62 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("K") = 64, py::arg("max_iters") = 100000,
         py::arg("n_kicks") = 0, py::arg("kick_size") = 8,
         py::arg("flags") = 0, py::arg("ls") = 1, py::arg("mu") = 0.0, py::arg("n_mu") = 1,
+        py::arg("kick_patience") = 0, py::arg("K_max") = 0,
         "Weighted-sum solver on the time-driven dispatch decoder (see\n"
         "weighted_dispatch.hpp). jobs[j] = (arrival, weight, [(type, p_occ,\n"
         "cost, earliest_start, latest_start), ...]). flags: DFlag bitmask\n"
         "(1 no deadline offload, 2/4 pool tie-break most-free/best-fit,\n"
         "8 random LS candidates, 16 no recall moves, 32 no ILS kicks,\n"
         "64 half est-ranked / half random LS candidates, 256 serial SGS\n"
-        "decoder, 512 best of dispatch and serial SGS).\n"
+        "decoder, 512 best of dispatch and serial SGS, 1024 record offload\n"
+        "reasons, 2048 indifference-deadline EDF priority only, 4096 EDF as an\n"
+        "extra start, 8192 the EDF start without deadline offload, 16384 LS on the\n"
+        "reference decoder, 32768 no restart decodes, 65536 lower-bound pruning,\n"
+        "131072 all kicks to the best start after LS instead of split over them).\n"
         "mu: dispatch priority mix (0 = WSPT; < 0 = search from the n_mu best of a\n"
         "grid by all-auto decode; n_kicks is split across them).\n"
+        "K_max: candidates per LS step, decoded in batches of K until one\n"
+        "improves (<= K: one batch of K).\n"
+        "kick_patience: stop a start's kicks after this many in a row without\n"
+        "improvement (0 = run all).\n"
         "Returns (assignment, f1, f2, g, stats)."
+    );
+
+    m.def("dispatch_decode",
+        [](int H,
+           const std::vector<std::tuple<double, double,
+               std::vector<std::tuple<int, int, double, int, int>>>>& jobs,
+           const std::vector<int>& type_cap,
+           const std::vector<std::tuple<int,int,int>>& init_occ,
+           double w1, double w2, double f1_cap, const std::vector<int>& gen_in,
+           double mu, int flags, const std::vector<int>& order) {
+            const DProblem P = build_dproblem(H, jobs, type_cap, init_occ);
+            DScalar S = make_scalar(P, w1, w2, f1_cap);
+            set_priority(P, S, mu);
+            if (!order.empty()) {
+                if ((int)order.size() != P.n) throw std::invalid_argument("order must list every job");
+                S.order = order;
+                for (int i = 0; i < P.n; i++) S.rank[S.order[i]] = i;
+            }
+            std::vector<char> gen(gen_in.begin(), gen_in.end());
+            if ((int)gen.size() != P.n) throw std::invalid_argument("gen must have one entry per job");
+            DWork W;
+            DSched out;
+            decode(P, S, gen, flags | DF_WHY, W, out);
+            std::vector<std::tuple<int,int>> asgn(P.n);
+            for (int j = 0; j < P.n; j++) asgn[j] = {out.type[j], out.start[j]};
+            std::vector<int> why(out.why.begin(), out.why.end());
+            if (why.empty()) why.assign(P.n, -1);   // serial decoder records no reasons
+            return py::make_tuple(asgn, out.f1, out.f2, out.pen_g, why, out.cv);
+        },
+        py::arg("H"), py::arg("jobs"), py::arg("type_cap"), py::arg("init_occ"),
+        py::arg("w1"), py::arg("w2"), py::arg("f1_cap"), py::arg("gen"),
+        py::arg("mu") = 0.0, py::arg("flags") = 0, py::arg("order") = std::vector<int>{},
+        "Diagnostics: one decode of a given genome (0 auto, 1 cloud, 2 on-prem)\n"
+        "with priority mix mu, or an explicit priority order (all job indices).\n"
+        "Returns (assignment, f1, f2, pen_g, why, cv); why per job: 0 on-prem,\n"
+        "1 gene, 2 deadline offload at placement, 3 deadline offload while\n"
+        "waiting, 4 horizon (no on-prem start left), 5 left at the horizon."
     );
 
     m.def("weighted_memetic",

@@ -59,10 +59,11 @@ def run_one(name: str, threads: int, time_limit: float, reductions: bool = True)
     inst = Instance.from_file(path) if path.exists() else g.build(name)
     spec = g.InstanceSpec.parse(name)
     grb = dict(OutputFlag=0, Threads=threads, TimeLimit=time_limit, MIPGap=0)
-    rec = dict(name=name, cls=spec.cls, workload=spec.workload, counts=list(spec.counts),
+    rec = dict(name=name, cls=spec.cls, workload=spec.workload, count=spec.count,
                load=spec.load, io=spec.io, n_jobs=len(inst.jobs),
                io_gb=sum(j.io_volume for j in inst.jobs),
-               n_running=sum(inst.n_running.values()), onprem_nodes=sum(spec.counts),
+               n_running=sum(inst.n_running.values()),
+               onprem_nodes=spec.count * len(g.onprem_types(spec.cls, spec.workload)),
                reductions=reductions)
 
     t = time.perf_counter(); s1 = solve_f1(inst, formulation=fmt, **grb)

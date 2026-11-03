@@ -1,8 +1,8 @@
 """The permutative instance classes of fedhpc.instance_gen.
 
-Structural checks run on class A's full factorial (162 instances), class B's
-pairwise-covering set and a seeded sample with counts anywhere in
-[100, 500]; exact checks pin the properties the design guarantees:
+Structural checks run on both classes' full factorials (54 instances each)
+and a seeded sample with counts anywhere in [100, 500]; exact checks pin the
+properties the design guarantees:
 
 * unlimited cloud lets every job start at its release, so greedy
   earliest-completion lies between "every job at release on its fastest
@@ -12,12 +12,9 @@ pairwise-covering set and a seeded sample with counts anywhere in
   prefix of the full one) and raising the io level only lengthens and
   prices up cloud options (ι_j grows per job), so the optimal turnaround and
   the optimal cost can only get worse;
-* equivalent specs (interchangeable on-prem types) describe the same problem,
-  and enumeration yields one representative per class;
 * every type an instance carries is one some job would be placed on.
 """
 import hashlib
-import itertools
 import json
 import math
 from pathlib import Path
@@ -32,9 +29,9 @@ from fedhpc.model import solve_f1, solve_f2
 _GUROBI = {"OutputFlag": 0}
 
 ALL_A = list(g.iter_specs("A"))
-COVER_B = g.covering_specs("B")
-SAMPLED = g.sample_specs("A", 15, seed=1) + g.sample_specs("B", 25, seed=2)
-STRUCTURAL = ALL_A + COVER_B + SAMPLED
+ALL_B = list(g.iter_specs("B"))
+SAMPLED = g.sample_specs("A", 10, seed=1) + g.sample_specs("B", 15, seed=2)
+STRUCTURAL = ALL_A + ALL_B + SAMPLED
 
 
 def _ids(specs):
@@ -68,47 +65,24 @@ def _cloud_turnaround(inst):
 # ── the design space ─────────────────────────────────────────────────────────
 
 def test_space_sizes():
-    assert len(ALL_A) == g.space_size("A") == 2 * 9 * 3 * 3
-    assert g.space_size("B", distinct=False) == (3 ** 4 + 3 ** 5) * 3 * 3
-    distinct = {g.canonical(s).name for s in g.iter_specs("B", distinct=False)}
-    assert len(distinct) == g.space_size("B") == sum(1 for _ in g.iter_specs("B"))
-    assert len({s.name for s in ALL_A}) == len(ALL_A)
-
-
-@pytest.mark.parametrize("n_factors", [4, 10])
-def test_orthogonal_array_covers_every_factor_pair(n_factors):
-    rows = g._orthogonal_array(n_factors)
-    for a in range(n_factors):
-        for b in range(a + 1, n_factors):
-            assert {(r[a], r[b]) for r in rows} == {(x, y) for x in range(3) for y in range(3)}
-
-
-@pytest.mark.parametrize("cls", sorted(g.CLASSES))
-def test_covering_set_represents_every_array_row(cls):
-    names = {s.name for s in g.covering_specs(cls)}
-    for w in g.WORKLOADS:
-        k = len(g.onprem_types(cls, w))
-        for row in g._orthogonal_array(k + 2):
-            spec = g.InstanceSpec(cls, w, tuple(g.COUNT_LEVELS[i] for i in row[:k]),
-                                  "FHE"[row[k]], "LMH"[row[k + 1]])
-            assert g.canonical(spec).name in names
+    assert len(ALL_A) == len(ALL_B) == g.space_size("A") == g.space_size("B") == 2 * 3 * 3 * 3
+    assert len({s.name for s in ALL_A + ALL_B}) == 108
 
 
 def test_catalogue_matches_the_request():
     a, b = g.CLASSES["A"], g.CLASSES["B"]
     assert len(a) == 2 and all(t.clouds == ((("aws", t.clouds[0][1]),)) for t in a)
-    assert len(b) == 5 and all([p for p, _ in t.clouds] == ["aws", "azure"] for t in b)
+    assert len(b) == 4 and all([p for p, _ in t.clouds] == ["aws", "azure"] for t in b)
 
 
 def test_only_pickable_types_are_kept():
-    """No fedhpc job fits c16; m32's equivalents lose to c32's (no job needs
-    more than 256 GB on 32 cores); D128s_v6 stays though m6i.32xlarge is
+    """No fedhpc job fits c16; D128s_v6 stays though m6i.32xlarge is
     cheaper, since dominance is checked within a provider."""
     names = lambda c, w: [t.name for t in g.onprem_types(c, w)]  # noqa: E731
     skus = lambda c, w: [sku for _, sku, _ in g.cloud_types(c, w)]  # noqa: E731
     assert names("A", "fedhpc") == names("A", "pos") == ["c40", "c64"]
-    assert names("B", "fedhpc") == ["c32", "c40", "c64", "m32"]
-    assert names("B", "pos") == ["c16", "c32", "c40", "c64", "m32"]
+    assert names("B", "fedhpc") == ["c32", "c40", "c64"]
+    assert names("B", "pos") == ["c16", "c32", "c40", "c64"]
     assert skus("A", "fedhpc") == skus("A", "pos") == ["m6i.24xlarge", "m6i.32xlarge"]
     big = ["m6i.16xlarge", "Standard_D64s_v5", "m6i.24xlarge", "Standard_D96s_v5",
            "m6i.32xlarge", "Standard_D128s_v6"]
@@ -133,12 +107,11 @@ def test_price_file_is_complete():
 
 
 @pytest.mark.parametrize("bad", [
-    dict(cls="C"), dict(workload="x"), dict(counts=(99, 300)), dict(counts=(300, 501)),
-    dict(counts=(300,)), dict(load="Q"), dict(load=("F", "H")), dict(io="X"),
-    dict(counts=(300.0, 300)),
+    dict(cls="C"), dict(workload="x"), dict(count=99), dict(count=501),
+    dict(count=(300, 300)), dict(count=300.0), dict(load="Q"), dict(io="X"),
 ])
 def test_spec_validation(bad):
-    kw = dict(cls="A", workload="pos", counts=(300, 300), load="H", io="M") | bad
+    kw = dict(cls="A", workload="pos", count=300, load="H", io="M") | bad
     with pytest.raises(ValueError):
         g.InstanceSpec(**kw)
 
@@ -152,13 +125,14 @@ def test_structure(spec, built):
     onprem = g.onprem_types(spec.cls, spec.workload)
     k = len(onprem)
     types = inst.instance_types
-    assert [m.capacity for m in types[:k]] == list(spec.counts)
+    assert [m.capacity for m in types[:k]] == [spec.count] * k
     assert all(m.capacity is None and m.kind == "cloud" for m in types[k:])
     assert len(types) == k + len(g.cloud_types(spec.cls, spec.workload))
-    # running jobs realise the load: none / ⌊N/2⌋ / N per type
-    expect = {i: n for i, n in enumerate(spec.running_counts()) if n}
-    assert inst.n_running == expect
-    for i, n in enumerate(spec.counts):
+    # running jobs realise the load: none / ⌊N/2⌋ / N on every type
+    n = spec.count
+    assert inst.n_running == ({i: spec.running_count() for i in range(k)}
+                              if spec.running_count() else {})
+    for i in range(k):
         assert inst.occupied.get((i, 0), 0) == {"F": 0, "H": n // 2, "E": n}[spec.load]
     # cost per slot from the price file; egress price and transfer time per provider
     slot_h = inst.slot_size_seconds / 3600
@@ -220,11 +194,11 @@ NEST = [s for s in STRUCTURAL if s.load == "E"][:40]
 @pytest.mark.parametrize("spec", NEST, ids=_ids(NEST))
 def test_running_ends_follow_the_workload_and_nest_across_loads(spec):
     pool = {r["end"] for r in g._workload(spec.workload)["running_jobs"]}
-    half_spec = g.InstanceSpec(spec.cls, spec.workload, spec.counts, "H", spec.io)
-    for i in range(len(spec.counts)):
+    half_spec = g.InstanceSpec(spec.cls, spec.workload, spec.count, "H", spec.io)
+    for i in range(len(g.onprem_types(spec.cls, spec.workload))):
         full, half = g.running_ends(spec, i), g.running_ends(half_spec, i)
-        assert len(full) == spec.counts[i] and set(full) <= pool
-        assert half == full[:spec.counts[i] // 2]
+        assert len(full) == spec.count and set(full) <= pool
+        assert half == full[:spec.count // 2]
 
 
 # ── result data ──────────────────────────────────────────────────────────────
@@ -232,7 +206,7 @@ def test_running_ends_follow_the_workload_and_nest_across_loads(spec):
 @pytest.mark.parametrize("workload", sorted(g.WORKLOADS))
 def test_io_volume_grows_with_the_level_and_follows_the_policies(workload):
     vols = {io: [j["io_volume"] for j in g.generate(g.InstanceSpec(
-        "A", workload, (300, 300), "F", io))["jobs"]] for io in "LMH"}
+        "A", workload, 300, "F", io))["jobs"]] for io in "LMH"}
     assert all(a <= b <= c for a, b, c in zip(vols["L"], vols["M"], vols["H"]))
     assert any(a < c for a, c in zip(vols["L"], vols["H"]))
     # without noise and caps a 40-core job's volume is rate × core-hours
@@ -253,63 +227,6 @@ def test_io_time_is_the_disk_bound_rate():
     assert io_model.EGRESS_USD_PER_GB["azure"] < io_model.EGRESS_USD_PER_GB["aws"]
 
 
-# ── equivalent instances ─────────────────────────────────────────────────────
-
-def test_class_b_equivalences():
-    """c32 and m32 fit the same jobs in both workloads."""
-    assert g.type_groups("B", "fedhpc") == ((0, 3), (1,), (2,))
-    assert g.type_groups("B", "pos") == ((0,), (1, 4), (2,), (3,))
-    assert g.type_groups("A", "fedhpc") == g.type_groups("A", "pos") == ((0,), (1,))
-
-
-def _variants(spec):
-    """Specs equivalent to ``spec``: every interchangeable group permuted."""
-    groups = g.type_groups(spec.cls, spec.workload)
-    out = []
-    for perm in itertools.product(*(itertools.permutations(gr) for gr in groups)):
-        counts = list(spec.counts)
-        for gr, p in zip(groups, perm):
-            for i, j in zip(gr, p):
-                counts[i] = spec.counts[j]
-        out.append(g.InstanceSpec(spec.cls, spec.workload, tuple(counts), spec.load, spec.io))
-    return out
-
-
-EQUIV = [s for s in g.sample_specs("B", 30, seed=3)
-         if any(len(gr) > 1 for gr in g.type_groups(s.cls, s.workload))][:12]
-
-
-def _signature(inst, k):
-    """The instance as an optimisation problem, up to relabelling the on-prem
-    types: per on-prem type some job fits (jobs it fits, capacity, busy
-    profile), sorted; the cloud types and jobs in order."""
-    onprem = sorted(
-        (fit, m.capacity, tuple(inst.occupied.get((m.id, t), 0) for t in range(inst.horizon)))
-        for m in inst.instance_types[:k]
-        if (fit := tuple(sorted(j.id for j in inst.jobs if m.id in inst.F[j.id]))))
-    clouds = [(m.cpu, m.mem, m.cost_vm, m.cost_io, m.io_time) for m in inst.instance_types[k:]]
-    return onprem, clouds, [(j.id, j.arrival, j.exec_time, j.io_volume) for j in inst.jobs]
-
-
-@pytest.mark.parametrize("spec", EQUIV, ids=_ids(EQUIV))
-def test_equivalent_specs_share_a_canonical_form_and_a_problem(spec):
-    assert g.canonical(spec) == spec
-    k = len(g.onprem_types(spec.cls, spec.workload))
-    sig = _signature(g.build(spec), k)
-    for v in _variants(spec):
-        assert g.canonical(v) == spec
-        assert _signature(g.build(v), k) == sig
-
-
-@pytest.mark.needs_full_license
-@pytest.mark.parametrize("spec", EQUIV[:3], ids=_ids(EQUIV[:3]))
-def test_equivalent_specs_have_equal_optima(spec):
-    ref = solve_f1(g.build(spec), MIPGap=0, **_GUROBI)
-    for v in _variants(spec)[1:]:
-        s = solve_f1(g.build(v), MIPGap=0, **_GUROBI)
-        assert (s.f1, s.f2) == pytest.approx((ref.f1, ref.f2))
-
-
 # ── files on disk ────────────────────────────────────────────────────────────
 
 _MANIFEST = g.DATA / "generated" / "manifest.json"
@@ -318,7 +235,7 @@ _MANIFEST = g.DATA / "generated" / "manifest.json"
 @pytest.mark.skipif(not _MANIFEST.exists(), reason="run scripts/build_generated_instances.py")
 def test_written_files_match_the_generator():
     manifest = json.loads(_MANIFEST.read_text())
-    assert {s.name for s in ALL_A + COVER_B} <= manifest.keys()
+    assert {s.name for s in ALL_A + ALL_B} <= manifest.keys()
     for name in sorted(manifest)[::7]:
         path = _MANIFEST.parent / f"{name}.json"
         raw = path.read_bytes()
@@ -332,8 +249,8 @@ def _chains(cls, n_chains, factor):
     """Per chain: one base spec with its load raised F → H → E, or its io
     level raised L → M → H."""
     levels = {"load": "FHE", "io": "LMH"}[factor]
-    return [[g.InstanceSpec(s.cls, s.workload, s.counts, **({"load": s.load, "io": s.io}
-                                                            | {factor: lvl}))
+    return [[g.InstanceSpec(s.cls, s.workload, s.count, **({"load": s.load, "io": s.io}
+                                                           | {factor: lvl}))
              for lvl in levels]
             for s in g.sample_specs(cls, n_chains, seed=7)]
 

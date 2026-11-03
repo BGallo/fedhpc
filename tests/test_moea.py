@@ -1417,7 +1417,12 @@ class TestWeightedDispatch:
     recover the exact optima on the known-answer instance."""
 
     _REFS = dict(f1_T=10.0, f2_T=50.0, f1_0=30.0)
-    _FLAG_SETS = [0, 1, 2, 4, 8, 16, 32, 64, 256, 512, 64 | 256 | 1, 64 | 512]
+    _FLAG_SETS = [0, 1, 2, 4, 8, 16, 32, 64, 256, 512, 64 | 256 | 1, 64 | 512,
+                  64 | 2048, 64 | 4096, 64 | 4096 | 8192, 64 | 4096 | 8192 | 16384,
+                  64 | 4096 | 8192 | 32768, 64 | 4096 | 8192 | 65536, 64 | 2 | 65536,
+                  64 | 4096 | 8192 | 131072]
+    # LS decode engine arms: reference decoder, full fast decodes, restarts, pruning
+    _ENGINES = [16384, 32768, 0, 65536, 32768 | 65536]
 
     @pytest.mark.parametrize("flags", _FLAG_SETS)
     @pytest.mark.parametrize("lam", [0.0, 0.25, 0.5, 0.75, 1.0])
@@ -1441,6 +1446,33 @@ class TestWeightedDispatch:
     def test_lands_on_exact_front(self, lam, known_pareto_inst, known_pareto_front):
         s = weighted_solve_dispatch(known_pareto_inst, lam, **self._REFS)
         assert (s.f1, s.f2) in known_pareto_front
+
+    @pytest.mark.parametrize("lam", [0.25, 0.75])
+    def test_engines_decide_identically(self, lam, pos_congestion_inst):
+        """The decode engines differ only in speed: every arm takes the same
+        LS trajectory to the same schedule."""
+        inst = pos_congestion_inst
+        runs = [weighted_solve_dispatch(inst, lam, flags=64 | 4096 | 8192 | e, n_kicks=4,
+                                        kick_patience=0, return_stats=True, **POS_CONGESTION_REFS)
+                for e in self._ENGINES]
+        (a, sa), rest = runs[0], runs[1:]
+        for b, sb in rest:
+            assert (sb["decodes"], sb["ls_moves"]) == (sa["decodes"], sa["ls_moves"])
+            assert b.assignment == a.assignment
+            assert b.f1 == pytest.approx(a.f1, rel=1e-12) and b.f2 == pytest.approx(a.f2, rel=1e-12)
+
+    @pytest.mark.parametrize("K_max", [0, 8, 64])
+    def test_batched_steps(self, K_max, known_pareto_inst):
+        """K_max > K decodes more batches per step only when K finds no improvement."""
+        a = weighted_solve_dispatch(known_pareto_inst, 0.5, K=2, K_max=K_max, n_threads=1, **self._REFS)
+        b = weighted_solve_dispatch(known_pareto_inst, 0.5, K=2, K_max=K_max, n_threads=4, **self._REFS)
+        assert (a.f1, a.f2, a.assignment) == (b.f1, b.f2, b.assignment)
+        assert capacity_violations(known_pareto_inst, a) == []
+
+    def test_kick_patience_stops_kicks(self, pos_congestion_inst):
+        _, st = weighted_solve_dispatch(pos_congestion_inst, 0.5, n_kicks=40, kick_patience=1,
+                                        return_stats=True, **POS_CONGESTION_REFS)
+        assert st["kicks"] < 40
 
     @pytest.mark.parametrize("lam", [0.1, 0.5, 0.9])
     def test_feasible_on_data_instance(self, lam, pos_congestion_inst):

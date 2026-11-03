@@ -1,0 +1,48 @@
+{
+ "run": "bench_io_noreduc",
+ "command": "nohup nice -n 10 uv run python scripts/bench_generated.py --manifest --no-reductions --workers 3 --threads 4 --out results/generated_bench/bench_io_noreduc.jsonl > results/generated_bench/bench_io_noreduc.log 2>&1 &",
+ "started": "2026-10-29T14:35-03:00 (approx., from the progress check at 15:17)",
+ "finished": "2026-10-29T19:57:01-03:00 (mtime of the log)",
+ "wall_hours": 5.4,
+ "instances": 108,
+ "failures": 0,
+ "settings": {
+  "workers": 3,
+  "threads_per_worker": 4,
+  "gurobi": {"OutputFlag": 0, "Threads": 4, "TimeLimit": 600, "MIPGap": 0},
+  "formulation": "SpaceTimeFormulation(collapse_unbounded=False, pareto_unbounded=False, rejection_deadlines=False, lex_deadlines=False)",
+  "lambdas": [0.25, 0.5, 0.75],
+  "threshold_thetas_slots": [0, 1, 2, 3, 6, 12, 24, 48, 96],
+  "dispatch": {"function": "fedhpc.moea.weighted_solve_dispatch", "K": 256, "max_iters": 100000, "n_kicks": 60, "kick_size": 16, "flags": 64, "ls": true, "mu": -1.0, "n_mu": 1, "seed": 42, "n_threads": 4},
+  "order": "pos before fedhpc, class B before A, then by name"
+ },
+ "hardware": {
+  "cpu": "Intel Core i9-13900 (8 P-cores + 16 E-cores, 32 logical CPUs, max 5.6 GHz)",
+  "memory_gb": 62,
+  "numa_nodes": 1,
+  "cpu_pinning": "none (thread counts only)",
+  "concurrent_load": "another user's LLM inference server ran on the same machine"
+ },
+ "software": {
+  "os": "CachyOS Linux, kernel 7.3",
+  "python": "CPython 3.14 (uv-managed .venv)",
+  "gurobipy": "13.0.1 (uv.lock), Gurobi academic WLS license",
+  "numpy": "2.4.4"
+ },
+ "code": {
+  "repo": "fedhpc",
+  "base_commit": "97fb17899e7b76daacc3f37896008e173747d007",
+  "uncommitted_patch": "results/generated_bench/bench_io_noreduc.code.patch (git diff HEAD -- src scripts/bench_generated.py scripts/build_generated_instances.py)",
+  "uncommitted_patch_sha256": "735bd3e349f52b07ebbb4fa35d946163fbe539b0023ef15b2439d1ae86787dd7",
+  "note": "all src/ and script edits predate the launch (last: instance_gen.py 14:19, bench_generated.py 14:20)"
+ },
+ "inputs_sha256": {
+  "data/generated/manifest.json": "3f2376405d996e7a5c28afe4f54423b98a20740fad9e70411e30dd380b55f47d",
+  "data/cloud_prices.json": "fc3cf343b87574d1d112996e2933abf320332183c9a9b911b6b793a15c28b0d4",
+  "data/job_classes_fedhpc.json": "7c12ed64a0705489a0bfe2bbf07400750445c3cc8e30637ca622b0ed293e89ac",
+  "data/job_classes_pos.json": "c0abfdc8ed5a46f4098ccd72c202694d9d2d00c2fbb64cd7e18b7e4afcbc0f21",
+  "data/fedhpc_known_runtime_offline_10min.json": "eaca31da4e2b844e73a7eebd920205a4ef4408f9e98002f72d9ff428bc882733",
+  "data/pos_congestion_known_runtime_offline_10min.json": "35c221585ceefcd49a5d9ae973900c0aa6e2692351f3efb476d89d29540eb407"
+ },
+ "reproducibility_check": "2026-11-03: scripts/build_generated_instances.py --out <scratch> rebuilt all 108 instances; every sha256 equals data/generated/manifest.json"
+}

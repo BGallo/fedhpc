@@ -1,18 +1,15 @@
 """Write generated instances (fedhpc.instance_gen) to data/generated/.
 
-Default set: class A's full factorial (2 workloads × 3² counts × 3 loads ×
-3 io levels = 162) and class B's pairwise-covering set (an orthogonal array
-over its k + 2 factors plus the 27 uniform corners, per workload; k = 4
-on-prem types for fedhpc, 5 for pos = 104) — B's full factorial (1,944
-distinct instances) is reachable by name through ``instance_gen.build``.
+Default set: both classes' full factorials (2 workloads × 3 node counts ×
+3 loads × 3 io levels = 54 instances each, 108 in all).
 
     uv run python scripts/build_generated_instances.py                # default set
-    uv run python scripts/build_generated_instances.py --full B       # B's full factorial
-    uv run python scripts/build_generated_instances.py --name B_pos_n100-200-300-400-500_lH_iM
+    uv run python scripts/build_generated_instances.py --full B       # one class
+    uv run python scripts/build_generated_instances.py --name B_pos_n250_lH_iM
 
 The files are deterministic functions of their names and of
-data/cloud_prices.json and data/job_classes_<workload>.json; manifest.json records each file's sha256 so a
-rebuild can be checked against it.
+data/cloud_prices.json and data/job_classes_<workload>.json; manifest.json
+records each file's sha256 so a rebuild can be checked against it.
 """
 from __future__ import annotations
 
@@ -33,19 +30,15 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--full", action="append", default=[], choices=sorted(g.CLASSES),
                     help="write this class's full factorial")
-    ap.add_argument("--covering", action="append", default=[], choices=sorted(g.CLASSES),
-                    help="write this class's pairwise-covering set")
     ap.add_argument("--name", action="append", default=[], help="write one instance by name")
     ap.add_argument("--out", type=Path, default=OUT)
     args = ap.parse_args()
-    if not (args.full or args.covering or args.name):
-        args.full, args.covering = ["A"], ["B"]
+    if not (args.full or args.name):
+        args.full = sorted(g.CLASSES)
 
     specs: dict[str, g.InstanceSpec] = {}
     for c in args.full:
         specs.update((s.name, s) for s in g.iter_specs(c))
-    for c in args.covering:
-        specs.update((s.name, s) for s in g.covering_specs(c))
     for n in args.name:
         s = g.InstanceSpec.parse(n)
         specs[s.name] = s
@@ -56,7 +49,7 @@ def main() -> None:
     for name, spec in sorted(specs.items()):
         raw = json.dumps(g.generate(spec), separators=(",", ":")).encode()
         (args.out / f"{name}.json").write_bytes(raw)
-        manifest[name] = dict(cls=spec.cls, workload=spec.workload, counts=list(spec.counts),
+        manifest[name] = dict(cls=spec.cls, workload=spec.workload, count=spec.count,
                               load=spec.load, io=spec.io, sha256=hashlib.sha256(raw).hexdigest())
     manifest_path.write_text(json.dumps(dict(sorted(manifest.items())), indent=1) + "\n")
     print(f"wrote {len(specs)} instances to {args.out} ({len(manifest)} in manifest)")

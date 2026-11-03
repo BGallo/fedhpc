@@ -955,14 +955,16 @@ def weighted_solve_dispatch(
     f2_T: float | None = None,
     f1_0: float | None = None,
     f2_0: float = 0.0,
-    K: int = 256,
+    K: int = 64,
+    K_max: int = 256,
     max_iters: int = 100_000,
     n_kicks: int = 60,
     kick_size: int = 16,
-    flags: int = 64,
+    flags: int = 64 | 4096 | 8192,
     ls: bool = True,
     mu: float = -1.0,
     n_mu: int = 1,
+    kick_patience: int = 5,
     seed: int = 42,
     n_threads: int = 0,
     return_stats: bool = False,
@@ -981,15 +983,21 @@ def weighted_solve_dispatch(
     ``mu`` mixes the dispatch priority from WSPT (0) toward cloud-regret
     density; a negative value searches from the ``n_mu`` best values of a
     grid (ranked by decoding the all-auto genome), splitting the kicks. ``flags`` is the ``DFlag`` ablation bitmask (see the binding
-    docstring).
+    docstring). ``kick_patience`` stops a start's kicks after that many in a
+    row without improvement (0 = all ``n_kicks``).
     With ``return_stats`` returns ``(Solution, stats)``.
 
-    Defaults are the A/B-selected configuration (2026-10-23, both 10-min
-    instances, lam 0.1..0.9 vs the exact reduced SpaceTime optima): mu grid,
-    half est-ranked / half random candidates (``flags=64``), K=256, 60 kicks
-    of 16 flips — +0.02..+1.2 % gap in 1-7 s, against the memetic
-    weighted_solve's +0.1..+17 % in 9-65 s. Multi-start over mu (``n_mu``)
-    measured no gain.
+    Defaults (2026-11-03, results/generated_bench/dispatch_study): the best
+    mu of the grid plus an indifference-deadline EDF start (4096) that decodes
+    without the deadline offload (8192), half est-ranked / half random
+    candidates (64) decoded in batches of K=64 until one improves, up to
+    K_max=256 per step, 60 kicks of 16 split across the two starts with kick
+    patience 5. On the 87 non-trivial generated instances × lam 0.25/0.5/0.75
+    this cut the mean gap to the exact optimum from 15.1 % to 6.5 % (max
+    156 → 58 %) in 3.5× less time than the previous defaults (flags=64,
+    K=256, one start, no patience — A/B-selected 2026-10-23 on the two 10-min
+    instances). WSPT order starves long jobs on congested capacity, so the
+    deadline rule offloads them; EDF serves them first.
     """
     if not 0.0 <= lam <= 1.0:
         raise ValueError("lam must be in [0, 1]")
@@ -1001,6 +1009,7 @@ def weighted_solve_dispatch(
         init_occ=_init_occ(inst), w1=w1, w2=w2, f1_cap=f1_cap, seed=seed,
         n_threads=n_threads, K=K, max_iters=max_iters, n_kicks=n_kicks,
         kick_size=kick_size, flags=flags, ls=int(bool(ls)), mu=mu, n_mu=n_mu,
+        kick_patience=kick_patience, K_max=K_max,
     )
     sol = _to_solutions(inst, [(asgn, f1, f2)])[0]
     return (sol, stats) if return_stats else sol
