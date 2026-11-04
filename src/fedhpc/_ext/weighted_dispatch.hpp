@@ -34,6 +34,7 @@
 #include <climits>
 #include <cstdint>
 #include <memory>
+#include <type_traits>
 
 struct DOpt { int type, p; double cost; int earliest, latest; };
 
@@ -197,6 +198,10 @@ enum DFlag {
     DF_NO_RESTART    = 1 << 15,  // LS: DEngine full decode per candidate
     DF_PRUNE         = 1 << 16,  // LS: stop a candidate once its lower bound exceeds the incumbent
     DF_FOCUS_KICKS   = 1 << 17,  // all kicks to the best start after LS (default: split over the starts)
+    DF_FULL_RECORD   = 1 << 18,  // LS: re-record the incumbent by a full decode (default: from the move's restart)
+    DF_PRUNE_LATE    = 1 << 19,  // LS: DF_PRUNE only in a step's batches after the first (no improving move yet)
+    DF_NO_FIT        = 1 << 20,  // DEngine: scan every waiting job in a slot with room (no fit filter)
+    DF_ABS_EST       = 1 << 21,  // LS: rank candidates by |est| (closest to indifference) instead of est
 };
 
 // DSched::why codes (dispatch decoder, DF_WHY only)
@@ -428,14 +433,21 @@ inline void decode(const DProblem& P, const DScalar& S, const std::vector<char>&
 //            releases and dropping a job are O(1) and a scan visits only set
 //            bits; a job's deadline/horizon removal slot is precomputed, so a
 //            slot with no free room only touches the jobs with an event there.
+//   fit      (unless DF_NO_FIT) in a slot with room, a pool whose free run is
+//            shorter than its longest job masks the scan to the jobs with an
+//            option that fits (per pool, length-bucket rank bitsets); the
+//            skipped jobs' events are handled after the scan. The scan reads
+//            its job data from rank-ordered arrays (DFast::rjob / ropt).
 //   restart  an LS candidate differs from the incumbent in one gene, so it
 //            decodes identically up to the first slot t* that gene can change.
 //            The incumbent is recorded (state every DF_CKPT slots, outcome and
 //            decision slot per job); a candidate resumes from the checkpoint at
 //            or before t* and stops once its state equals the incumbent's again
 //            (every job decided differently is decided in both and its on-prem
-//            footprint has ended), taking the rest from the incumbent.
-//   prune    (DF_PRUNE) while a candidate runs, decided scores + each waiting job's
+//            footprint has ended), taking the rest from the incumbent. An
+//            accepted move re-records the incumbent the same way
+//            (record_flip; DF_FULL_RECORD: a full record instead).
+//   prune   (DF_PRUNE) while a candidate runs, decided scores + each waiting job's
 //            min(cloud, start next slot) + each unreleased job's
 //            min(cloud, start at release) bound its final score from below;
 //            once that exceeds the incumbent's pen_g it cannot be accepted.
@@ -458,7 +470,20 @@ struct DFast {
     std::vector<int> xc;
     struct Word { int w; uint64_t rel, e0, e2, xc; };
     std::vector<std::vector<Word>> sp;   // [t] nonzero words of the per-slot rank bitsets
+    // fit filter: fit[(fofs[q] + b) * nw + w], the jobs with an option on pool q
+    // of p <= fthr[q][b] (fthr ascending, at most DF_FIT_B per pool)
+    std::vector<std::vector<int>> fthr;
+    std::vector<int> fofs;
+    std::vector<uint64_t> fit;
+    // the room scan's job data by rank: options ropt[roff[r], roff[r + 1])
+    struct ROpt { int p, e, l, q, type; double cost; };
+    struct RJob { double w, a, cs; int evt0, evt2, j; };
+    std::vector<int> roff;
+    std::vector<ROpt> ropt;
+    std::vector<RJob> rjob;
 };
+
+constexpr int DF_FIT_B = 16;
 
 inline DFast build_dfast(const DProblem& P, const DScalar& S, bool deadline) {
     DFast F;
@@ -506,6 +531,41 @@ inline DFast build_dfast(const DProblem& P, const DScalar& S, bool deadline) {
         if (t0 < H) { set(e0, t0, r); F.evt0[j] = t0; }
     }
     for (int t = H - 1; t >= 0; t--) F.lbrel_suf[t] += F.lbrel_suf[t + 1];
+    const int np = (int)P.pool_type.size();
+    F.fthr.assign(np, {}); F.fofs.assign(np + 1, 0);
+    for (int j = 0; j < P.n; j++)
+        for (int k = 0; k < (int)P.jobs[j].onprem.size(); k++) F.fthr[P.opt_pool[j][k]].push_back(P.jobs[j].onprem[k].p);
+    for (int q = 0; q < np; q++) {
+        auto& v = F.fthr[q];
+        std::sort(v.begin(), v.end());
+        v.erase(std::unique(v.begin(), v.end()), v.end());
+        if ((int)v.size() > DF_FIT_B) {                       // quantiles, keeping the largest
+            std::vector<int> u;
+            for (int b = 1; b <= DF_FIT_B; b++) u.push_back(v[(size_t)b * v.size() / DF_FIT_B - 1]);
+            u.erase(std::unique(u.begin(), u.end()), u.end());
+            v = u;
+        }
+        F.fofs[q + 1] = F.fofs[q] + (int)v.size();
+    }
+    F.fit.assign((size_t)F.fofs[np] * nw, 0);
+    for (int j = 0; j < P.n; j++)
+        for (int k = 0; k < (int)P.jobs[j].onprem.size(); k++) {
+            const int q = P.opt_pool[j][k], r = S.rank[j];
+            const auto& v = F.fthr[q];
+            for (int b = (int)(std::lower_bound(v.begin(), v.end(), P.jobs[j].onprem[k].p) - v.begin()); b < (int)v.size(); b++)
+                F.fit[(size_t)(F.fofs[q] + b) * nw + (r >> 6)] |= 1ULL << (r & 63);
+        }
+    F.roff.assign(P.n + 1, 0); F.rjob.resize(P.n);
+    for (int r = 0; r < P.n; r++) {
+        const int j = S.order[r];
+        const DJob& J = P.jobs[j];
+        for (int k = 0; k < (int)J.onprem.size(); k++) {
+            const DOpt& o = J.onprem[k];
+            F.ropt.push_back({o.p, o.earliest, o.latest, P.opt_pool[j][k], o.type, o.cost});
+        }
+        F.roff[r + 1] = (int)F.ropt.size();
+        F.rjob[r] = {J.weight, J.arrival, S.cloud_score[j], F.evt0[j], F.evt2[j], j};
+    }
     F.sp.assign(H + 1, {});
     for (int t = 0; t <= H; t++)
         for (int w = 0; w < nw; w++) {
@@ -531,6 +591,7 @@ struct DInc {
     std::vector<double> dsc;             // [t] score of the decisions before slot t
     std::vector<double> gc_suf;          // [t] lbrel of the gene-cloud jobs released at or after t
     std::vector<int> dslot, type, start, fend;   // per job; dslot -1 = init, H = leftover; fend 0 = cloud
+    std::vector<signed char> kind;               // per job: run()'s decision kind
     std::vector<double> c1, c2;
     std::vector<int> dec_ptr, dec_job;   // CSR: jobs decided at slot t
     DSched s;                            // the schedule, f1/f2 in job-index order
@@ -541,7 +602,8 @@ struct DFlipWork {
     std::vector<uint64_t> wait, g0, g1;
     std::vector<int> maxrun;
     std::vector<char> gen;
-    std::vector<int> stamp, pstamp, sstamp, ctype, cstart, cfend;   // == id: decided / tracked / settled
+    std::vector<int> stamp, pstamp, sstamp, ctype, cstart, cfend, cslot;   // == id: decided / tracked / settled
+    std::vector<signed char> ckind;
     std::vector<double> c1, c2, gc_suf;
     std::vector<int> decided, slot_dec, touched;
     std::vector<std::vector<int>> settle_at;    // [t] tracked jobs that settle at the end of t
@@ -563,6 +625,8 @@ struct DEngine {
              const std::vector<char>& gen, const std::vector<uint64_t>& g0, const std::vector<uint64_t>& g1,
              std::vector<int>& maxrun, DBound* lb, Decide&& decide, EndSlot&& end_slot) const {
         const int H = P.H, np = (int)P.pool_type.size(), nw = F.nw;
+        const bool fit = !(flags & DF_NO_FIT);
+        if (fit && (int)maxrun.size() < 2 * np) maxrun.resize(2 * np);   // [np, 2np): fit buckets
         int tcur = t0;
         auto lb_add = [&](int j, int t, double sgn) {
             if (F.xc[j] < t) lb->C += sgn * F.cs[j]; else { lb->A += sgn * F.al[j]; lb->B += sgn * F.be[j]; }
@@ -612,52 +676,78 @@ struct DEngine {
                     while (t + r < H && f[t + r] > 0) r++;
                     maxrun[q] = r; any_room |= (r > 0);
                 }
+                // fit filter: per pool, the bucket covering its free run (-1: no room);
+                // filt once some pool's run is shorter than its longest job (else
+                // the mask keeps every job), used once any word was filtered
+                int* bq = fit ? maxrun.data() + np : nullptr;
+                bool filt = false, used = false;
+                auto bucket = [&](int q) {
+                    const auto& v = F.fthr[q];
+                    if (v.empty()) { bq[q] = -1; return; }
+                    bq[q] = maxrun[q] <= 0 ? -1
+                          : F.fofs[q] + std::min<int>((int)(std::lower_bound(v.begin(), v.end(), maxrun[q]) - v.begin()), (int)v.size() - 1);
+                    filt |= bq[q] < F.fofs[q + 1] - 1;
+                };
+                if (fit) for (int q = 0; q < np; q++) bucket(q);
+                auto fits = [&](int w) {
+                    uint64_t m = 0;
+                    for (int q = 0; q < np; q++) if (bq[q] >= 0) m |= F.fit[(size_t)bq[q] * nw + w];
+                    return m;
+                };
                 int w = 0;
                 uint64_t x = 0;
                 if (any_room) {
                     for (; w < nw && any_room; w++) {
                         x = wait[w];
+                        if (filt && x) { x &= fits(w); used = true; }
                         while (x && any_room) {
                             const int b = __builtin_ctzll(x); x &= x - 1;
-                            const int r = (w << 6) | b, j = S.order[r];
-                            const DJob& J = P.jobs[j];
-                            int best_k = -1; double best_s = 0; int best_free = 0;
-                            for (int k = 0; k < (int)J.onprem.size(); k++) {
-                                const DOpt& o = J.onprem[k];
-                                const int q = P.opt_pool[j][k];
-                                if (t < o.earliest || t > o.latest || o.p > maxrun[q]) continue;
-                                const double s = S.w1 * J.weight * (t + o.p - J.arrival) + S.w2 * o.cost;
+                            const int r = (w << 6) | b;
+                            const DFast::RJob& J = F.rjob[r];
+                            const bool g0r = deadline && (g0[w] >> b & 1);   // gene 0 (auto) under the deadline rule
+                            const DFast::ROpt* best = nullptr; double best_s = 0; int best_free = 0;
+                            for (int k = F.roff[r]; k < F.roff[r + 1]; k++) {
+                                const DFast::ROpt& o = F.ropt[k];
+                                const int q = o.q;
+                                if (t < o.e || t > o.l || o.p > maxrun[q]) continue;
+                                const double s = S.w1 * J.w * (t + o.p - J.a) + S.w2 * o.cost;
                                 const int fr = free[q][t];
-                                bool better = best_k < 0 || s < best_s - 1e-12;
+                                bool better = !best || s < best_s - 1e-12;
                                 if (!better && std::abs(s - best_s) <= 1e-12) {
                                     if (flags & DF_TIE_MOST_FREE) better = fr > best_free;
                                     else if (flags & DF_TIE_BEST_FIT) better = fr < best_free;
                                 }
-                                if (better) { best_k = k; best_s = s; best_free = fr; }
+                                if (better) { best = &o; best_s = s; best_free = fr; }
                             }
-                            if (best_k >= 0) {
-                                if (deadline && gen[j] == 0 && best_s >= S.cloud_score[j] && cloud(j, t, 3)) {
+                            const int j = J.j;
+                            if (best) {
+                                if (g0r && best_s >= J.cs && cloud(j, t, 3)) {
                                     drop(r); continue;
                                 }
-                                const DOpt& o = J.onprem[best_k];
-                                const int q = P.opt_pool[j][best_k];
+                                const DFast::ROpt& o = *best;
+                                const int q = o.q;
                                 auto& f = free[q];
                                 int newrun = maxrun[q];
                                 for (int u = t; u < t + o.p; u++)
                                     if (--f[u] == 0 && u - t < newrun) newrun = u - t;
+                                if (fit && newrun != maxrun[q]) {   // narrow the rest of this word too
+                                    maxrun[q] = newrun; bucket(q);
+                                    if (filt) { x &= fits(w); used = true; }
+                                }
                                 maxrun[q] = newrun;
                                 if (newrun == 0) {
                                     any_room = 0;
                                     for (int qq = 0; qq < np; qq++) any_room |= (maxrun[qq] > 0);
                                 }
-                                decide(j, o.type, t, t + o.p, J.weight * (t + o.p - J.arrival), o.cost, t, 0);
+                                decide(j, o.type, t, t + o.p, J.w * (t + o.p - J.a), o.cost, t, 0);
                                 drop(r);
                                 continue;
                             }
-                            if (((deadline && gen[j] == 0) ? F.evt0[j] : F.evt2[j]) == t) event(r, t);
+                            if ((g0r ? J.evt0 : J.evt2) == t) event(r, t);
                         }
                     }
-                    if (!any_room) events_from(w - 1, x);   // the rest of word w-1 and later words
+                    if (used) events_from(0, ~0ULL);         // the skipped (non-fitting) jobs' events
+                    else if (!any_room) events_from(w - 1, x);   // the rest of word w-1 and later words
                 } else {
                     events_from(0, ~0ULL);
                 }
@@ -704,6 +794,7 @@ struct DEngine {
         const int H = P.H, np = (int)P.pool_type.size(), nw = F.nw, nck = H / DF_CKPT + 1;
         R.gen = gen;
         R.dslot.assign(P.n, -1); R.type.assign(P.n, -1); R.start.assign(P.n, -1); R.fend.assign(P.n, 0);
+        R.kind.assign(P.n, 0);
         R.c1.assign(P.n, 0); R.c2.assign(P.n, 0);
         R.foff.assign(nck + 1, 0);
         for (int c = 0; c < nck; c++) R.foff[c + 1] = R.foff[c] + (size_t)np * (H - c * DF_CKPT);
@@ -715,6 +806,7 @@ struct DEngine {
         int cv = 0, ncl = 0, noff = 0;
         auto decide = [&](int j, int ty, int st, int fe, double a, double b, int slot, int kind) {
             R.dslot[j] = slot; R.type[j] = ty; R.start[j] = st; R.fend[j] = fe; R.c1[j] = a; R.c2[j] = b;
+            R.kind[j] = (signed char)kind;
             dsum += S.w1 * a + S.w2 * b;
             if (slot >= 0) cnt[slot]++;
             if (kind == 2) cv++; else if (kind != 0) ncl++;
@@ -795,25 +887,51 @@ struct DEngine {
 
     // pen_g of the incumbent with job j's gene set to `to` (+inf when pruned).
     double flip(const DInc& R, int j, char to, DFlipWork& W, bool prune) const {
+        return flip_impl<false>(R, j, to, W, prune);
+    }
+
+    // Re-record R with job j's gene set to `to`, equal to record() of the new
+    // genome (float sums up to rounding): the restart decode re-snapshots
+    // slots (t*, convergence]; the earlier slots differ only by job j (queue
+    // bit, its init score) and the later ones by the score / cv shift.
+    void record_flip(DInc& R, int j, char to, DFlipWork& W) const {
+        flip_impl<true>(R, j, to, W, false);
+    }
+
+private:
+    template <bool REC>
+    double flip_impl(std::conditional_t<REC, DInc&, const DInc&> R, int j, char to, DFlipWork& W, bool prune) const {
         const int H = P.H, np = (int)P.pool_type.size(), nw = F.nw;
-        if (P.jobs[j].onprem.empty()) return R.s.pen_g;
+        // the schedule does not change: only the gene (and its g0 bit)
+        auto same = [&]() {
+            if constexpr (REC) {
+                R.gen[j] = to;
+                if (!P.jobs[j].onprem.empty()) {
+                    const int r = S.rank[j];
+                    if (to == 0) R.g0[r >> 6] |= 1ULL << (r & 63); else R.g0[r >> 6] &= ~(1ULL << (r & 63));
+                }
+            }
+            return R.s.pen_g;
+        };
+        if (P.jobs[j].onprem.empty()) return same();
         // effective gene: 1 cloud (has a cloud option), 0 auto (deadline rule on), 2 on-prem
         auto eff = [&](char x) { return (x == 1 && S.cloud_opt[j] >= 0) ? 1 : (x == 0 && deadline ? 0 : 2); };
         const int eg = eff(R.gen[j]), et = eff(to);
-        if (eg == et) return R.s.pen_g;
+        if (eg == et) return same();
         // t*: the first slot the gene can change a decision
         const int d = R.dslot[j];
         int ts;
         if (et == 1) ts = d;                                  // leaves the queue: from its decision
         else if (eg == 1) ts = std::min(P.release[j], H);     // joins the queue at release
         else if (eg == 0) {                                   // auto -> on-prem
-            if (R.fend[j] > 0) return R.s.pen_g;              //   placed: same either way
+            if (R.fend[j] > 0) return same();                 //   placed: same either way
             ts = d;
         } else ts = std::min(d, F.evt0[j] == INT_MAX ? H : F.evt0[j]);   // on-prem -> auto
         ts = std::max(ts, 0) / DF_CKPT * DF_CKPT;
         if ((int)W.stamp.size() != P.n) {
             W.stamp.assign(P.n, 0); W.pstamp.assign(P.n, 0); W.sstamp.assign(P.n, 0); W.ctype.assign(P.n, 0);
-            W.cstart.assign(P.n, 0); W.cfend.assign(P.n, 0); W.c1.assign(P.n, 0); W.c2.assign(P.n, 0);
+            W.cstart.assign(P.n, 0); W.cfend.assign(P.n, 0); W.cslot.assign(P.n, 0); W.ckind.assign(P.n, 0);
+            W.c1.assign(P.n, 0); W.c2.assign(P.n, 0);
         }
         if ((int)W.settle_at.size() != H + 1) W.settle_at.assign(H + 1, {});
         for (int t : W.touched) W.settle_at[t].clear();
@@ -830,12 +948,13 @@ struct DEngine {
         int n_wait = R.nwait[ts];
         DBound lb = R.bnd[c];
         double csum = 0;                                      // score of the candidate's decisions
-        const double dbase = R.dsc[ts] - (eg == 1 ? S.w1 * R.c1[j] + S.w2 * R.c2[j] : 0.0);
+        const double sj_old = S.w1 * R.c1[j] + S.w2 * R.c2[j];
+        const double dbase = R.dsc[ts] - (eg == 1 ? sj_old : 0.0);
         const int relj = std::min(P.release[j], H), r = S.rank[j];
         const uint64_t bit = 1ULL << (r & 63);
         W.g0 = R.g0; W.g1 = R.g1;
         W.g0[r >> 6] &= ~bit; W.g1[r >> 6] &= ~bit;
-        if (et == 0) W.g0[r >> 6] |= bit;
+        if (to == 0) W.g0[r >> 6] |= bit;                    // as init(); read only with the deadline rule
         W.gen = R.gen; W.gen[j] = to;
         W.decided.clear(); W.slot_dec.clear();
         int dcv = 0, n_open = 0;              // tracked jobs not settled yet
@@ -851,8 +970,9 @@ struct DEngine {
             if (W.settle_at[at].empty()) W.touched.push_back(at);
             W.settle_at[at].push_back(k);
         };
-        auto decide = [&](int k, int ty, int st, int fe, double a, double b, int, int kind) {
+        auto decide = [&](int k, int ty, int st, int fe, double a, double b, int slot, int kind) {
             W.stamp[k] = id; W.ctype[k] = ty; W.cstart[k] = st; W.cfend[k] = fe; W.c1[k] = a; W.c2[k] = b;
+            W.cslot[k] = slot; W.ckind[k] = (signed char)kind;
             csum += S.w1 * a + S.w2 * b;
             dcv += kind == 2;
             W.decided.push_back(k);
@@ -869,6 +989,20 @@ struct DEngine {
             decide(j, o.type, o.earliest, 0, P.jobs[j].weight * (o.earliest + o.p - P.jobs[j].arrival), o.cost, -1, 1);
             W.slot_dec.clear();
         } else track(j);
+        if constexpr (REC) {
+            // slots up to t*: job j leaves the queue / the init decisions
+            const double dpre = (et == 1 ? csum : 0.0) - (eg == 1 ? sj_old : 0.0);
+            for (int t = 0; t <= ts; t++) R.dsc[t] += dpre;
+            if (et == 1)                                      // j waited over (relj, d]
+                for (int t = relj + 1; t <= ts; t++) {
+                    R.nwait[t]--;
+                    if (t % DF_CKPT) continue;
+                    const int cc = t / DF_CKPT;
+                    R.wait_snap[(size_t)cc * nw + (r >> 6)] &= ~bit;
+                    DBound& B = R.bnd[cc];
+                    if (F.xc[j] < t) B.C -= F.cs[j]; else { B.A -= F.al[j]; B.B -= F.be[j]; }
+                }
+        }
         int conv_t = -1;
         bool pruned = false;
         const double thr = R.s.pen_g + 1e-9 * std::max(1.0, std::abs(R.s.pen_g));
@@ -879,6 +1013,17 @@ struct DEngine {
             W.slot_dec.clear();
             n_open -= (int)W.settle_at[t].size();
             if (n_open == 0 && t + 1 < H) { conv_t = t; return true; }
+            if constexpr (REC) {                              // snapshot the start of t + 1
+                const int u = t + 1;
+                R.nwait[u] = n_wait; R.cv[u] = R.cv[ts] + dcv; R.dsc[u] = dbase + csum;
+                if (u % DF_CKPT == 0) {
+                    const int cc = u / DF_CKPT;
+                    R.bnd[cc] = lb;
+                    for (int q = 0; q < np; q++)
+                        std::copy(W.free[q].begin() + u, W.free[q].end(), R.free_snap.begin() + R.foff[cc] + (size_t)q * (H - u));
+                    std::copy(W.wait.begin(), W.wait.end(), R.wait_snap.begin() + (size_t)cc * nw);
+                }
+            }
             if (prune) {
                 double unrel = F.lbrel_suf[t + 1] - R.gc_suf[t + 1];
                 if (relj > t) { if (et == 1) unrel -= F.lbrel[j]; if (eg == 1) unrel += F.lbrel[j]; }
@@ -886,14 +1031,58 @@ struct DEngine {
             }
             return false;
         };
-        run(ts, W.free, W.wait, n_wait, W.gen, W.g0, W.g1, W.maxrun, prune ? &lb : nullptr, decide, end_slot);
+        run(ts, W.free, W.wait, n_wait, W.gen, W.g0, W.g1, W.maxrun, (prune || REC) ? &lb : nullptr, decide, end_slot);
         if (pruned) { W.pruned++; return std::numeric_limits<double>::infinity(); }
         double f1 = R.s.f1, f2 = R.s.f2;
         for (int k : W.decided) { f1 += W.c1[k] - R.c1[k]; f2 += W.c2[k] - R.c2[k]; }
         int cv = R.cv[ts] + dcv;
         if (conv_t >= 0) { W.converged++; cv += R.s.cv - R.cv[conv_t + 1]; }
+        if constexpr (REC) commit(R, j, ts, conv_t, dbase + csum, R.cv[ts] + dcv, W);
         return pen(S, f1, f2, cv);
     }
+
+    // record_flip's tail: slots after the convergence shift by the change in
+    // score / cv, the re-decided jobs replace theirs, gc_suf / the per-slot
+    // index / the schedule follow.
+    void commit(DInc& R, int j, int ts, int conv_t, double dsc_conv, int cv_conv, DFlipWork& W) const {
+        const int H = P.H, relj = std::min(P.release[j], H), r = S.rank[j];
+        if (conv_t >= 0) {
+            const int u = conv_t + 1;
+            const double dd = dsc_conv - R.dsc[u];
+            const int dc = cv_conv - R.cv[u];
+            for (int t = u; t <= H; t++) { R.dsc[t] += dd; R.cv[t] += dc; }
+        }
+        (void)ts;
+        const bool was_gc = R.g1[r >> 6] >> (r & 63) & 1, is_gc = W.g1[r >> 6] >> (r & 63) & 1;
+        if (was_gc != is_gc)
+            for (int t = 0; t <= relj; t++) R.gc_suf[t] += is_gc ? F.lbrel[j] : -F.lbrel[j];
+        R.gen.swap(W.gen); R.g0.swap(W.g0); R.g1.swap(W.g1);
+        DSched& s = R.s;
+        for (int k : W.decided) {
+            const int ok = R.kind[k], nk = W.ckind[k];
+            s.cv += (nk == 2) - (ok == 2); s.n_cloud += (nk == 1 || nk == 3) - (ok == 1 || ok == 3);
+            s.n_auto_off += (nk == 3) - (ok == 3);
+            R.dslot[k] = W.cslot[k]; R.type[k] = W.ctype[k]; R.start[k] = W.cstart[k]; R.fend[k] = W.cfend[k];
+            R.c1[k] = W.c1[k]; R.c2[k] = W.c2[k]; R.kind[k] = (signed char)nk;
+            s.type[k] = W.ctype[k]; s.start[k] = W.cstart[k]; s.on[k] = W.cfend[k] > 0;
+        }
+        std::fill(R.dec_ptr.begin(), R.dec_ptr.end(), 0);
+        for (int k = 0; k < P.n; k++) if (R.dslot[k] >= 0) R.dec_ptr[R.dslot[k] + 1]++;
+        for (int t = 0; t <= H; t++) R.dec_ptr[t + 1] += R.dec_ptr[t];
+        R.dec_job.resize(R.dec_ptr[H + 1]);
+        {
+            std::vector<int>& at = W.touched;    // reuse: fill pointers
+            for (int t : at) W.settle_at[t].clear();
+            at.assign(R.dec_ptr.begin(), R.dec_ptr.end() - 1);
+            for (int k = 0; k < P.n; k++) if (R.dslot[k] >= 0) R.dec_job[at[R.dslot[k]]++] = k;
+            at.clear();
+        }
+        s.f1 = s.f2 = 0;
+        for (int k = 0; k < P.n; k++) { s.f1 += R.c1[k]; s.f2 += R.c2[k]; }
+        s.g = S.w1 * s.f1 + S.w2 * s.f2;
+        s.pen_g = pen(S, s.f1, s.f2, s.cv);
+    }
+public:
 };
 
 struct DStats {
@@ -981,6 +1170,7 @@ inline void dispatch_ls(const DProblem& P, const DScalar& S, std::vector<char>& 
         // previous ones had no improving move, so the LS stops after K_max
         // non-improving candidates but an improving step costs only K
         const int k = std::min<int>(std::max(K, K_max), (int)cand.size());
+        if (flags & DF_ABS_EST) for (Cand& c : cand) c.est = std::abs(c.est);
         std::vector<int> pos;              // candidate indices in batch order
         if ((flags & DF_MIX_RANK) && !(flags & DF_RANDOM_RANK)) {
             const int h = k / 2;
@@ -1016,7 +1206,8 @@ inline void dispatch_ls(const DProblem& P, const DScalar& S, std::vector<char>& 
             const TimePoint td = Clock::now();
             if (fast) {
                 pens.assign(m, 0.0);
-                const bool restart = !(flags & DF_NO_RESTART), prune = flags & DF_PRUNE;
+                const bool restart = !(flags & DF_NO_RESTART),
+                           prune = (flags & DF_PRUNE) || ((flags & DF_PRUNE_LATE) && b0 > 0);
                 const double thr = prune ? cur.pen_g + 1e-9 * std::max(1.0, std::abs(cur.pen_g))
                                          : std::numeric_limits<double>::infinity();
 #ifdef _OPENMP
@@ -1043,7 +1234,8 @@ inline void dispatch_ls(const DProblem& P, const DScalar& S, std::vector<char>& 
                 const int bi = best_improving(m, [&](int i) { return pens[i]; }, cur.pen_g);
                 if (bi < 0) continue;
                 gen[cand[ix[bi]].j] = cand[ix[bi]].to;
-                E->record(gen, inc, fws[0]);
+                if (restart && !(flags & DF_FULL_RECORD)) E->record_flip(inc, cand[ix[bi]].j, cand[ix[bi]].to, fws[0]);
+                else E->record(gen, inc, fws[0]);
                 st.records++;
                 cur = inc.s;
             } else {

@@ -7,6 +7,9 @@ default, run one cell at a time (n_threads 4), best wall time of --reps.
   fast_prune     … stop a candidate once its lower bound exceeds the incumbent
   restart        restart from the recorded incumbent, stop on convergence (default)
   restart_prune  … plus pruning
+  restart_fullrec  restart, but the incumbent re-recorded by a full decode (DF_FULL_RECORD)
+  restart_prune_late  restart, pruning only in a step's batches after the first (DF_PRUNE_LATE)
+  restart_nofit  restart without the fit-filtered room scan (DF_NO_FIT)
 
 All arms decide identically, so g must agree (checked); only time differs.
 Output: results/generated_bench/dispatch_study/speed.jsonl.
@@ -25,9 +28,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from dispatch_diagnose import BENCH, LAMS, OUT, SAMPLE, _g  # noqa: E402
 
-REF_DECODE, NO_RESTART, PRUNE = 16384, 32768, 65536
+REF_DECODE, NO_RESTART, PRUNE, FULL_RECORD, PRUNE_LATE, NO_FIT = 16384, 32768, 65536, 262144, 524288, 1048576
 ARMS = {"ref": REF_DECODE, "fast": NO_RESTART, "fast_prune": NO_RESTART | PRUNE,
-        "restart": 0, "restart_prune": PRUNE}
+        "restart": 0, "restart_prune": PRUNE, "restart_fullrec": FULL_RECORD,
+        "restart_prune_late": PRUNE_LATE, "restart_nofit": NO_FIT}
 
 
 def main():

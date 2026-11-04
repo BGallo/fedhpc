@@ -1420,9 +1420,10 @@ class TestWeightedDispatch:
     _FLAG_SETS = [0, 1, 2, 4, 8, 16, 32, 64, 256, 512, 64 | 256 | 1, 64 | 512,
                   64 | 2048, 64 | 4096, 64 | 4096 | 8192, 64 | 4096 | 8192 | 16384,
                   64 | 4096 | 8192 | 32768, 64 | 4096 | 8192 | 65536, 64 | 2 | 65536,
-                  64 | 4096 | 8192 | 131072]
-    # LS decode engine arms: reference decoder, full fast decodes, restarts, pruning
-    _ENGINES = [16384, 32768, 0, 65536, 32768 | 65536]
+                  64 | 4096 | 8192 | 131072, 64 | 4096 | 8192 | 2097152]
+    # LS decode engine arms: reference decoder, full fast decodes, restart
+    # (default), pruning, full record, late pruning, no fit filter
+    _ENGINES = [16384, 32768, 0, 65536, 32768 | 65536, 262144, 524288, 1048576, 32768 | 1048576]
 
     @pytest.mark.parametrize("flags", _FLAG_SETS)
     @pytest.mark.parametrize("lam", [0.0, 0.25, 0.5, 0.75, 1.0])

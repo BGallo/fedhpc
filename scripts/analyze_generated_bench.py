@@ -5,10 +5,17 @@ The run's settings (command, Gurobi parameters, workers, hardware, code
 state) are read from the sidecar ``<run>.setup.json`` next to the jsonl and
 copied into the summary; without it the summary says so.
 
+--dispatch replaces the run's own dispatch results (g, t) by those of
+scripts/dispatch_validate.py records (same instances, reference points and
+λ), e.g. a later heuristic version; the summary names the files and the
+configuration they were run with (--dispatch-cfg).
+
     uv run python scripts/analyze_generated_bench.py [results/generated_bench/bench_io_noreduc.jsonl]
+        [--dispatch V.jsonl [V2.jsonl ...] --dispatch-cfg "K=64, ..."]
 """
 from __future__ import annotations
 
+import argparse
 import json
 import statistics as st
 import sys
@@ -22,7 +29,13 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-SRC = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "results" / "generated_bench" / "bench_io_noreduc.jsonl"
+_ap = argparse.ArgumentParser()
+_ap.add_argument("src", nargs="?", type=Path,
+                 default=ROOT / "results" / "generated_bench" / "bench_io_noreduc.jsonl")
+_ap.add_argument("--dispatch", nargs="+", type=Path, default=[])
+_ap.add_argument("--dispatch-cfg", default="")
+ARGS = _ap.parse_args()
+SRC = ARGS.src
 SETUP = SRC.with_suffix(".setup.json")
 OUT = SRC.parent / SRC.stem
 
@@ -275,6 +288,35 @@ def q(xs, p):
     return xs[min(len(xs) - 1, int(p * len(xs)))] if xs else float("nan")
 
 
+def override_dispatch(rows):
+    """Replace each (instance, λ) dispatch g / t by the --dispatch records; all must be covered."""
+    if not ARGS.dispatch:
+        return
+    new = {}
+    for p in ARGS.dispatch:
+        for v in load(p):
+            for lam, x in v["lams"].items():
+                new[(v["name"], lam)] = x
+    for r in rows:
+        for lam, v in r["lams"].items():
+            x = new.pop((r["name"], lam))         # KeyError: a cell the files do not cover
+            assert abs(x["gstar"] - v["gurobi"]["g"]) <= 1e-12 * max(1.0, abs(x["gstar"]))
+            v["dispatch"] = dict(g=x["g"], t=x["t"])
+    assert not new, f"{len(new)} --dispatch cells not in {SRC.name}"
+
+
+def dispatch_lines():
+    if not ARGS.dispatch:
+        return []
+    return ["## Dispatch results", "",
+            "The dispatch columns are **not** this run's own dispatch results. They are replaced by "
+            + ", ".join(f"`{p.relative_to(ROOT) if p.is_absolute() else p}`" for p in ARGS.dispatch)
+            + " (`scripts/dispatch_validate.py`: the same instances, reference points and λ, "
+            "3 instances in parallel × 4 threads, one seed)"
+            + (f", run with {ARGS.dispatch_cfg}" if ARGS.dispatch_cfg else "") + ". "
+            "The Dispatch line under Setup is the configuration of the original run.", ""]
+
+
 def setup_lines():
     if not SETUP.exists():
         return [f"_No {SETUP.name}: run settings unknown._", ""]
@@ -301,7 +343,7 @@ def setup_lines():
 
 
 def summary(rows):
-    out = [f"# Generated-instance benchmark — {SRC.stem}", ""] + setup_lines()
+    out = [f"# Generated-instance benchmark — {SRC.stem}", ""] + setup_lines() + dispatch_lines()
 
     statuses = defaultdict(int)
     limited = []
@@ -421,6 +463,7 @@ def summary(rows):
 
 def main():
     rows = load(SRC)
+    override_dispatch(rows)
     OUT.mkdir(parents=True, exist_ok=True)
     fig_time_breakdown(rows)
     fig_quality_vs_time(rows)

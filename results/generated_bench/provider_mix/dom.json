@@ -1,0 +1,1514 @@
+[
+ {
+  "name": "A_fedhpc_n100_lE_iH",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_fedhpc_n100_lE_iL",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_fedhpc_n100_lE_iM",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_fedhpc_n100_lF_iH",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_fedhpc_n100_lF_iL",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_fedhpc_n100_lF_iM",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_fedhpc_n100_lH_iH",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_fedhpc_n100_lH_iL",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_fedhpc_n100_lH_iM",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_fedhpc_n300_lE_iH",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_fedhpc_n300_lE_iL",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_fedhpc_n300_lE_iM",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_fedhpc_n300_lF_iH",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_fedhpc_n300_lF_iL",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_fedhpc_n300_lF_iM",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_fedhpc_n300_lH_iH",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_fedhpc_n300_lH_iL",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_fedhpc_n300_lH_iM",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_fedhpc_n500_lE_iH",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_fedhpc_n500_lE_iL",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_fedhpc_n500_lE_iM",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_fedhpc_n500_lF_iH",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_fedhpc_n500_lF_iL",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_fedhpc_n500_lF_iM",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_fedhpc_n500_lH_iH",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_fedhpc_n500_lH_iL",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_fedhpc_n500_lH_iM",
+  "single": {
+   "aws_m6i.32xlarge": 5,
+   "aws_m6i.24xlarge": 959
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n100_lE_iH",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n100_lE_iL",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n100_lE_iM",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n100_lF_iH",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n100_lF_iL",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n100_lF_iM",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n100_lH_iH",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n100_lH_iL",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n100_lH_iM",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n300_lE_iH",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n300_lE_iL",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n300_lE_iM",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n300_lF_iH",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n300_lF_iL",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n300_lF_iM",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n300_lH_iH",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n300_lH_iL",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n300_lH_iM",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n500_lE_iH",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n500_lE_iL",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n500_lE_iM",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n500_lF_iH",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n500_lF_iL",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n500_lF_iM",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n500_lH_iH",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n500_lH_iL",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "A_pos_n500_lH_iM",
+  "single": {
+   "aws_m6i.24xlarge": 3314,
+   "aws_m6i.32xlarge": 26
+  },
+  "multi": {},
+  "n_multi": 0,
+  "ties": 0
+ },
+ {
+  "name": "B_fedhpc_n100_lE_iH",
+  "single": {
+   "azure_Standard_D128s_v6": 3,
+   "azure_Standard_D96s_v5": 704,
+   "azure_Standard_D64s_v5": 171,
+   "aws_m6i.32xlarge": 1
+  },
+  "multi": {
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 36,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 48
+  },
+  "n_multi": 85,
+  "ties": 0
+ },
+ {
+  "name": "B_fedhpc_n100_lE_iL",
+  "single": {
+   "aws_m6i.32xlarge": 4,
+   "azure_Standard_D96s_v5": 740,
+   "azure_Standard_D64s_v5": 216,
+   "azure_Standard_D128s_v6": 1,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 2
+  },
+  "n_multi": 2,
+  "ties": 1
+ },
+ {
+  "name": "B_fedhpc_n100_lE_iM",
+  "single": {
+   "azure_Standard_D128s_v6": 3,
+   "azure_Standard_D96s_v5": 735,
+   "azure_Standard_D64s_v5": 216,
+   "aws_m6i.32xlarge": 1
+  },
+  "multi": {
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 5,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 3
+  },
+  "n_multi": 9,
+  "ties": 0
+ },
+ {
+  "name": "B_fedhpc_n100_lF_iH",
+  "single": {
+   "azure_Standard_D128s_v6": 3,
+   "azure_Standard_D96s_v5": 704,
+   "azure_Standard_D64s_v5": 171,
+   "aws_m6i.32xlarge": 1
+  },
+  "multi": {
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 36,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 48
+  },
+  "n_multi": 85,
+  "ties": 0
+ },
+ {
+  "name": "B_fedhpc_n100_lF_iL",
+  "single": {
+   "aws_m6i.32xlarge": 4,
+   "azure_Standard_D96s_v5": 740,
+   "azure_Standard_D64s_v5": 216,
+   "azure_Standard_D128s_v6": 1,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 2
+  },
+  "n_multi": 2,
+  "ties": 1
+ },
+ {
+  "name": "B_fedhpc_n100_lF_iM",
+  "single": {
+   "azure_Standard_D128s_v6": 3,
+   "azure_Standard_D96s_v5": 735,
+   "azure_Standard_D64s_v5": 216,
+   "aws_m6i.32xlarge": 1
+  },
+  "multi": {
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 5,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 3
+  },
+  "n_multi": 9,
+  "ties": 0
+ },
+ {
+  "name": "B_fedhpc_n100_lH_iH",
+  "single": {
+   "azure_Standard_D128s_v6": 3,
+   "azure_Standard_D96s_v5": 704,
+   "azure_Standard_D64s_v5": 171,
+   "aws_m6i.32xlarge": 1
+  },
+  "multi": {
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 36,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 48
+  },
+  "n_multi": 85,
+  "ties": 0
+ },
+ {
+  "name": "B_fedhpc_n100_lH_iL",
+  "single": {
+   "aws_m6i.32xlarge": 4,
+   "azure_Standard_D96s_v5": 740,
+   "azure_Standard_D64s_v5": 216,
+   "azure_Standard_D128s_v6": 1,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 2
+  },
+  "n_multi": 2,
+  "ties": 1
+ },
+ {
+  "name": "B_fedhpc_n100_lH_iM",
+  "single": {
+   "azure_Standard_D128s_v6": 3,
+   "azure_Standard_D96s_v5": 735,
+   "azure_Standard_D64s_v5": 216,
+   "aws_m6i.32xlarge": 1
+  },
+  "multi": {
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 5,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 3
+  },
+  "n_multi": 9,
+  "ties": 0
+ },
+ {
+  "name": "B_fedhpc_n300_lE_iH",
+  "single": {
+   "azure_Standard_D128s_v6": 3,
+   "azure_Standard_D96s_v5": 704,
+   "azure_Standard_D64s_v5": 171,
+   "aws_m6i.32xlarge": 1
+  },
+  "multi": {
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 36,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 48
+  },
+  "n_multi": 85,
+  "ties": 0
+ },
+ {
+  "name": "B_fedhpc_n300_lE_iL",
+  "single": {
+   "aws_m6i.32xlarge": 4,
+   "azure_Standard_D96s_v5": 740,
+   "azure_Standard_D64s_v5": 216,
+   "azure_Standard_D128s_v6": 1,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 2
+  },
+  "n_multi": 2,
+  "ties": 1
+ },
+ {
+  "name": "B_fedhpc_n300_lE_iM",
+  "single": {
+   "azure_Standard_D128s_v6": 3,
+   "azure_Standard_D96s_v5": 735,
+   "azure_Standard_D64s_v5": 216,
+   "aws_m6i.32xlarge": 1
+  },
+  "multi": {
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 5,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 3
+  },
+  "n_multi": 9,
+  "ties": 0
+ },
+ {
+  "name": "B_fedhpc_n300_lF_iH",
+  "single": {
+   "azure_Standard_D128s_v6": 3,
+   "azure_Standard_D96s_v5": 704,
+   "azure_Standard_D64s_v5": 171,
+   "aws_m6i.32xlarge": 1
+  },
+  "multi": {
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 36,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 48
+  },
+  "n_multi": 85,
+  "ties": 0
+ },
+ {
+  "name": "B_fedhpc_n300_lF_iL",
+  "single": {
+   "aws_m6i.32xlarge": 4,
+   "azure_Standard_D96s_v5": 740,
+   "azure_Standard_D64s_v5": 216,
+   "azure_Standard_D128s_v6": 1,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 2
+  },
+  "n_multi": 2,
+  "ties": 1
+ },
+ {
+  "name": "B_fedhpc_n300_lF_iM",
+  "single": {
+   "azure_Standard_D128s_v6": 3,
+   "azure_Standard_D96s_v5": 735,
+   "azure_Standard_D64s_v5": 216,
+   "aws_m6i.32xlarge": 1
+  },
+  "multi": {
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 5,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 3
+  },
+  "n_multi": 9,
+  "ties": 0
+ },
+ {
+  "name": "B_fedhpc_n300_lH_iH",
+  "single": {
+   "azure_Standard_D128s_v6": 3,
+   "azure_Standard_D96s_v5": 704,
+   "azure_Standard_D64s_v5": 171,
+   "aws_m6i.32xlarge": 1
+  },
+  "multi": {
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 36,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 48
+  },
+  "n_multi": 85,
+  "ties": 0
+ },
+ {
+  "name": "B_fedhpc_n300_lH_iL",
+  "single": {
+   "aws_m6i.32xlarge": 4,
+   "azure_Standard_D96s_v5": 740,
+   "azure_Standard_D64s_v5": 216,
+   "azure_Standard_D128s_v6": 1,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 2
+  },
+  "n_multi": 2,
+  "ties": 1
+ },
+ {
+  "name": "B_fedhpc_n300_lH_iM",
+  "single": {
+   "azure_Standard_D128s_v6": 3,
+   "azure_Standard_D96s_v5": 735,
+   "azure_Standard_D64s_v5": 216,
+   "aws_m6i.32xlarge": 1
+  },
+  "multi": {
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 5,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 3
+  },
+  "n_multi": 9,
+  "ties": 0
+ },
+ {
+  "name": "B_fedhpc_n500_lE_iH",
+  "single": {
+   "azure_Standard_D128s_v6": 3,
+   "azure_Standard_D96s_v5": 704,
+   "azure_Standard_D64s_v5": 171,
+   "aws_m6i.32xlarge": 1
+  },
+  "multi": {
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 36,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 48
+  },
+  "n_multi": 85,
+  "ties": 0
+ },
+ {
+  "name": "B_fedhpc_n500_lE_iL",
+  "single": {
+   "aws_m6i.32xlarge": 4,
+   "azure_Standard_D96s_v5": 740,
+   "azure_Standard_D64s_v5": 216,
+   "azure_Standard_D128s_v6": 1,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 2
+  },
+  "n_multi": 2,
+  "ties": 1
+ },
+ {
+  "name": "B_fedhpc_n500_lE_iM",
+  "single": {
+   "azure_Standard_D128s_v6": 3,
+   "azure_Standard_D96s_v5": 735,
+   "azure_Standard_D64s_v5": 216,
+   "aws_m6i.32xlarge": 1
+  },
+  "multi": {
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 5,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 3
+  },
+  "n_multi": 9,
+  "ties": 0
+ },
+ {
+  "name": "B_fedhpc_n500_lF_iH",
+  "single": {
+   "azure_Standard_D128s_v6": 3,
+   "azure_Standard_D96s_v5": 704,
+   "azure_Standard_D64s_v5": 171,
+   "aws_m6i.32xlarge": 1
+  },
+  "multi": {
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 36,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 48
+  },
+  "n_multi": 85,
+  "ties": 0
+ },
+ {
+  "name": "B_fedhpc_n500_lF_iL",
+  "single": {
+   "aws_m6i.32xlarge": 4,
+   "azure_Standard_D96s_v5": 740,
+   "azure_Standard_D64s_v5": 216,
+   "azure_Standard_D128s_v6": 1,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 2
+  },
+  "n_multi": 2,
+  "ties": 1
+ },
+ {
+  "name": "B_fedhpc_n500_lF_iM",
+  "single": {
+   "azure_Standard_D128s_v6": 3,
+   "azure_Standard_D96s_v5": 735,
+   "azure_Standard_D64s_v5": 216,
+   "aws_m6i.32xlarge": 1
+  },
+  "multi": {
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 5,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 3
+  },
+  "n_multi": 9,
+  "ties": 0
+ },
+ {
+  "name": "B_fedhpc_n500_lH_iH",
+  "single": {
+   "azure_Standard_D128s_v6": 3,
+   "azure_Standard_D96s_v5": 704,
+   "azure_Standard_D64s_v5": 171,
+   "aws_m6i.32xlarge": 1
+  },
+  "multi": {
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 36,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 48
+  },
+  "n_multi": 85,
+  "ties": 0
+ },
+ {
+  "name": "B_fedhpc_n500_lH_iL",
+  "single": {
+   "aws_m6i.32xlarge": 4,
+   "azure_Standard_D96s_v5": 740,
+   "azure_Standard_D64s_v5": 216,
+   "azure_Standard_D128s_v6": 1,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 2
+  },
+  "n_multi": 2,
+  "ties": 1
+ },
+ {
+  "name": "B_fedhpc_n500_lH_iM",
+  "single": {
+   "azure_Standard_D128s_v6": 3,
+   "azure_Standard_D96s_v5": 735,
+   "azure_Standard_D64s_v5": 216,
+   "aws_m6i.32xlarge": 1
+  },
+  "multi": {
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 5,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 3
+  },
+  "n_multi": 9,
+  "ties": 0
+ },
+ {
+  "name": "B_pos_n100_lE_iH",
+  "single": {
+   "azure_Standard_D64s_v5": 380,
+   "azure_Standard_D32s_v5": 1291,
+   "azure_Standard_D96s_v5": 1354,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 8,
+   "azure_Standard_D128s_v6": 10,
+   "aws_m6i.32xlarge": 6
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 60,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 178,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 42,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 10
+  },
+  "n_multi": 290,
+  "ties": 9
+ },
+ {
+  "name": "B_pos_n100_lE_iL",
+  "single": {
+   "azure_Standard_D64s_v5": 437,
+   "azure_Standard_D32s_v5": 1284,
+   "azure_Standard_D96s_v5": 1526,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 56,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 2,
+   "aws_m6i.32xlarge": 23,
+   "azure_Standard_D128s_v6": 2
+  },
+  "multi": {
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 4,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 3,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 1
+  },
+  "n_multi": 9,
+  "ties": 59
+ },
+ {
+  "name": "B_pos_n100_lE_iM",
+  "single": {
+   "azure_Standard_D64s_v5": 424,
+   "azure_Standard_D32s_v5": 1317,
+   "azure_Standard_D96s_v5": 1510,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 19,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "azure_Standard_D128s_v6": 10,
+   "aws_m6i.32xlarge": 6
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 16,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 22,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 5,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 10
+  },
+  "n_multi": 53,
+  "ties": 20
+ },
+ {
+  "name": "B_pos_n100_lF_iH",
+  "single": {
+   "azure_Standard_D64s_v5": 380,
+   "azure_Standard_D32s_v5": 1291,
+   "azure_Standard_D96s_v5": 1354,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 8,
+   "azure_Standard_D128s_v6": 10,
+   "aws_m6i.32xlarge": 6
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 60,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 178,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 42,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 10
+  },
+  "n_multi": 290,
+  "ties": 9
+ },
+ {
+  "name": "B_pos_n100_lF_iL",
+  "single": {
+   "azure_Standard_D64s_v5": 437,
+   "azure_Standard_D32s_v5": 1284,
+   "azure_Standard_D96s_v5": 1526,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 56,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 2,
+   "aws_m6i.32xlarge": 23,
+   "azure_Standard_D128s_v6": 2
+  },
+  "multi": {
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 4,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 3,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 1
+  },
+  "n_multi": 9,
+  "ties": 59
+ },
+ {
+  "name": "B_pos_n100_lF_iM",
+  "single": {
+   "azure_Standard_D64s_v5": 424,
+   "azure_Standard_D32s_v5": 1317,
+   "azure_Standard_D96s_v5": 1510,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 19,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "azure_Standard_D128s_v6": 10,
+   "aws_m6i.32xlarge": 6
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 16,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 22,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 5,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 10
+  },
+  "n_multi": 53,
+  "ties": 20
+ },
+ {
+  "name": "B_pos_n100_lH_iH",
+  "single": {
+   "azure_Standard_D64s_v5": 380,
+   "azure_Standard_D32s_v5": 1291,
+   "azure_Standard_D96s_v5": 1354,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 8,
+   "azure_Standard_D128s_v6": 10,
+   "aws_m6i.32xlarge": 6
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 60,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 178,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 42,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 10
+  },
+  "n_multi": 290,
+  "ties": 9
+ },
+ {
+  "name": "B_pos_n100_lH_iL",
+  "single": {
+   "azure_Standard_D64s_v5": 437,
+   "azure_Standard_D32s_v5": 1284,
+   "azure_Standard_D96s_v5": 1526,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 56,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 2,
+   "aws_m6i.32xlarge": 23,
+   "azure_Standard_D128s_v6": 2
+  },
+  "multi": {
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 4,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 3,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 1
+  },
+  "n_multi": 9,
+  "ties": 59
+ },
+ {
+  "name": "B_pos_n100_lH_iM",
+  "single": {
+   "azure_Standard_D64s_v5": 424,
+   "azure_Standard_D32s_v5": 1317,
+   "azure_Standard_D96s_v5": 1510,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 19,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "azure_Standard_D128s_v6": 10,
+   "aws_m6i.32xlarge": 6
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 16,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 22,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 5,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 10
+  },
+  "n_multi": 53,
+  "ties": 20
+ },
+ {
+  "name": "B_pos_n300_lE_iH",
+  "single": {
+   "azure_Standard_D64s_v5": 380,
+   "azure_Standard_D32s_v5": 1291,
+   "azure_Standard_D96s_v5": 1354,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 8,
+   "azure_Standard_D128s_v6": 10,
+   "aws_m6i.32xlarge": 6
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 60,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 178,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 42,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 10
+  },
+  "n_multi": 290,
+  "ties": 9
+ },
+ {
+  "name": "B_pos_n300_lE_iL",
+  "single": {
+   "azure_Standard_D64s_v5": 437,
+   "azure_Standard_D32s_v5": 1284,
+   "azure_Standard_D96s_v5": 1526,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 56,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 2,
+   "aws_m6i.32xlarge": 23,
+   "azure_Standard_D128s_v6": 2
+  },
+  "multi": {
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 4,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 3,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 1
+  },
+  "n_multi": 9,
+  "ties": 59
+ },
+ {
+  "name": "B_pos_n300_lE_iM",
+  "single": {
+   "azure_Standard_D64s_v5": 424,
+   "azure_Standard_D32s_v5": 1317,
+   "azure_Standard_D96s_v5": 1510,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 19,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "azure_Standard_D128s_v6": 10,
+   "aws_m6i.32xlarge": 6
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 16,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 22,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 5,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 10
+  },
+  "n_multi": 53,
+  "ties": 20
+ },
+ {
+  "name": "B_pos_n300_lF_iH",
+  "single": {
+   "azure_Standard_D64s_v5": 380,
+   "azure_Standard_D32s_v5": 1291,
+   "azure_Standard_D96s_v5": 1354,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 8,
+   "azure_Standard_D128s_v6": 10,
+   "aws_m6i.32xlarge": 6
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 60,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 178,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 42,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 10
+  },
+  "n_multi": 290,
+  "ties": 9
+ },
+ {
+  "name": "B_pos_n300_lF_iL",
+  "single": {
+   "azure_Standard_D64s_v5": 437,
+   "azure_Standard_D32s_v5": 1284,
+   "azure_Standard_D96s_v5": 1526,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 56,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 2,
+   "aws_m6i.32xlarge": 23,
+   "azure_Standard_D128s_v6": 2
+  },
+  "multi": {
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 4,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 3,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 1
+  },
+  "n_multi": 9,
+  "ties": 59
+ },
+ {
+  "name": "B_pos_n300_lF_iM",
+  "single": {
+   "azure_Standard_D64s_v5": 424,
+   "azure_Standard_D32s_v5": 1317,
+   "azure_Standard_D96s_v5": 1510,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 19,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "azure_Standard_D128s_v6": 10,
+   "aws_m6i.32xlarge": 6
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 16,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 22,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 5,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 10
+  },
+  "n_multi": 53,
+  "ties": 20
+ },
+ {
+  "name": "B_pos_n300_lH_iH",
+  "single": {
+   "azure_Standard_D64s_v5": 380,
+   "azure_Standard_D32s_v5": 1291,
+   "azure_Standard_D96s_v5": 1354,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 8,
+   "azure_Standard_D128s_v6": 10,
+   "aws_m6i.32xlarge": 6
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 60,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 178,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 42,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 10
+  },
+  "n_multi": 290,
+  "ties": 9
+ },
+ {
+  "name": "B_pos_n300_lH_iL",
+  "single": {
+   "azure_Standard_D64s_v5": 437,
+   "azure_Standard_D32s_v5": 1284,
+   "azure_Standard_D96s_v5": 1526,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 56,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 2,
+   "aws_m6i.32xlarge": 23,
+   "azure_Standard_D128s_v6": 2
+  },
+  "multi": {
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 4,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 3,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 1
+  },
+  "n_multi": 9,
+  "ties": 59
+ },
+ {
+  "name": "B_pos_n300_lH_iM",
+  "single": {
+   "azure_Standard_D64s_v5": 424,
+   "azure_Standard_D32s_v5": 1317,
+   "azure_Standard_D96s_v5": 1510,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 19,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "azure_Standard_D128s_v6": 10,
+   "aws_m6i.32xlarge": 6
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 16,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 22,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 5,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 10
+  },
+  "n_multi": 53,
+  "ties": 20
+ },
+ {
+  "name": "B_pos_n500_lE_iH",
+  "single": {
+   "azure_Standard_D64s_v5": 380,
+   "azure_Standard_D32s_v5": 1291,
+   "azure_Standard_D96s_v5": 1354,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 8,
+   "azure_Standard_D128s_v6": 10,
+   "aws_m6i.32xlarge": 6
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 60,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 178,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 42,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 10
+  },
+  "n_multi": 290,
+  "ties": 9
+ },
+ {
+  "name": "B_pos_n500_lE_iL",
+  "single": {
+   "azure_Standard_D64s_v5": 437,
+   "azure_Standard_D32s_v5": 1284,
+   "azure_Standard_D96s_v5": 1526,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 56,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 2,
+   "aws_m6i.32xlarge": 23,
+   "azure_Standard_D128s_v6": 2
+  },
+  "multi": {
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 4,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 3,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 1
+  },
+  "n_multi": 9,
+  "ties": 59
+ },
+ {
+  "name": "B_pos_n500_lE_iM",
+  "single": {
+   "azure_Standard_D64s_v5": 424,
+   "azure_Standard_D32s_v5": 1317,
+   "azure_Standard_D96s_v5": 1510,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 19,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "azure_Standard_D128s_v6": 10,
+   "aws_m6i.32xlarge": 6
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 16,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 22,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 5,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 10
+  },
+  "n_multi": 53,
+  "ties": 20
+ },
+ {
+  "name": "B_pos_n500_lF_iH",
+  "single": {
+   "azure_Standard_D64s_v5": 380,
+   "azure_Standard_D32s_v5": 1291,
+   "azure_Standard_D96s_v5": 1354,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 8,
+   "azure_Standard_D128s_v6": 10,
+   "aws_m6i.32xlarge": 6
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 60,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 178,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 42,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 10
+  },
+  "n_multi": 290,
+  "ties": 9
+ },
+ {
+  "name": "B_pos_n500_lF_iL",
+  "single": {
+   "azure_Standard_D64s_v5": 437,
+   "azure_Standard_D32s_v5": 1284,
+   "azure_Standard_D96s_v5": 1526,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 56,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 2,
+   "aws_m6i.32xlarge": 23,
+   "azure_Standard_D128s_v6": 2
+  },
+  "multi": {
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 4,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 3,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 1
+  },
+  "n_multi": 9,
+  "ties": 59
+ },
+ {
+  "name": "B_pos_n500_lF_iM",
+  "single": {
+   "azure_Standard_D64s_v5": 424,
+   "azure_Standard_D32s_v5": 1317,
+   "azure_Standard_D96s_v5": 1510,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 19,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "azure_Standard_D128s_v6": 10,
+   "aws_m6i.32xlarge": 6
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 16,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 22,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 5,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 10
+  },
+  "n_multi": 53,
+  "ties": 20
+ },
+ {
+  "name": "B_pos_n500_lH_iH",
+  "single": {
+   "azure_Standard_D64s_v5": 380,
+   "azure_Standard_D32s_v5": 1291,
+   "azure_Standard_D96s_v5": 1354,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 8,
+   "azure_Standard_D128s_v6": 10,
+   "aws_m6i.32xlarge": 6
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 60,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 178,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 42,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 10
+  },
+  "n_multi": 290,
+  "ties": 9
+ },
+ {
+  "name": "B_pos_n500_lH_iL",
+  "single": {
+   "azure_Standard_D64s_v5": 437,
+   "azure_Standard_D32s_v5": 1284,
+   "azure_Standard_D96s_v5": 1526,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 56,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 2,
+   "aws_m6i.32xlarge": 23,
+   "azure_Standard_D128s_v6": 2
+  },
+  "multi": {
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 4,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 3,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 1,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 1
+  },
+  "n_multi": 9,
+  "ties": 59
+ },
+ {
+  "name": "B_pos_n500_lH_iM",
+  "single": {
+   "azure_Standard_D64s_v5": 424,
+   "azure_Standard_D32s_v5": 1317,
+   "azure_Standard_D96s_v5": 1510,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 19,
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 1,
+   "azure_Standard_D128s_v6": 10,
+   "aws_m6i.32xlarge": 6
+  },
+  "multi": {
+   "aws_m6i.16xlarge+azure_Standard_D64s_v5": 16,
+   "aws_m6i.24xlarge+azure_Standard_D96s_v5": 22,
+   "aws_m6i.8xlarge+azure_Standard_D32s_v5": 5,
+   "aws_m6i.32xlarge+azure_Standard_D128s_v6": 10
+  },
+  "n_multi": 53,
+  "ties": 20
+ }
+]

@@ -136,6 +136,20 @@ c_jm = κ^IO_m ι_j + κ^VM_m p^bill_jm (κ^S = 0).
    - **Dispatch** — `weighted_solve_dispatch` with the same reference points
      and its defaults: K = 256 candidates, 60 ILS kicks of 16 flips, flags = 64,
      μ grid (mu = −1, n_mu = 1), seed 42, 4 threads.
+
+     **Superseded in `summary.md` and the figures (2026-11-03).** Their
+     dispatch results come from a re-run of the current version:
+     - **Script:** `scripts/dispatch_validate.py`.
+     - **Configuration:** K = 64 in batches up to K_max = 256;
+       flags = 64|4096|8192 (mixed ranking, plus an EDF start without
+       deadline offload); 60 kicks of 16 split over the two starts;
+       kick_patience = 5; seed 42; 4 threads; 3 instances in parallel.
+     - **Inputs:** the same instances, reference points and λ.
+     - **Records:** `../dispatch_study/validate_fast_default.jsonl` (non-trivial)
+       and `validate_fast_default_trivial.jsonl` (trivial).
+     - **Not changed:** the Gurobi and threshold numbers, and this run's own
+       dispatch results, which remain in `bench_io_noreduc.jsonl`.
+     - **Why the version changed:** `../dispatch_study/README.md`.
    - **Threshold** — the θ from step 3 with the lowest g at this λ, chosen
      after the fact. This is an oracle choice, so it favours the baseline.
 
@@ -202,6 +216,7 @@ nohup nice -n 10 uv run python scripts/bench_generated.py --manifest --no-reduct
   the 2 × 600 s limit plus build time. The record has no per-phase timing, so
   the cause, most likely contention, cannot be attributed.
 - **Dispatch was run once,** with seed 42, so there is no variance estimate.
+  The re-run was on the same machine, but not while Gurobi was running.
 - **Threshold θ is an oracle choice** (§4), which favours that baseline.
 - **This is not the production configuration.** Without reductions, the
   Gurobi times are an upper bound on the reduced model's times.

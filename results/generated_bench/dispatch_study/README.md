@@ -280,6 +280,77 @@ Ideas not yet built, in the order I would try them:
 
 `-march=native` was not tried, because it changes the build for every user.
 
+## The five next ideas, tested in order (2026-11-03)
+
+Protocol: as above. Each exact change was checked twice:
+- **Micro:** the 27 workloads, against the unchanged engine and the reference
+  decoder; every candidate's pen_g had to match.
+- **End to end:** `dispatch_speed.py`, sample cells, 4 threads, best of 2, with
+  the two arms in the same process. Every arm reached the same g in every cell.
+
+Cross-run totals drift by up to ±10 % on this machine (powersave governor,
+desktop load), so only paired comparisons are reported. Idea 4 was paired by
+alternating builds.
+
+| # | idea | exact? | measured | verdict |
+|---|---|---|---|---|
+| 1 | Re-record the incumbent from the accepted move's restart (`record_flip`): re-snapshot only slots (t*, convergence]; patch the prefix (job j's queue bit, init score) and shift the tail's score/cv | yes. Checked field by field against a full record on 6,480 records (LS moves and random flips, both deadline modes) | record 1.4–4.3× cheaper. End to end 92.8 → 91.1 s (−1.9 %); non-decode time 9.8 → 8.1 s | **kept** (`DF_FULL_RECORD` restores the full record) |
+| 2 | Prune only in a step's later batches (`DF_PRUNE_LATE`) | yes | 89.6 s unpruned, 90.5 s always pruned, 89.8 s late only | **rejected**, see below |
+| 3 | Fit-filtered room scan: per pool, length-bucket rank bitsets (≤ 16 buckets). Used only in slots where some pool's free run is shorter than its longest job, and only on non-empty queue words | yes | micro: B 1.03–2.3×, A 0.98–0.99×. End to end 92.4 → 80.0 s (−13 %): B·pos 41.1 → 27.2 s (1.51×), A +3.6 % | **kept** (`DF_NO_FIT` turns it off) |
+| 4 | Job data in rank order (`DFast::rjob/ropt`; the gene-0 test read from the `g0` rank bitset) | yes | micro 1.12× (1.02–1.23×). End to end, alternating builds on the 9 λ = 0.5 cells: 27.79 / 27.74 s → 24.86 / 24.66 s (1.12×; every cell 10–14 %) | **kept** |
+| 5 | Screen candidates by estimate | – (changes the search) | premise false, see below. Variants tested on all 261 cells | **rejected** |
+
+**Why pruning does not pay (idea 2).** Pruning everything skips 78 % of the
+candidates and halves the decoded slots (567 M → 295 M), but the time does not
+fall. A micro run with the bound tracked but never cutting splits the cost:
+- tracking the bound costs 4–10 % per candidate;
+- the slots it cuts are the cheap tail of each candidate. On B_pos_n100_lF
+  λ 0.5, cutting 72 % of the slots saves about 1 % of the time.
+
+The cost of a candidate sits in its first slots after t*, where the queue is
+long. Only B_pos_n300 gains (−9 to −24 %). Pruning stays opt-in.
+
+**Why the fit filter needed gating (idea 3).** Unconditional, it cost 3–9 % on
+A·pos. On A_pos_n100 it was active in 40 % of slots with room but skipped only
+0.4 % of job visits. Meanwhile it built a mask for 47 M queue words, against
+13.5 M job visits. The two gates (a pool's run shorter than its longest job;
+non-empty words only) bring the A class to within 1–2 % in the micro run.
+
+**Idea 5: the estimate is not a screen.** Every decoded LS candidate of 18
+default runs (λ 0.25 and 0.5, 2.1 M decodes) was logged with its estimate and
+its decoded Δpen_g:
+- **Hit rate:** 8.1 % of the estimate-ranked half improves; 16.3 % of the
+  random half. In most cells 70–90 % of accepted moves come from the random
+  half.
+- **Positive estimates:** about 60 % of accepted moves had est > 0, a
+  predicted worsening.
+- **Best band:** near zero, est ∈ [−1e-5, 5e-5], with a 36 % hit rate. The
+  most negative decile hits 14 %, the most positive 3 %.
+- **Why:** the estimate scores the flipped job alone. Offloading a job frees
+  capacity for the jobs behind it, a knock-on effect it does not see.
+
+Rejecting candidates whose estimate is far from improving would therefore
+reject most good moves. Two re-rankings were tested instead on all 87
+non-trivial instances × 3 λ (`dispatch_validate.py`, the same seed):
+
+| configuration | mean gap | max | λ 0.25 / 0.5 / 0.75 | worse / better by > 5 pp | time | decodes |
+|---|---|---|---|---|---|---|
+| default, after ideas 1, 3 and 4 (`validate_fast_default`) | **6.47 %** | 58.3 % | 9.3 / 5.4 / 4.7 | – | 862 s | 29.3 M |
+| est half ranked by \|est\| (`DF_ABS_EST`, `validate_absest`) | 9.38 % | 70.0 % | 13.6 / 6.9 / 7.7 | 35 / 0 | 646 s | 23.6 M |
+| all candidates random (flag 8, `validate_randrank`) | 7.78 % | 76.0 % | 11.3 / 6.2 / 5.8 | 18 / 0 | 630 s | 24.6 M |
+
+The default reached the same g as `validate_split_pat5` in all 261 cells, so
+ideas 1, 3 and 4 are exact across the whole bench. Its time fell from 984 s to
+862 s (−12 %), a cross-run comparison.
+
+Both re-rankings stop earlier, about 20 % fewer decodes and 35 % less time,
+but reach worse optima. Neither is better in any cell. The estimate-ranked
+half accepts fewer moves but steers the search, so the mixed ranking stays.
+
+**Open:** a better estimate, one that counts the capacity a flip frees or
+takes from the jobs behind it, would raise the hit rate of the ranked half.
+That is a quality change and needs its own ablation.
+
 ## Code (uncommitted)
 
 **`_ext/weighted_dispatch.hpp`:**
@@ -290,6 +361,12 @@ Ideas not yet built, in the order I would try them:
 - New flags `DF_EDF_NODL` (8192), `DF_REF_DECODE` (16384),
   `DF_NO_RESTART` (32768), `DF_PRUNE` (65536), `DF_FOCUS_KICKS` (131072).
 - `kick_patience`.
+- From the next-ideas round:
+  - `DEngine::record_flip` / `commit` and `DInc::kind` (idea 1);
+  - the fit filter (`DFast::fthr/fofs/fit`, idea 3);
+  - rank-ordered scan data (`DFast::rjob/ropt`, idea 4);
+  - flags `DF_FULL_RECORD` (262144), `DF_PRUNE_LATE` (524288),
+    `DF_NO_FIT` (1048576) and `DF_ABS_EST` (2097152).
 
 **`_ext/moea.cpp`:** the `K_max` and `kick_patience` arguments and the new stats
 (`flip_slots`, `pruned`, `converged`, `records`).
@@ -305,7 +382,9 @@ Ideas not yet built, in the order I would try them:
 
 `pytest -k "dispatch or moea"`: 545 passed.
 
-**Scripts:** `dispatch_validate.py` (with `--tag/--kw`) and `dispatch_speed.py`.
+**Scripts:** `dispatch_validate.py` (with `--tag/--kw`) and `dispatch_speed.py`
+(arms `restart_fullrec`, `restart_prune_late` and `restart_nofit` added; outputs
+`speed_rec/_prune/_fit/_rank.jsonl`).
 `dispatch_ablation.py` pins its variants to the old configuration (`BASE`), so
 `ablation.jsonl` keeps its meaning.
 

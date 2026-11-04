@@ -1,0 +1,67 @@
+instance                 lam  st   cloud  aws_jobs  aws$%   by size(provider: jobs)                          swap→other: Δf2%  Δf1
+B_fedhpc_n100_lE_iL      0.25 opti   273      2   0.05  m6i.32xlarge:2 Standard_D128s_v6:1 Standard_D64s_v5:53 Standard_D96s_v5:217  +0.26    +0
+B_fedhpc_n100_lE_iL      0.50 opti   637      2   0.01  m6i.32xlarge:2 Standard_D128s_v6:1 Standard_D64s_v5:72 Standard_D96s_v5:562  +0.26    +0
+B_fedhpc_n100_lE_iL      0.75 opti   787      2   0.01  m6i.32xlarge:2 Standard_D128s_v6:1 Standard_D64s_v5:75 Standard_D96s_v5:709  +0.27    +0
+B_fedhpc_n100_lE_iM      0.25 opti   285      1   0.03  m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D64s_v5:55 Standard_D96s_v5:227  +1.00    +0
+B_fedhpc_n100_lE_iM      0.50 opti   635      2   0.23  m6i.24xlarge:1 m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D64s_v5:72 Standard_D96s_v5:559  +1.23    +1
+B_fedhpc_n100_lE_iM      0.75 opti   775      2   0.16  m6i.24xlarge:1 m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D64s_v5:75 Standard_D96s_v5:696  +1.45    +1
+B_fedhpc_n100_lF_iH      0.25 opti    26      1   0.63  m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D96s_v5:23  +3.00    +0
+B_fedhpc_n100_lF_iH      0.50 opti   149      1   0.03  m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D96s_v5:146  +2.99    +0
+B_fedhpc_n100_lF_iH      0.75 opti   235      2   0.88  m6i.24xlarge:1 m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D96s_v5:231  +3.84    +1
+B_fedhpc_n100_lF_iL      0.25 opti    19      2   1.81  m6i.32xlarge:2 Standard_D128s_v6:1 Standard_D96s_v5:16  +0.19    +0
+B_fedhpc_n100_lF_iL      0.50 opti   162      2   0.06  m6i.32xlarge:2 Standard_D128s_v6:1 Standard_D96s_v5:159  +0.15    +0
+B_fedhpc_n100_lF_iL      0.75 opti   240      2   0.03  m6i.32xlarge:2 Standard_D128s_v6:1 Standard_D96s_v5:237  +0.18    +0
+B_fedhpc_n100_lF_iM      0.25 opti    18      1   1.29  m6i.32xlarge:1 Standard_D128s_v6:1 Standard_D96s_v5:16  +0.59    +0
+B_fedhpc_n100_lF_iM      0.50 opti   154      1   0.04  m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D96s_v5:151  +0.56    +0
+B_fedhpc_n100_lF_iM      0.75 opti   239      1   0.02  m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D96s_v5:236  +0.72    +0
+B_fedhpc_n100_lH_iH      0.25 opti    62      1   0.18  m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D96s_v5:59  +2.93    +0
+B_fedhpc_n100_lH_iH      0.50 opti   287      3   1.51  m6i.24xlarge:2 m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D96s_v5:282  +3.50    +2
+B_fedhpc_n100_lH_iH      0.75 opti   421      6   2.46  m6i.24xlarge:5 m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D96s_v5:413  +4.14    +5
+B_fedhpc_n100_lH_iL      0.25 opti    58      2   0.53  m6i.32xlarge:2 Standard_D128s_v6:1 Standard_D96s_v5:55  +0.18    +0
+B_fedhpc_n100_lH_iL      0.50 opti   313      2   0.02  m6i.32xlarge:2 Standard_D128s_v6:1 Standard_D96s_v5:310  +0.22    +0
+B_fedhpc_n100_lH_iL      0.75 opti   467      2   0.01  m6i.32xlarge:2 Standard_D128s_v6:1 Standard_D96s_v5:464  +0.21    +0
+B_fedhpc_n100_lH_iM      0.25 opti    53      1   0.41  m6i.32xlarge:1 Standard_D128s_v6:1 Standard_D96s_v5:51  +0.61    +0
+B_fedhpc_n100_lH_iM      0.50 opti   309      1   0.01  m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D96s_v5:306  +0.75    +0
+B_fedhpc_n100_lH_iM      0.75 opti   448      2   0.31  m6i.24xlarge:1 m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D96s_v5:444  +0.87    +1
+B_fedhpc_n300_lE_iH      0.25 opti   182      1   0.04  m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D64s_v5:43 Standard_D96s_v5:136  +4.16    +0
+B_fedhpc_n300_lE_iH      0.50 opti   467      7   2.32  m6i.24xlarge:6 m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D64s_v5:67 Standard_D96s_v5:391  +4.32    +6
+B_fedhpc_n300_lE_iH      0.75 opti   650     16   4.83  m6i.24xlarge:15 m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D64s_v5:71 Standard_D96s_v5:561  +5.03   +15
+B_fedhpc_n300_lE_iL      0.25 opti   175      2   0.15  m6i.32xlarge:2 Standard_D128s_v6:1 Standard_D64s_v5:38 Standard_D96s_v5:134  +0.30    +0
+B_fedhpc_n300_lE_iL      0.50 opti   477      2   0.01  m6i.32xlarge:2 Standard_D128s_v6:1 Standard_D64s_v5:67 Standard_D96s_v5:407  +0.25    +0
+B_fedhpc_n300_lE_iL      0.75 opti   650      2   0.01  m6i.32xlarge:2 Standard_D128s_v6:1 Standard_D64s_v5:71 Standard_D96s_v5:576  +0.27    +0
+B_fedhpc_n100_lE_iH      0.25 opti   336      1   0.01  m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D64s_v5:49 Standard_D96s_v5:284  +3.54    +0
+B_fedhpc_n100_lE_iH      0.50 opti   584     10   2.81  m6i.24xlarge:9 m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D64s_v5:69 Standard_D96s_v5:503  +4.55    +9
+B_fedhpc_n100_lE_iH      0.75 opti   733     18   4.55  m6i.24xlarge:17 m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D64s_v5:75 Standard_D96s_v5:638  +5.42   +16
+B_fedhpc_n300_lE_iM      0.25 opti   173      1   0.10  m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D64s_v5:38 Standard_D96s_v5:132  +1.51    +0
+B_fedhpc_n300_lE_iM      0.50 opti   474      2   0.39  m6i.24xlarge:1 m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D64s_v5:67 Standard_D96s_v5:403  +1.04    +1
+B_fedhpc_n300_lE_iM      0.75 opti   657      2   0.21  m6i.24xlarge:1 m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D64s_v5:71 Standard_D96s_v5:582  +1.32    +1
+B_fedhpc_n300_lH_iH      0.25 opti     2      1  38.80  m6i.32xlarge:1 Standard_D128s_v6:1                    +2.41    +0
+B_fedhpc_n300_lH_iH      0.50 opti    72      1   0.11  m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D96s_v5:69  +2.95    +0
+B_fedhpc_n300_lH_iH      0.75 opti   123      1   0.04  m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D96s_v5:120  +2.88    +0
+B_fedhpc_n300_lH_iL      0.25 opti     3      2  56.00  m6i.32xlarge:2 Standard_D128s_v6:1                    +2.66    +0
+B_fedhpc_n300_lH_iL      0.50 opti    96      2   0.28  m6i.32xlarge:2 Standard_D128s_v6:1 Standard_D96s_v5:93  +0.27    +0
+B_fedhpc_n300_lH_iL      0.75 opti   133      2   0.08  m6i.32xlarge:2 Standard_D128s_v6:1 Standard_D96s_v5:130  +0.21    +0
+B_fedhpc_n300_lH_iM      0.25 opti     2      1  38.80  m6i.32xlarge:1 Standard_D128s_v6:1                    +2.41    +0
+B_fedhpc_n300_lH_iM      0.50 opti    91      1   0.20  m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D96s_v5:88  +1.27    +0
+B_fedhpc_n300_lH_iM      0.75 opti   134      1   0.05  m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D96s_v5:131  +0.81    +0
+B_fedhpc_n500_lE_iH      0.25 opti   175      1   0.05  m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D64s_v5:47 Standard_D96s_v5:125  +4.70    +0
+B_fedhpc_n500_lE_iH      0.50 opti   430      7   2.58  m6i.24xlarge:6 m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D64s_v5:62 Standard_D96s_v5:359  +4.28    +6
+B_fedhpc_n500_lE_iH      0.75 opti   583     16   5.61  m6i.24xlarge:15 m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D64s_v5:69 Standard_D96s_v5:496  +4.88   +15
+B_fedhpc_n500_lE_iL      0.25 opti   181      2   0.15  m6i.32xlarge:2 Standard_D128s_v6:1 Standard_D64s_v5:44 Standard_D96s_v5:134  +0.30    +0
+B_fedhpc_n500_lE_iL      0.50 opti   423      2   0.02  m6i.32xlarge:2 Standard_D128s_v6:1 Standard_D64s_v5:65 Standard_D96s_v5:355  +0.24    +0
+B_fedhpc_n500_lE_iL      0.75 opti   596      2   0.01  m6i.32xlarge:2 Standard_D128s_v6:1 Standard_D64s_v5:70 Standard_D96s_v5:523  +0.28    +0
+B_fedhpc_n500_lE_iM      0.25 opti   181      1   0.10  m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D64s_v5:45 Standard_D96s_v5:133  +1.54    +0
+B_fedhpc_n500_lE_iM      0.50 opti   422      2   0.47  m6i.24xlarge:1 m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D64s_v5:64 Standard_D96s_v5:354  +0.98    +1
+B_fedhpc_n500_lE_iM      0.75 opti   589      2   0.24  m6i.24xlarge:1 m6i.32xlarge:1 Standard_D128s_v6:2 Standard_D64s_v5:70 Standard_D96s_v5:515  +1.35    +1
+B_pos_n300_lE_iL         0.25 opti   246     31   3.58  m6i.16xlarge:1 m6i.24xlarge:1 m6i.32xlarge:3 m6i.8xlarge:26 Standard_D32s_v5:172 Standard_D64s_v5:21 Standard_D96s_v5:22  +0.38    +0
+B_pos_n300_lE_iL         0.50 opti  1286     40   0.42  m6i.16xlarge:1 m6i.24xlarge:2 m6i.32xlarge:8 m6i.8xlarge:29 Standard_D32s_v5:765 Standard_D64s_v5:72 Standard_D96s_v5:409  +0.18    +0
+B_pos_n300_lE_iL         0.75 opti  1915     42   0.20  m6i.16xlarge:1 m6i.24xlarge:1 m6i.32xlarge:7 m6i.8xlarge:33 Standard_D32s_v5:817 Standard_D64s_v5:136 Standard_D96s_v5:920  +0.21    +0
+B_pos_n300_lE_iM         0.25 opti   245     10   0.03  m6i.16xlarge:1 m6i.8xlarge:9 Standard_D128s_v6:2 Standard_D32s_v5:200 Standard_D64s_v5:23 Standard_D96s_v5:10  +1.06    +0
+B_pos_n300_lE_iM         0.50 opti  1277     13   0.20  m6i.16xlarge:1 m6i.32xlarge:2 m6i.8xlarge:10 Standard_D128s_v6:2 Standard_D32s_v5:792 Standard_D64s_v5:72 Standard_D96s_v5:398  +0.74    +1
+B_pos_n300_lE_iM         0.75 opti  1793     14   0.10  m6i.16xlarge:1 m6i.32xlarge:2 m6i.8xlarge:11 Standard_D128s_v6:2 Standard_D32s_v5:820 Standard_D64s_v5:142 Standard_D96s_v5:815  +0.84    +1
+B_pos_n300_lE_iH         0.25 opti   493      8   0.35  m6i.24xlarge:1 m6i.32xlarge:2 m6i.8xlarge:5 Standard_D128s_v6:3 Standard_D32s_v5:319 Standard_D64s_v5:52 Standard_D96s_v5:111  +2.54    +1
+B_pos_n300_lE_iH         0.50 opti  1502     22   2.07  m6i.24xlarge:12 m6i.32xlarge:2 m6i.8xlarge:8 Standard_D128s_v6:3 Standard_D32s_v5:769 Standard_D64s_v5:138 Standard_D96s_v5:570  +4.04   +15
+B_pos_n300_lE_iH         0.75 opti  1705     28   2.17  m6i.24xlarge:17 m6i.32xlarge:2 m6i.8xlarge:9 Standard_D128s_v6:5 Standard_D32s_v5:783 Standard_D64s_v5:163 Standard_D96s_v5:726  +4.39   +22
+
+TOTAL jobs by type: {'azure_Standard_D96s_v5': 18922, 'azure_Standard_D64s_v5': 2483, 'aws_m6i.32xlarge': 100, 'azure_Standard_D128s_v6': 103, 'aws_m6i.24xlarge': 117, 'azure_Standard_D32s_v5': 5437, 'aws_m6i.8xlarge': 140, 'aws_m6i.16xlarge': 6}
+TOTAL $ by type: {'azure_Standard_D96s_v5': 58144, 'azure_Standard_D64s_v5': 2038, 'aws_m6i.32xlarge': 19, 'azure_Standard_D128s_v6': 32, 'aws_m6i.24xlarge': 933, 'azure_Standard_D32s_v5': 5137, 'aws_m6i.8xlarge': 26, 'aws_m6i.16xlarge': 0}

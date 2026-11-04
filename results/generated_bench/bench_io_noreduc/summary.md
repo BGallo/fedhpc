@@ -14,6 +14,10 @@ Full description: `EXPERIMENT_SETUP.md` in this folder.
 - Code: fedhpc 97fb178 + `bench_io_noreduc.code.patch` (sha256 735bd3e349f5…).
 - 2026-11-03: scripts/build_generated_instances.py --out <scratch> rebuilt all 108 instances; every sha256 equals data/generated/manifest.json.
 
+## Dispatch results
+
+The dispatch columns are **not** this run's own dispatch results. They are replaced by `results/generated_bench/dispatch_study/validate_fast_default.jsonl`, `results/generated_bench/dispatch_study/validate_fast_default_trivial.jsonl` (`scripts/dispatch_validate.py`: the same instances, reference points and λ, 3 instances in parallel × 4 threads, one seed), run with the current weighted_solve_dispatch defaults on 2026-11-03 (K=64 in batches up to K_max=256, flags=64|4096|8192 i.e. mixed ranking + EDF start without deadline offload, 60 kicks of 16 split over the two starts, kick_patience=5, seed 42, 4 threads; fedhpc uncommitted). The Dispatch line under Setup is the configuration of the original run.
+
 ## Gurobi statuses
 
 {'optimal': 527, 'feasible': 13} over 540 solves. `feasible` = time limit reached with an incumbent (not proven optimal):
@@ -52,68 +56,68 @@ A non-optimal lex anchor shifts the normalisation (f1^T, f2^T or f1^0) for every
 
 | class·workload | n | trivial | lex f1 | lex f2 | WS Gurobi | WS dispatch | exact total | dispatch total |
 |---|---|---|---|---|---|---|---|---|
-| A·fedhpc | 27 | 9 | 12.3 [17.7] | 13.7 [16.2] | 15.4 [22.8] | 2.3 [4.4] | 74.3 [91.0] | 7.0 [12.9] |
-| A·pos | 27 | 0 | 53.7 [93.8] | 87.0 [361.3] | 88.1 [235.1] | 15.7 [41.3] | 488.5 [1311.3] | 57.5 [100.2] |
-| B·fedhpc | 27 | 9 | 20.8 [29.3] | 22.4 [24.4] | 25.8 [28.5] | 2.3 [4.2] | 123.0 [142.1] | 7.1 [12.2] |
-| B·pos | 27 | 3 | 130.2 [215.6] | 125.8 [775.5] | 190.1 [314.6] | 12.4 [41.5] | 858.9 [2004.4] | 38.0 [108.5] |
+| A·fedhpc | 27 | 9 | 12.3 [17.7] | 13.7 [16.2] | 15.4 [22.8] | 0.6 [1.0] | 74.3 [91.0] | 1.8 [2.9] |
+| A·pos | 27 | 0 | 53.7 [93.8] | 87.0 [361.3] | 88.1 [235.1] | 5.3 [8.8] | 488.5 [1311.3] | 15.5 [25.2] |
+| B·fedhpc | 27 | 9 | 20.8 [29.3] | 22.4 [24.4] | 25.8 [28.5] | 0.5 [0.8] | 123.0 [142.1] | 1.7 [2.3] |
+| B·pos | 27 | 3 | 130.2 [215.6] | 125.8 [775.5] | 190.1 [314.6] | 4.2 [8.7] | 858.9 [2004.4] | 12.4 [25.7] |
 
 ## Weighted-sum quality: gap to exact g* (% of g*, non-trivial instances)
 
 | class·workload | n | λ | dispatch median | p90 | max | dispatch = g* (≤1e-6) | threshold median | WS Gurobi faster than dispatch |
 |---|---|---|---|---|---|---|---|---|
-| A·fedhpc | 18 | 0.25 | 1.8 | 27.6 | 58.4 | 3/18 | 61.3 | 0/18 |
-| A·fedhpc | 18 | 0.5 | 4.0 | 8.8 | 9.0 | 2/18 | 119.3 | 0/18 |
-| A·fedhpc | 18 | 0.75 | 3.0 | 9.4 | 10.8 | 0/18 | 143.9 | 0/18 |
-| A·pos | 27 | 0.25 | 55.2 | 95.1 | 156.5 | 3/27 | 184.5 | 0/27 |
-| A·pos | 27 | 0.5 | 21.2 | 25.8 | 27.7 | 3/27 | 213.9 | 0/27 |
-| A·pos | 27 | 0.75 | 7.8 | 15.5 | 36.7 | 0/27 | 209.3 | 0/27 |
-| B·fedhpc | 18 | 0.25 | 1.1 | 40.7 | 42.2 | 3/18 | 50.5 | 0/18 |
-| B·fedhpc | 18 | 0.5 | 3.6 | 10.5 | 11.5 | 2/18 | 78.0 | 0/18 |
-| B·fedhpc | 18 | 0.75 | 2.9 | 8.8 | 9.2 | 0/18 | 74.0 | 0/18 |
-| B·pos | 24 | 0.25 | 11.8 | 86.8 | 125.2 | 5/24 | 98.9 | 0/24 |
-| B·pos | 24 | 0.5 | 13.8 | 19.1 | 22.1 | 0/24 | 147.6 | 0/24 |
-| B·pos | 24 | 0.75 | 6.9 | 15.1 | 20.9 | 0/24 | 237.7 | 0/24 |
+| A·fedhpc | 18 | 0.25 | 1.1 | 7.2 | 13.6 | 3/18 | 61.3 | 0/18 |
+| A·fedhpc | 18 | 0.5 | 1.4 | 4.4 | 4.7 | 0/18 | 119.3 | 0/18 |
+| A·fedhpc | 18 | 0.75 | 1.4 | 4.7 | 8.4 | 0/18 | 143.9 | 0/18 |
+| A·pos | 27 | 0.25 | 12.0 | 48.4 | 58.3 | 3/27 | 184.5 | 0/27 |
+| A·pos | 27 | 0.5 | 6.2 | 19.7 | 21.6 | 1/27 | 213.9 | 0/27 |
+| A·pos | 27 | 0.75 | 4.3 | 14.8 | 16.2 | 0/27 | 209.3 | 0/27 |
+| B·fedhpc | 18 | 0.25 | 1.1 | 2.7 | 3.6 | 3/18 | 50.5 | 0/18 |
+| B·fedhpc | 18 | 0.5 | 1.5 | 5.6 | 10.1 | 2/18 | 78.0 | 0/18 |
+| B·fedhpc | 18 | 0.75 | 1.5 | 3.3 | 5.1 | 0/18 | 74.0 | 0/18 |
+| B·pos | 24 | 0.25 | 9.1 | 29.3 | 38.4 | 2/24 | 98.9 | 0/24 |
+| B·pos | 24 | 0.5 | 4.8 | 18.4 | 22.8 | 0/24 | 147.6 | 0/24 |
+| B·pos | 24 | 0.75 | 5.5 | 16.0 | 22.9 | 0/24 | 237.7 | 0/24 |
 
 ## Factor effects (median per cell; gap over non-trivial instances and all λ)
 
 | class·workload | factor | level | n | trivial | f2^T (USD) | f1^0/f1^T − 1 (%) | dispatch gap (%) | exact total (s) |
 |---|---|---|---|---|---|---|---|---|
-| A·fedhpc | count | 100 | 9 | 0 | 3211 | 53.7 | 6.8 | 88 |
-| A·fedhpc | count | 300 | 9 | 3 | 192 | 2.4 | 2.1 | 70 |
-| A·fedhpc | count | 500 | 9 | 6 | 0 | 0.0 | 2.3 | 44 |
-| A·fedhpc | load | F | 9 | 6 | 0 | 0.0 | 9.3 | 44 |
-| A·fedhpc | load | H | 9 | 3 | 192 | 2.4 | 5.1 | 70 |
-| A·fedhpc | load | E | 9 | 0 | 4819 | 78.3 | 2.3 | 82 |
-| A·fedhpc | io | L | 9 | 3 | 747 | 15.6 | 2.4 | 74 |
-| A·fedhpc | io | M | 9 | 3 | 829 | 15.6 | 2.6 | 74 |
-| A·fedhpc | io | H | 9 | 3 | 1495 | 15.1 | 3.3 | 80 |
-| A·pos | count | 100 | 9 | 0 | 23467 | 212.4 | 23.0 | 1065 |
-| A·pos | count | 300 | 9 | 0 | 6712 | 36.5 | 20.5 | 451 |
-| A·pos | count | 500 | 9 | 0 | 1873 | 7.7 | 16.3 | 327 |
-| A·pos | load | F | 9 | 0 | 3178 | 13.4 | 14.1 | 328 |
-| A·pos | load | H | 9 | 0 | 6712 | 36.5 | 22.4 | 457 |
-| A·pos | load | E | 9 | 0 | 13050 | 90.8 | 21.2 | 539 |
-| A·pos | io | L | 9 | 0 | 6929 | 48.4 | 20.5 | 532 |
-| A·pos | io | M | 9 | 0 | 7519 | 48.4 | 21.8 | 451 |
-| A·pos | io | H | 9 | 0 | 13153 | 46.9 | 20.7 | 628 |
-| B·fedhpc | count | 100 | 9 | 0 | 1328 | 40.2 | 5.6 | 133 |
-| B·fedhpc | count | 300 | 9 | 3 | 169 | 2.1 | 1.3 | 119 |
-| B·fedhpc | count | 500 | 9 | 6 | 0 | 0.0 | 0.8 | 72 |
-| B·fedhpc | load | F | 9 | 6 | 0 | 0.0 | 8.8 | 73 |
-| B·fedhpc | load | H | 9 | 3 | 169 | 2.1 | 1.1 | 119 |
-| B·fedhpc | load | E | 9 | 0 | 3949 | 68.9 | 1.7 | 127 |
-| B·fedhpc | io | L | 9 | 3 | 466 | 9.6 | 1.6 | 123 |
-| B·fedhpc | io | M | 9 | 3 | 504 | 9.6 | 1.9 | 124 |
-| B·fedhpc | io | H | 9 | 3 | 942 | 9.6 | 2.3 | 123 |
-| B·pos | count | 100 | 9 | 0 | 10754 | 85.4 | 17.3 | 1818 |
-| B·pos | count | 300 | 9 | 0 | 1623 | 4.9 | 7.6 | 859 |
-| B·pos | count | 500 | 9 | 3 | 122 | 0.2 | 5.9 | 526 |
-| B·pos | load | F | 9 | 3 | 348 | 0.5 | 11.7 | 839 |
-| B·pos | load | H | 9 | 0 | 1623 | 4.9 | 7.6 | 763 |
-| B·pos | load | E | 9 | 0 | 4463 | 37.6 | 11.5 | 1118 |
-| B·pos | io | L | 9 | 1 | 2255 | 11.7 | 7.5 | 718 |
-| B·pos | io | M | 9 | 1 | 2427 | 11.7 | 8.0 | 839 |
-| B·pos | io | H | 9 | 1 | 4168 | 11.4 | 10.7 | 943 |
+| A·fedhpc | count | 100 | 9 | 0 | 3211 | 53.7 | 2.4 | 88 |
+| A·fedhpc | count | 300 | 9 | 3 | 192 | 2.4 | 0.6 | 70 |
+| A·fedhpc | count | 500 | 9 | 6 | 0 | 0.0 | 0.8 | 44 |
+| A·fedhpc | load | F | 9 | 6 | 0 | 0.0 | 3.0 | 44 |
+| A·fedhpc | load | H | 9 | 3 | 192 | 2.4 | 2.2 | 70 |
+| A·fedhpc | load | E | 9 | 0 | 4819 | 78.3 | 0.8 | 82 |
+| A·fedhpc | io | L | 9 | 3 | 747 | 15.6 | 0.7 | 74 |
+| A·fedhpc | io | M | 9 | 3 | 829 | 15.6 | 1.3 | 74 |
+| A·fedhpc | io | H | 9 | 3 | 1495 | 15.1 | 2.0 | 80 |
+| A·pos | count | 100 | 9 | 0 | 23467 | 212.4 | 11.2 | 1065 |
+| A·pos | count | 300 | 9 | 0 | 6712 | 36.5 | 4.0 | 451 |
+| A·pos | count | 500 | 9 | 0 | 1873 | 7.7 | 3.7 | 327 |
+| A·pos | load | F | 9 | 0 | 3178 | 13.4 | 7.3 | 328 |
+| A·pos | load | H | 9 | 0 | 6712 | 36.5 | 8.5 | 457 |
+| A·pos | load | E | 9 | 0 | 13050 | 90.8 | 2.4 | 539 |
+| A·pos | io | L | 9 | 0 | 6929 | 48.4 | 3.7 | 532 |
+| A·pos | io | M | 9 | 0 | 7519 | 48.4 | 5.0 | 451 |
+| A·pos | io | H | 9 | 0 | 13153 | 46.9 | 9.3 | 628 |
+| B·fedhpc | count | 100 | 9 | 0 | 1328 | 40.2 | 1.7 | 133 |
+| B·fedhpc | count | 300 | 9 | 3 | 169 | 2.1 | 0.8 | 119 |
+| B·fedhpc | count | 500 | 9 | 6 | 0 | 0.0 | 0.7 | 72 |
+| B·fedhpc | load | F | 9 | 6 | 0 | 0.0 | 3.3 | 73 |
+| B·fedhpc | load | H | 9 | 3 | 169 | 2.1 | 1.4 | 119 |
+| B·fedhpc | load | E | 9 | 0 | 3949 | 68.9 | 1.0 | 127 |
+| B·fedhpc | io | L | 9 | 3 | 466 | 9.6 | 1.1 | 123 |
+| B·fedhpc | io | M | 9 | 3 | 504 | 9.6 | 1.3 | 124 |
+| B·fedhpc | io | H | 9 | 3 | 942 | 9.6 | 1.5 | 123 |
+| B·pos | count | 100 | 9 | 0 | 10754 | 85.4 | 18.0 | 1818 |
+| B·pos | count | 300 | 9 | 0 | 1623 | 4.9 | 5.0 | 859 |
+| B·pos | count | 500 | 9 | 3 | 122 | 0.2 | 4.0 | 526 |
+| B·pos | load | F | 9 | 3 | 348 | 0.5 | 11.3 | 839 |
+| B·pos | load | H | 9 | 0 | 1623 | 4.9 | 5.4 | 763 |
+| B·pos | load | E | 9 | 0 | 4463 | 37.6 | 5.5 | 1118 |
+| B·pos | io | L | 9 | 1 | 2255 | 11.7 | 5.1 | 718 |
+| B·pos | io | M | 9 | 1 | 2427 | 11.7 | 5.8 | 839 |
+| B·pos | io | H | 9 | 1 | 4168 | 11.4 | 9.0 | 943 |
 
 ## io level, paired over (class, workload, count, load) cells (non-trivial)
 
