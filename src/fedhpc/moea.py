@@ -1066,7 +1066,23 @@ def weighted_solve_memetic(
     (λ = 0.5: +1.23 % → +0.09 %), the decoder bit the light one (λ ≤ 0.25 →
     optimal); the deadline bit and setting moves (8) measured ~neutral, and
     the best-of decoder (``flags`` 512) matches the adaptive decoder at 2-4×
-    the time. With ``return_stats`` returns ``(Solution, stats)``.
+    the time.
+
+    ``flags`` 4096 adds the indifference-deadline EDF priority of
+    :func:`weighted_solve_dispatch` as one more evolved priority (reported
+    ``mu`` -2), and 8192 decodes EDF individuals without the deadline offload.
+    The local search decodes with the fast DEngine (``flags`` 16384: reference
+    decoder; bit-identical trajectories, scores re-summed in job order). On the
+    261 generated-bench cells (2026-11-04, dispatch_study README, "Memetic with
+    EDF") EDF cuts the mean gap 11.4 → 9.4 %, but the ILS of
+    :func:`weighted_solve_dispatch` stays ahead (6.5 %) at 2.9× less time.
+    The cause is the capped LS: EDF needs 10^2–10^3 moves from all-auto.
+    Experimental ``adapt`` bits fix it: 16 seeds all-auto individuals with a
+    full LS, 128 limits that to the ILS's two starts, 64 keeps each priority's
+    best and 32 polishes to a local optimum. adapt=215 with flags 12352 gives
+    mean 5.5 % / median 1.7 % against the ILS's 6.5 / 3.0 % (5.8 / 2.6 % with
+    120 kicks at a similar time), at 2.2× the default ILS's time.
+    With ``return_stats`` returns ``(Solution, stats)``.
     """
     if not 0.0 <= lam <= 1.0:
         raise ValueError("lam must be in [0, 1]")

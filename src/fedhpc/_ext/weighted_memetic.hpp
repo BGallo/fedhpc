@@ -29,6 +29,18 @@
  * decode-only mu choice is the wrong one at λ = 0.5 on the congested instance
  * and no single (mu, deadline) wins at every λ.
  *
+ * EDF (flags DF_EDF_ADD): the indifference-deadline EDF priority of
+ * weighted_dispatch.hpp joins the run's priority scalars as one more entry
+ * (after the mu grid, or beside the fixed mu), so the per-individual priority
+ * index is evolved whenever it is on; DF_EDF_NODL makes individuals on the EDF
+ * priority decode without the deadline offload (as the dispatch ILS's EDF
+ * start), else their deadline bit applies as for any other priority.
+ *
+ * Decoding: the local search decodes with DEngine (one DFast table per priority
+ * scalar and deadline mode), as weighted_solve_dispatch does; same decisions as
+ * the reference decoder. Serial-SGS individuals and the crossover/mutation
+ * decodes use the reference decoder.
+ *
  * The heuristic seeds of ga_common are mapped to genomes by type class
  * (cloud type → 1, on-prem → 0), as are make_random individuals. Every flag
  * is an ablation switch; the ABL_* bits of ga_common keep their meaning.
@@ -46,6 +58,11 @@ enum MAdapt {
     MA_DEADLINE = 1 << 1,   // per-individual deadline offload on/off
     MA_DECODER  = 1 << 2,   // per-individual decoder: dispatch / serial SGS
     MA_LS_MOVES = 1 << 3,   // local search also tries neighbouring settings
+    // experimental (2026-11-04, dispatch_study "Memetic mechanisms")
+    MA_SEED_AUTO  = 1 << 4, // one all-auto individual per priority after the heuristic seeds, LS to a local optimum
+    MA_POLISH_FULL = 1 << 5,// final polish: LS to a local optimum (K 64 / K_max 256)
+    MA_NICHE      = 1 << 6, // elitism per priority: carry each priority's best forward
+    MA_SEED_TWO   = 1 << 7, // with MA_SEED_AUTO: seed only the ILS's two starts (best mu by all-auto decode, EDF)
 };
 
 struct MInd {
@@ -64,6 +81,14 @@ struct MemeticResult {
     int dl = 1, dec = 0;
     std::vector<int> mu_hist, dl_hist, dec_hist;    // final population settings
     std::vector<std::pair<double, double>> trace;   // (elapsed ms, best pen_g)
+    // diagnostics
+    double init_cloud = 0;                          // mean gene-1 share before the initial LS
+    std::vector<double> init_best;                  // [priority] best pen_g after the initial LS
+    std::vector<std::tuple<int, int, double, double>> gens;   // (gen, n on last priority, its best, others' best)
+    long long dec_x = 0, dec_ls = 0;                // decodes in crossover / everything else
+    double polish_gain = 0;                         // pen_g drop in the final polish
+    double init_ms = 0;
+    std::vector<std::tuple<double, int, long long, double, double>> seeds;   // (mu, moves, decodes, decode ms, pen_g)                             // time to the end of the initial population
 };
 
 inline std::vector<char> genome_from_genes(const Problem& prob, const std::vector<int>& genes) {
@@ -78,6 +103,27 @@ inline std::vector<char> genome_from_genes(const Problem& prob, const std::vecto
 inline void flip_job(const DProblem& P, const DScalar& S, const MInd& x, std::vector<char>& g, int j) {
     if (x.s.on[j]) { if (S.cloud_opt[j] >= 0) g[j] = 1; }
     else if (!P.jobs[j].onprem.empty()) g[j] = (g[j] == 1) ? 0 : 2;
+}
+
+// f1/f2/pen_g of a schedule re-summed in job-index order. The reference decoder
+// sums in decision order and DEngine incrementally, so equal schedules can differ
+// in the last bits; the GA compares scores without tolerance (tournament, MSXF,
+// incumbent), so every individual is scored this way and both decode paths
+// take the same trajectory.
+inline void canon(const DProblem& P, const DScalar& S, DSched& s) {
+    double f1 = 0, f2 = 0;
+    for (int j = 0; j < P.n; j++) {
+        if (s.type[j] < 0) continue;
+        const DJob& J = P.jobs[j];
+        const DOpt* o = nullptr;
+        for (const DOpt& x : (s.on[j] ? J.onprem : J.cloud)) if (x.type == s.type[j]) { o = &x; break; }
+        if (!o) continue;
+        f1 += J.weight * (s.start[j] + o->p - J.arrival);
+        f2 += o->cost;
+    }
+    s.f1 = f1; s.f2 = f2;
+    s.g = S.w1 * f1 + S.w2 * f2;
+    s.pen_g = pen(S, f1, f2, s.cv);
 }
 
 inline bool same_settings(const MInd& a, const MInd& b) {
@@ -145,20 +191,44 @@ inline MemeticResult run_weighted_memetic(
                 }
             }
             set_priority(P, S, mu);
-            SS.push_back(std::move(S));
+            SS.push_back(S);
             mu_val.push_back(mu);
         }
+        if (flags & DF_EDF_ADD) { set_priority(P, S, 0.0, true); SS.push_back(S); mu_val.push_back(-2.0); }
     }
     const int n_mu = (int)SS.size();
+    const int edf_idx = (flags & DF_EDF_ADD) ? n_mu - 1 : -1;
+    // the priority index is per-individual when the mu grid is adaptive or EDF joins it
+    if (n_mu > 1) adapt |= MA_MU;
 
     // Decoder flags of an individual's settings.
     auto fl = [&](const MInd& x) {
         int f = flags;
         if (adapt & MA_DEADLINE) f = x.dl ? (f & ~DF_NO_DEADLINE) : (f | DF_NO_DEADLINE);
         if (adapt & MA_DECODER)  f = (f & ~(DF_SERIAL | DF_BEST_OF)) | (x.dec ? DF_SERIAL : 0);
+        if (x.mu == edf_idx && (flags & DF_EDF_NODL)) f |= DF_NO_DEADLINE;
         return f;
     };
-    auto run_decode = [&](MInd& x, DWork& W) { decode(P, SS[x.mu], x.gen, fl(x), W, x.s); };
+    // DEngine tables per (priority scalar, deadline mode); the LS uses them for
+    // dispatch-decoded individuals (dispatch_ls falls back to the reference
+    // decoder for serial / best-of / why flags)
+    std::vector<std::unique_ptr<DFast>> FF(2 * n_mu);
+    if (!(flags & DF_REF_DECODE)) {
+        std::vector<int> need;
+        for (int i = 0; i < n_mu; i++)
+            for (int d = 0; d < 2; d++) {
+                MInd x; x.mu = i; x.dl = (char)d; x.dec = 0;
+                const bool dl = !(fl(x) & DF_NO_DEADLINE);
+                if (FF[2 * i + dl] == nullptr) { FF[2 * i + dl] = std::make_unique<DFast>(); need.push_back(2 * i + dl); }
+            }
+        #pragma omp parallel for schedule(dynamic, 1)
+        for (int k = 0; k < (int)need.size(); k++)
+            *FF[need[k]] = build_dfast(P, SS[need[k] / 2], need[k] % 2 == 1);
+    }
+    auto fast_of = [&](const MInd& x) -> const DFast* {
+        return FF[2 * x.mu + !(fl(x) & DF_NO_DEADLINE)].get();
+    };
+    auto run_decode = [&](MInd& x, DWork& W) { decode(P, SS[x.mu], x.gen, fl(x), W, x.s); canon(P, SS[x.mu], x.s); };
 
     // Decode + capped local search of one individual on this thread; with
     // MA_LS_MOVES a setting step is taken at each local optimum (one move).
@@ -169,7 +239,8 @@ inline MemeticResult run_weighted_memetic(
         std::vector<MInd> nb;
         while (true) {
             DStats st;
-            dispatch_ls(P, SS[x.mu], x.gen, x.s, fl(x), shortlist, left, lrng, W, st, t0);
+            dispatch_ls(P, SS[x.mu], x.gen, x.s, fl(x), shortlist, left, lrng, W, st, t0, fast_of(x));
+            canon(P, SS[x.mu], x.s);
             dec += st.decodes; left -= st.ls_moves;
             if (!(adapt & MA_LS_MOVES) || left <= 0) break;
             setting_neighbours(x, adapt, n_mu, nb);
@@ -194,19 +265,41 @@ inline MemeticResult run_weighted_memetic(
     const int n_hs = std::min<int>((int)h_seeds.size(), pop_size);
     const char dl0 = !(flags & DF_NO_DEADLINE), dec0 = (flags & DF_SERIAL) ? 1 : 0;
 
+    // MA_SEED_AUTO priorities: all, or (MA_SEED_TWO) the best mu by all-auto decode and EDF
+    std::vector<int> seed_mu;
+    if (adapt & MA_SEED_AUTO) {
+        if (adapt & MA_SEED_TWO) {
+            const int nm = edf_idx >= 0 ? n_mu - 1 : n_mu;
+            std::vector<char> g0(P.n, 0);
+            int bm = 0; double bp = 0;
+            for (int i = 0; i < nm; i++) {
+                MInd x; x.gen = g0; x.mu = i; x.dl = 1; x.dec = 0;
+                run_decode(x, top_works[0]); R.decodes++;
+                if (i == 0 || x.s.pen_g < bp - 1e-12) { bp = x.s.pen_g; bm = i; }
+            }
+            seed_mu.push_back(bm);
+            if (edf_idx >= 0) seed_mu.push_back(edf_idx);
+        } else for (int i = 0; i < n_mu; i++) seed_mu.push_back(i);
+    }
+    const int n_seed = std::min<int>((int)seed_mu.size(), std::max(0, pop_size - n_hs));
+
     std::vector<MInd> pop(pop_size);
-    long long dec = 0;
+    std::vector<double> init_cloud(pop_size, 0.0);
+    long long dec = 0, decx = 0;
     int calls = 0;
     #pragma omp parallel for schedule(dynamic, 1) reduction(+:dec, calls)
     for (int k = 0; k < pop_size; k++) {
         std::mt19937 lrng(init_seeds[k]);
         MInd& x = pop[k];
-        x.gen = genome_from_genes(prob, k < n_hs ? h_seeds[k].genes
+        const bool seed_auto = k >= n_hs && k < n_hs + n_seed;
+        x.gen = seed_auto ? std::vector<char>(P.n, 0)
+              : genome_from_genes(prob, k < n_hs ? h_seeds[k].genes
                                                  : make_random(prob, lrng, abl_unif).genes);
         // spread the adaptive settings over the population
         int c = k;
         x.dl = dl0; x.dec = dec0;
         if (adapt & MA_MU)       { x.mu = c % n_mu; c /= n_mu; }
+        if (seed_auto)           { x.mu = seed_mu[k - n_hs]; x.dl = 1; x.dec = 0; }   // the ILS's start settings
         if (adapt & MA_DEADLINE) { x.dl = (char)(1 - c % 2); c /= 2; }
         if (adapt & MA_DECODER)  { x.dec = (char)(c % 2); }
 #ifdef _OPENMP
@@ -214,9 +307,34 @@ inline MemeticResult run_weighted_memetic(
 #else
         auto& W = works[0];
 #endif
-        improve(x, ls_moves, lrng, W, dec);
-        calls++;
+        init_cloud[k] = (double)std::count(x.gen.begin(), x.gen.end(), (char)1) / std::max(P.n, 1);
+        if (!seed_auto) { improve(x, ls_moves, lrng, W, dec); calls++; }
     }
+    // the ILS's starts: all-auto genome per priority, LS to a local optimum
+    // (EDF needs 10^2-10^3 moves); one at a time, candidates decoded in parallel
+    for (int k = n_hs; k < n_hs + n_seed; k++) {
+            MInd& x = pop[k];
+            std::mt19937 lrng(init_seeds[k]);
+            run_decode(x, top_works[0]); dec++;
+            DStats st;
+            dispatch_ls(P, SS[x.mu], x.gen, x.s, fl(x), 64, 100000, lrng, top_works, st, t0, fast_of(x), 256);
+            canon(P, SS[x.mu], x.s);
+            dec += st.decodes; calls++;
+            R.seeds.emplace_back(mu_val[x.mu], st.ls_moves, st.decodes, st.decode_ms, x.s.pen_g);
+        }
+    R.init_ms = ms_since(t0);
+    R.init_cloud = std::accumulate(init_cloud.begin(), init_cloud.end(), 0.0) / pop_size;
+    R.init_best.assign(n_mu, std::numeric_limits<double>::infinity());
+    for (const MInd& x : pop) R.init_best[x.mu] = std::min(R.init_best[x.mu], x.s.pen_g);
+    auto log_gen = [&](int g) {
+        int ne = 0; double be = std::numeric_limits<double>::infinity(), bo = be;
+        for (const MInd& x : pop) {
+            if (x.mu == n_mu - 1) { ne++; be = std::min(be, x.s.pen_g); }
+            else bo = std::min(bo, x.s.pen_g);
+        }
+        R.gens.emplace_back(g, ne, be, bo);
+    };
+    log_gen(-1);
 
     auto score = [](const MInd& x) { return x.s.pen_g; };
     int inc = 0;
@@ -231,10 +349,20 @@ inline MemeticResult run_weighted_memetic(
 
     for (int g = 0; g < n_gen; g++) {
         for (auto& s : child_seeds) s = rng();
-        const int k0 = abl_elit ? 0 : 1;
+        int k0 = abl_elit ? 0 : 1;
         if (!abl_elit) offspring[0] = incumbent;
+        if (!abl_elit && (adapt & MA_NICHE)) {
+            // the best individual of every other priority present also survives
+            std::vector<int> bi(n_mu, -1);
+            for (int k = 0; k < pop_size; k++) {
+                const int m = pop[k].mu;
+                if (bi[m] < 0 || score(pop[k]) < score(pop[bi[m]])) bi[m] = k;
+            }
+            for (int m = 0; m < n_mu && k0 < pop_size; m++)
+                if (bi[m] >= 0 && m != incumbent.mu) offspring[k0++] = pop[bi[m]];
+        }
 
-        #pragma omp parallel for schedule(dynamic, 1) reduction(+:dec, calls)
+        #pragma omp parallel for schedule(dynamic, 1) reduction(+:dec, calls, decx)
         for (int k = k0; k < pop_size; k++) {
             std::mt19937 lrng(child_seeds[k]);
 #ifdef _OPENMP
@@ -276,7 +404,7 @@ inline MemeticResult run_weighted_memetic(
                         w.gen = cur.gen; w.mu = cur.mu; w.dl = cur.dl; w.dec = cur.dec;
                         if (i < 0) { w.mu = a.mu; w.dl = a.dl; w.dec = a.dec; }
                         else       w.gen[diff[i]] = a.gen[diff[i]];
-                        run_decode(w, W[0]); dec++;
+                        run_decode(w, W[0]); dec++; decx++;
                         if (!have || w.s.pen_g < step.s.pen_g) { step = std::move(w); have = true; }
                     }
                     cur = std::move(step);
@@ -311,6 +439,7 @@ inline MemeticResult run_weighted_memetic(
             offspring[k] = std::move(c);
         }
         pop.swap(offspring);
+        log_gen(g);
 
         bool advanced = false;
         for (int k = 0; k < pop_size; k++)
@@ -337,13 +466,21 @@ inline MemeticResult run_weighted_memetic(
     // Final polish on the incumbent.
     {
         DStats st;
-        dispatch_ls(P, SS[incumbent.mu], incumbent.gen, incumbent.s, fl(incumbent), shortlist,
-                    ls_moves * 3, rng, top_works, st, t0);
+        const double before = incumbent.s.pen_g;
+        if (adapt & MA_POLISH_FULL)
+            dispatch_ls(P, SS[incumbent.mu], incumbent.gen, incumbent.s, fl(incumbent), 64,
+                        100000, rng, top_works, st, t0, fast_of(incumbent), 256);
+        else
+            dispatch_ls(P, SS[incumbent.mu], incumbent.gen, incumbent.s, fl(incumbent), shortlist,
+                        ls_moves * 3, rng, top_works, st, t0, fast_of(incumbent));
+        canon(P, SS[incumbent.mu], incumbent.s);
+        R.polish_gain = before - incumbent.s.pen_g;
         dec += st.decodes; calls++;
         R.trace.emplace_back(ms_since(t0), incumbent.s.pen_g);
     }
 
     R.decodes += dec;
+    R.dec_x = decx; R.dec_ls = R.decodes - decx;
     R.ls_calls = calls;
     R.mu = mu_val[incumbent.mu]; R.dl = incumbent.dl; R.dec = incumbent.dec;
     R.mu_hist.assign(n_mu, 0); R.dl_hist.assign(2, 0); R.dec_hist.assign(2, 0);

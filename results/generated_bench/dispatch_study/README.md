@@ -391,3 +391,222 @@ That is a quality change and needs its own ablation.
 `speed.jsonl` was measured before batching and kick patience became defaults:
 K = 64 in one batch, kicks split. That does not affect the engine comparison,
 since every arm decides identically.
+
+---
+
+# Memetic with EDF vs the ILS (2026-11-04)
+
+**Question.** Q6 rejected the memetic GA only as the *cause* of the gap. On the
+27 sample cells it had beaten the old ILS (mean 17.6 vs 21.9 %). Only the ILS
+then got the EDF fix. Is the ILS better once both have EDF?
+
+## Changes (`_ext/weighted_memetic.hpp`)
+
+- **EDF priority** (`flags` 4096): the indifference-deadline EDF order joins
+  the run's priority scalars after the μ grid, as one more value of each
+  individual's evolved priority index (reported `mu` = −2). With 8192, EDF
+  individuals decode without the deadline offload, as the ILS's EDF start
+  does.
+- **Fast LS decoder.** `dispatch_ls` now gets DEngine tables, one per
+  (priority, deadline mode). Every individual's f1/f2 are re-summed in job
+  order (`canon`). Without that, the engine's last-bit differences flip the
+  GA's zero-tolerance comparisons: only 4/27 cells matched before `canon`.
+  - **Checks:** with `canon`, the reference decoder (`flags` 16384) and the
+    fast one give bit-identical g on 27/27 sample cells, 1.48× faster.
+    `canon` itself changes only tie-breaks: mean gap on the sample 17.6 → 17.5 %.
+  - **Tests:** `pytest -k "Memetic or dispatch"` 246 passed, including the new
+    fast-vs-reference and EDF-population tests.
+
+## Protocol
+
+- All 87 non-trivial instances × λ 0.25/0.5/0.75 = 261 cells.
+- Seed 42, 4 threads, 3 instances in parallel, the same reference points.
+- Run in one session: `scripts/dispatch_validate.py --solver memetic`.
+- Report: `scripts/memetic_vs_ils_report.py`.
+- The ILS rerun reproduces `validate_fast_default` bit-exactly in 261/261 cells.
+
+## Results
+
+| arm | mean | median | p90 | max | >10 % | W/T/L vs ILS (±0.5 pp) | time (s) |
+|---|---|---|---|---|---|---|---|
+| ILS (current default) | **6.5** | **3.0** | **18.4** | **58.3** | **54** | – | **821** |
+| memetic (adapt 7) | 11.4 | 6.2 | 26.9 | 75.9 | 96 | 39/76/146 | 2410 |
+| memetic + EDF (12352) | 9.4 | 5.5 | 22.8 | 62.2 | 87 | 44/80/137 | 2370 |
+| memetic + EDF, deadline evolved (4160) | 9.4 | 5.7 | 22.9 | 62.2 | 87 | 45/78/138 | 2428 |
+
+| arm | λ .25 | λ .5 | λ .75 | A·fedhpc | A·pos | B·fedhpc | B·pos |
+|---|---|---|---|---|---|---|---|
+| ILS | 9.3 | 5.4 | 4.7 | 2.0 | 9.4 | 1.7 | 10.0 |
+| memetic | 16.3 | 10.9 | 6.9 | 3.0 | 21.8 | 3.0 | 12.2 |
+| memetic + EDF | 10.9 | 10.9 | 6.5 | 3.1 | 16.0 | 3.0 | 11.6 |
+
+## Why the memetic stays behind
+
+- **Where EDF wins in the GA, it nearly closes the gap.** The memetic's final
+  incumbent uses EDF in 17 cells, all A·pos λ 0.25. There it scores 13.9 %
+  (41.5 % without EDF), against the ILS's 12.6 %. On the sample cells EDF
+  takes over the final population (28 of 32 individuals).
+- **But the GA picks EDF far less often than the ILS.** The ILS's best comes
+  from its EDF start in 178 of 261 cells, at every λ.
+  - On those 178 cells: ILS 7.2 % vs memetic + EDF 11.6 %.
+  - On the 83 cells the μ start wins: ILS 5.0 % vs memetic 4.7 %, on par.
+- **Mechanism (hypothesis).** In the ILS each start gets its own full LS and
+  kicks before being compared. In the GA, EDF is about 1/11 of the initial
+  population, and it competes in tournaments after a capped LS of 4 moves.
+  Where EDF needs search before it beats μ, which is the usual case outside
+  A·pos λ 0.25, selection drops it early. That EDF and evolved-deadline arms
+  are identical fits this: EDF individuals rarely survive long enough for the
+  deadline bit to matter. Not yet tested directly, e.g. by tracking the EDF
+  share per generation.
+- **Cost.** The memetic is also 2.9× slower, so matching the ILS's time would
+  only widen the gap.
+
+## Verdict
+
+Keep the ILS. With EDF the memetic improves (11.4 → 9.4 %), but it is behind
+the ILS in quality (137 losses vs 44 wins) and takes 2.9× the time. Untested
+way the memetic could catch up: protect the EDF niche (islands per priority,
+or a per-priority quota in selection). That would make it an ILS-like
+multi-start inside the GA.
+
+**Caveat:** one seed per cell (±3 pp per-cell noise). The aggregate gap
+(2.9 pp mean over 261 cells, 137/44 W/L) is well above that.
+
+---
+
+# Memetic mechanisms and fixes (2026-11-04)
+
+**Question.** Which GA mechanisms hold the memetic back, and can fixing them
+bring it level with the ILS or ahead of it?
+
+## Diagnostics
+
+`scripts/memetic_mechanisms.py`, with new memetic stats:
+- `init_cloud`: gene-1 share of the initial population.
+- `init_best`: best score per priority after the initial LS.
+- `gens`: EDF count and best score per generation.
+- `dec_x` / `dec_ls`: decodes in crossover vs the rest.
+- `polish_gain`, `init_ms`, `seeds`.
+
+Five cells: A_pos_n300_lH, A_pos_n100_lE, B_pos_n300_lH and A_fedhpc_n100_lE
+at λ 0.5, and B_pos_n100_lE at λ 0.25.
+
+| mechanism | evidence | verdict |
+|---|---|---|
+| **The capped LS kills EDF.** Init LS is 8 moves, a child's LS 4. | From all-auto, the EDF start (no deadline) needs 166–1,634 LS moves. After 8 moves it is at a 3,900–18,000 % gap. The μ start needs 3–46 moves, because the deadline rule offloads inside the decoder. After the init LS, EDF individuals sit at 60–128 % against 5–25 % for μ, and are gone by generation 0–1. | **Main cause** |
+| **Random, cost-weighted initial genomes.** | About 10 % gene 1. Seeding all-auto genomes alone (bit 16 before the full-LS change) changed nothing: the cap still applies. | Secondary |
+| **Plain elitism drops niches.** | Per-priority elitism alone (bit 64) helps only where EDF wins after few moves (B_pos_n100_lE λ 0.25: 32.6 → 25.1 %). | Helps once EDF is competitive |
+| **The final polish stops early.** | Polish gain about 0 pp. | Not a cause |
+| **The decoder picks μ by one all-auto decode** (ILS too). | A full LS on each μ of the grid reaches better μ starts (19.8 vs 23.9 %, 2.0 vs 8.3 %). The best μ after LS is usually 0.1–1, but those need 2,500–3,600 moves. | Headroom, costly |
+| **Crossover is expensive** (MSXF, reference decoder). | 37–49 % of decodes. | Cost, not quality |
+
+## Fixes (new `adapt` bits, experimental)
+
+- **16 `MA_SEED_AUTO`:** all-auto seed individuals, each with an LS to a
+  local optimum (K 64 / K_max 256), using the ILS start settings (deadline
+  on, dispatch decoder).
+- **128 `MA_SEED_TWO`:** with 16, seeds only the ILS's two starts: the best μ
+  by all-auto decode, and EDF. Without it, every priority is seeded.
+- **64 `MA_NICHE`:** each priority's best individual survives every generation.
+- **32 `MA_POLISH_FULL`:** the final LS runs to a local optimum (not used
+  below).
+
+## Results (261 cells, seed 42, run in one session)
+
+| arm | mean | median | p90 | max | >10 % | W/T/L vs ILS | time (s) |
+|---|---|---|---|---|---|---|---|
+| ILS (default) | 6.5 | 3.0 | 18.4 | 58.3 | 54 | – | 821 |
+| ILS, 120 kicks, no patience | 5.8 | 2.6 | **16.9** | **56.6** | **47** | 80/178/3 | 1555 |
+| memetic + EDF (adapt 7) | 9.4 | 5.5 | 22.8 | 62.2 | 87 | 44/80/137 | 2370 |
+| **memetic + EDF, adapt 215** (7+16+64+128) | **5.5** | **1.7** | 18.3 | 62.1 | 49 | 122/108/31 | 1813 |
+| … n_gen 30 | 6.1 | 2.1 | 18.9 | 62.3 | 54 | 109/101/51 | 1168 |
+
+- **Against the long ILS** (1555 vs 1813 s): adapt 215 wins/ties/loses
+  102/109/50. Mean 5.5 vs 5.8, median 1.7 vs 2.6. The ILS keeps the better
+  tail (p90 16.9 vs 18.3, max 56.6 vs 62.1).
+- **By class·workload:**
+
+  | arm | A·fedhpc | B·fedhpc | A·pos | B·pos |
+  |---|---|---|---|---|
+  | memetic, adapt 215 | 0.7 | 0.7 | 8.7 | 9.1 |
+  | ILS, long | 1.8 | 1.4 | 8.7 | 8.9 |
+
+  The memetic's gain is on the fedhpc workloads; pos is level.
+- **Seeding all 11 priorities** (adapt 87, 27 sample cells only): mean 6.3 vs
+  the ILS's 7.9, W/L 16/2, but 7.9× the ILS's time. A full-LS μ start costs
+  2,500–3,600 moves.
+
+## Verdict
+
+- **What hurt the memetic:** its LS budget per individual, not the GA
+  framework. EDF only pays after hundreds to thousands of LS moves, and the
+  memetic caps every individual at 4–8.
+- **With the fixes:** the GA starts from the ILS's converged starts, each
+  priority's best is kept, and the GA's recombination then adds to them. It
+  then matches or slightly beats the ILS at about 1.2–1.4× the time.
+- **Caveats:**
+  - one seed (±3 pp per cell);
+  - the configuration was picked on 5 cells, so it has no held-out set;
+  - the bits are opt-in and the defaults are unchanged.
+- **Next steps:**
+  - a multi-seed run;
+  - kicks on the niche bests (the ILS's strength on B·pos tails);
+  - cheaper crossover through DEngine `full_pen`;
+  - a full LS on 2–3 μ values ranked by a short LS rather than by decode.
+
+## GA tuning, ablation and multi-seed ILS vs GA (2026-11-05)
+
+Split (`split.json`): 22 tune instances (66 cells) for tuning and ablation, 65 held-out
+test instances (195 cells) for the final comparison. Gap is measured against the bench Gurobi g*
+(`bench_io_noreduc.jsonl`, 194 optimal + 1 feasible; Gurobi was not rerun). Reports:
+`tuning/ablation_report.md`, `final/report.md`, `final/anytime.png`.
+
+**Tuning (tune split, seed 42).** Shortlist 48 was the best value per unit time. Longer runs
+(`n_gen`, `pop_size`, `ls_moves`) keep improving but cost proportionally more. Two-point
+crossover and no crossover were both worse than MSXF, and `restart_patience` made no
+difference. Final arms (all with `flags 12352, adapt 215, shortlist 48`):
+GA-fast = pop 16 / 60 gen, GA-mid = pop 16 / 120 gen, GA-quality = pop 32 / 120 gen.
+
+**Ablation of GA-mid (tune split, 66 cells, base 4.5 % mean / 1.3 % median).** Each row removes one mechanism; W/L counts cells that moved by more than 0.5 pp.
+
+| ablation | mean | median | W/T/L vs base | verdict |
+|---|---|---|---|---|
+| no EDF priority (flags 64) | 9.5 | 4.8 | 2/25/39 | essential |
+| no converged ILS-start seeds (adapt 71) | 7.1 | 3.4 | 3/21/42 | essential |
+| no crossover | 6.2 | 2.7 | 0/28/38 | essential |
+| EDF with deadline rule (4160) | 5.5 | 2.6 | 4/44/18 | the no-deadline EDF matters |
+| seed all priorities (87) | 6.4 | 1.2 | 12/38/16 | worse and 2.6× slower |
+| no mutation | 4.8 | 1.3 | 1/52/13 | small help |
+| no niche elitism (151) | 4.3 | 1.0 | 17/46/3 | niche **hurts** quality slightly but saves time (610 s vs 408 s) |
+| no μ-grid adapt bit (214) | 4.5 | 1.6 | 14/37/15 | neutral, 1.5× slower |
+| no deadline / decoder bits, no ILS kick, no heuristic seeds, full polish | 4.2–4.5 | 1.3–1.4 | ≤ 8 losses | neutral (could be dropped) |
+
+**Final comparison (195 test cells × seeds 42/1/7).**
+
+| arm | mean gap ± sd (seeds) | median | time / seed | median t / cell |
+|---|---|---|---|---|
+| ILS | 6.87 ± 0.01 | 3.60 | 652 s | 2.2 s |
+| ILS-long | 6.25 ± 0.02 | 2.99 | 1302 s | 5.6 s |
+| GA-fast | 6.24 ± 0.14 | 2.44 | 845 s | 3.9 s |
+| GA-mid | 5.66 ± 0.09 | 1.92 | 1307 s | 6.3 s |
+| GA-quality | 5.09 ± 0.02 | 1.30 | 3330 s | 15.8 s |
+| Gurobi (bench) | 0 | 0 | 22104 s | 70.6 s |
+
+- Paired comparisons (seed-mean per cell, bootstrap CI, sign test):
+  - GA-fast ties ILS-long (+0.01 pp, CI [−0.34, +0.37], p = 0.32) in 65 % of the time.
+  - GA-mid beats ILS-long at equal time (−0.59 pp, CI [−0.92, −0.27], p = 4e-5).
+  - GA-quality beats ILS-long by −1.16 pp (W/T/L 103/78/14) at 2.6× the time.
+- **Anytime behaviour:**
+  - The ILS has a solution after about 20 ms and stays ahead until about 2–3 s.
+  - The GA has no incumbent until its initialization ends. That happens at a median of about 1–2 s, because the seeds run LS to convergence.
+  - From about 3 s on, the GA's median gap is below the ILS.
+  - Primal integral: the ILS is better at T = 10 s (0.074 vs 0.24) and roughly even at 60 s. At T = 600 s, GA-quality < GA-mid < ILS-long < ILS (0.047 / 0.051 / 0.054 / 0.059).
+- **Against Gurobi:**
+  - Every heuristic finishes in 3–19 % of Gurobi's time (median ratio: ILS 0.03, GA-mid 0.08, GA-quality 0.19).
+  - At those times Gurobi has no reported solution, so the bench record is a single step at its finish. Pessimistic toward Gurobi, since intermediate incumbents weren't logged.
+  - Gurobi reaches ≤ 1 % in 100 % of cells (median 71 s). The heuristics reach it in ILS 23 %, ILS-long 25 %, GA-fast 35 %, GA-mid 39 %, GA-quality 45 % of runs.
+  - The remaining gap is concentrated in the pos workloads and at λ 0.25: 8–10 % mean for every method, versus < 1 % on fedhpc workloads for the GA.
+- **Verdict:**
+  - The ILS is the right choice for sub-second budgets.
+  - At ≥ ~3 s per cell the tuned GA dominates: GA-fast ≈ ILS-long in less time; GA-mid is better at equal time.
+  - The GA's seed variance is larger (sd 0.09–0.14 vs 0.01–0.02) but small relative to the differences.

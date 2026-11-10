@@ -1499,7 +1499,11 @@ class TestWeightedMemetic:
                 (64, 0.0, 1, 0, 0), (65, -1.0, 2, 64, 0), (8, 3.0, 2, 1 << 5, 0),
                 (64 | 256, -1.0, 2, 0, 0), (64 | 512, -1.0, 2, 0, 0),
                 (64, -1.0, 2, 0, 1), (64, -1.0, 0, 0, 2), (64, -1.0, 2, 0, 3),
-                (64, -1.0, 0, 0, 7), (64 | 512, -1.0, 2, 0, 11), (64, -1.0, 2, 0, 15)]
+                (64, -1.0, 0, 0, 7), (64 | 512, -1.0, 2, 0, 11), (64, -1.0, 2, 0, 15),
+                (64 | 4096, -1.0, 2, 0, 0), (64 | 4096 | 8192, -1.0, 2, 0, 7),
+                (64 | 4096 | 8192, 0.0, 0, 0, 2), (64 | 4096 | 8192 | 16384, -1.0, 2, 0, 15),
+                (64 | 4096 | 8192, -1.0, 2, 0, 215), (64 | 4096 | 8192, -1.0, 2, 0, 87 | 32),
+                (64, -1.0, 2, 0, 16 | 128)]
 
     @pytest.mark.parametrize("cfg", _CONFIGS)
     @pytest.mark.parametrize("lam", [0.0, 0.25, 0.5, 0.75, 1.0])
@@ -1522,7 +1526,8 @@ class TestWeightedMemetic:
         assert (s.f1, s.f2) == expected
 
     @pytest.mark.parametrize("adapt,flags", [(0, 64), (0, 64 | 256), (0, 64 | 512), (15, 64),
-                                             (11, 64 | 512)])
+                                             (11, 64 | 512), (0, 64 | 4096),
+                                             (7, 64 | 4096 | 8192)])
     @pytest.mark.parametrize("lam", [0.1, 0.5, 0.9])
     def test_feasible_on_data_instance(self, lam, adapt, flags, pos_congestion_inst):
         inst = pos_congestion_inst
@@ -1533,6 +1538,24 @@ class TestWeightedMemetic:
         assert capacity_violations(inst, s) == []
         assert recompute_f1(inst, s) == pytest.approx(s.f1, abs=1e-6)
         assert recompute_f2(inst, s) == pytest.approx(s.f2, abs=1e-6)
+
+    @pytest.mark.parametrize("adapt,flags", [(0, 64), (7, 64), (7, 64 | 4096 | 8192),
+                                             (2, 64 | 4096), (215, 64 | 4096 | 8192)])
+    @pytest.mark.parametrize("lam", [0.25, 0.75])
+    def test_fast_ls_matches_reference_decoder(self, lam, adapt, flags, pos_congestion_inst):
+        # the LS's DEngine path (default) must take the reference decoder's path (16384)
+        kw = dict(pop_size=8, n_gen=8, adapt=adapt, **POS_CONGESTION_REFS)
+        a = weighted_solve_memetic(pos_congestion_inst, lam, flags=flags, **kw)
+        b = weighted_solve_memetic(pos_congestion_inst, lam, flags=flags | 16384, **kw)
+        assert a.assignment == b.assignment
+        assert a.f1 == pytest.approx(b.f1, rel=1e-12) and a.f2 == pytest.approx(b.f2, rel=1e-12)
+
+    def test_edf_priority_in_population(self, pos_congestion_inst):
+        # flags 4096 adds the EDF scalar (reported mu -2) to the evolved priorities
+        _, st = weighted_solve_memetic(pos_congestion_inst, 0.25, pop_size=24, n_gen=4,
+                                       flags=64 | 4096 | 8192, adapt=7, return_stats=True,
+                                       **POS_CONGESTION_REFS)
+        assert len(st["mu_hist"]) == 11 and sum(st["mu_hist"]) == 24
 
     @pytest.mark.parametrize("lam", [0.0, 0.5, 1.0])
     def test_split_flip_ls_feasible_deterministic(self, lam, known_pareto_inst, known_pareto_front):

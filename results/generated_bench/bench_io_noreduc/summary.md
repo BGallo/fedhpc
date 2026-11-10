@@ -16,7 +16,7 @@ Full description: `EXPERIMENT_SETUP.md` in this folder.
 
 ## Dispatch results
 
-The dispatch columns are **not** this run's own dispatch results. They are replaced by `results/generated_bench/dispatch_study/validate_fast_default.jsonl`, `results/generated_bench/dispatch_study/validate_fast_default_trivial.jsonl` (`scripts/dispatch_validate.py`: the same instances, reference points and λ, 3 instances in parallel × 4 threads, one seed), run with the current weighted_solve_dispatch defaults on 2026-11-03 (K=64 in batches up to K_max=256, flags=64|4096|8192 i.e. mixed ranking + EDF start without deadline offload, 60 kicks of 16 split over the two starts, kick_patience=5, seed 42, 4 threads; fedhpc uncommitted). The Dispatch line under Setup is the configuration of the original run.
+The dispatch columns are **not** this run's own dispatch results. They are replaced by `results/generated_bench/dispatch_study/validate_ils_s42.jsonl`, `results/generated_bench/dispatch_study/validate_fast_default_trivial.jsonl` (`scripts/dispatch_validate.py`: the same instances, reference points and λ, 3 instances in parallel × 4 threads, one seed), run with the weighted_solve_dispatch defaults of 2026-11-04 (ILS: K=64 in batches up to K_max=256, flags=64|4096|8192, 60 kicks of 16 split over the two starts, kick_patience=5, plus the exact speed-ups: incremental record_flip, fit-filtered room scan, rank-ordered data; seed 42, 4 threads; fedhpc uncommitted). The trivial instances keep the 2026-11-03 run, whose g is identical. The Dispatch line under Setup is the configuration of the original run.
 
 ## Gurobi statuses
 
@@ -56,10 +56,10 @@ A non-optimal lex anchor shifts the normalisation (f1^T, f2^T or f1^0) for every
 
 | class·workload | n | trivial | lex f1 | lex f2 | WS Gurobi | WS dispatch | exact total | dispatch total |
 |---|---|---|---|---|---|---|---|---|
-| A·fedhpc | 27 | 9 | 12.3 [17.7] | 13.7 [16.2] | 15.4 [22.8] | 0.6 [1.0] | 74.3 [91.0] | 1.8 [2.9] |
-| A·pos | 27 | 0 | 53.7 [93.8] | 87.0 [361.3] | 88.1 [235.1] | 5.3 [8.8] | 488.5 [1311.3] | 15.5 [25.2] |
+| A·fedhpc | 27 | 9 | 12.3 [17.7] | 13.7 [16.2] | 15.4 [22.8] | 0.6 [1.0] | 74.3 [91.0] | 1.9 [3.0] |
+| A·pos | 27 | 0 | 53.7 [93.8] | 87.0 [361.3] | 88.1 [235.1] | 5.5 [8.3] | 488.5 [1311.3] | 15.8 [23.3] |
 | B·fedhpc | 27 | 9 | 20.8 [29.3] | 22.4 [24.4] | 25.8 [28.5] | 0.5 [0.8] | 123.0 [142.1] | 1.7 [2.3] |
-| B·pos | 27 | 3 | 130.2 [215.6] | 125.8 [775.5] | 190.1 [314.6] | 4.2 [8.7] | 858.9 [2004.4] | 12.4 [25.7] |
+| B·pos | 27 | 3 | 130.2 [215.6] | 125.8 [775.5] | 190.1 [314.6] | 3.6 [8.0] | 858.9 [2004.4] | 10.7 [24.1] |
 
 ## Weighted-sum quality: gap to exact g* (% of g*, non-trivial instances)
 

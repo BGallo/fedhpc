@@ -1,0 +1,256 @@
+{
+  "fedhpc": {
+    "workload": "fedhpc",
+    "jobs": 964,
+    "core_hours": 44177,
+    "users": 11,
+    "window": [
+      "2024-11-25 21:17:54",
+      "2024-11-25 23:05:56"
+    ],
+    "T1_tools": {
+      "brkalman": {
+        "jobs": 488,
+        "studies": 5,
+        "job_share": 0.5062,
+        "core_h_share": 0.3531
+      },
+      "cmost": {
+        "jobs": 469,
+        "studies": 4,
+        "job_share": 0.4865,
+        "core_h_share": 0.6208
+      },
+      "standalone": {
+        "jobs": 7,
+        "studies": 7,
+        "job_share": 0.0073,
+        "core_h_share": 0.0262
+      }
+    },
+    "T1_concentration": {
+      "studies": 16,
+      "studies_ge10": 7,
+      "top1_jobs": 0.3392,
+      "top3_jobs": 0.6338,
+      "top5_jobs": 0.8475,
+      "top5_core_h": 0.9179,
+      "effective_studies_jobs": 5.24,
+      "effective_studies_core_h": 2.9,
+      "jobs_in_studies_ge10": 0.9813
+    },
+    "T2_naming": {
+      "name_is_study_plus_run": 1.0,
+      "rerun_share": 0.0,
+      "spearman_run_vs_submit": {
+        "brkalman": {
+          "median": 1.0,
+          "min": 1.0,
+          "studies": 3
+        },
+        "cmost": {
+          "median": 1.0,
+          "min": 0.998,
+          "studies": 4
+        }
+      }
+    },
+    "T3_name_heuristic": {
+      "ari_name_groups_vs_studies": 0.9326,
+      "ensemble_label_agreement": 0.9876,
+      "heuristic_ensemble_but_standalone": 0,
+      "tool_member_but_heuristic_single": 12
+    },
+    "T4_modal_request": {
+      "observed": 1.0,
+      "null_mean": 0.7734,
+      "null_p99": 0.7764,
+      "p_value": 0.0004997501249375312
+    },
+    "T5_runtime_eta2": {
+      "observed": 0.971,
+      "null_mean": 0.0084,
+      "null_p99": 0.0199,
+      "p_value": 0.0004997501249375312
+    },
+    "T5_runtime_cv": {
+      "within_study_median": 0.161,
+      "pooled": 1.652
+    },
+    "T6_submit_std_min": {
+      "observed": 23.6327,
+      "null_mean": 37.532,
+      "null_p01": 37.2367,
+      "p_value": 0.0004997501249375312,
+      "window": 108.0
+    },
+    "T1_projects": {
+      "projects": 16,
+      "top1_jobs": 0.3392,
+      "top5_jobs": 0.8475,
+      "effective_projects_jobs": 5.24
+    },
+    "T7_script_templates": {
+      "jobs_with_script": 964,
+      "tool_studies": 9,
+      "studies_with_one_template": 9,
+      "templates_per_tool": {
+        "brkalman": 5,
+        "cmost": 4,
+        "standalone": 5
+      }
+    },
+    "threshold_sensitivity": {
+      "2": 0.9927,
+      "5": 0.9927,
+      "10": 0.9813,
+      "20": 0.9813,
+      "50": 0.9813
+    },
+    "T8_lifetimes": {
+      "studies": 9,
+      "window_share_of_study_median": 0.0223,
+      "jobs_2024_median": 2578,
+      "jobs_2024_max": 26847,
+      "active_days_median": 9.3,
+      "iterations_brkalman": [
+        2,
+        4,
+        2,
+        1,
+        3
+      ]
+    }
+  },
+  "pos": {
+    "workload": "pos",
+    "jobs": 3340,
+    "core_hours": 215718,
+    "users": 33,
+    "window": [
+      "2024-01-30 20:00:01",
+      "2024-01-30 23:59:53"
+    ],
+    "T1_tools": {
+      "brkalman": {
+        "jobs": 292,
+        "studies": 4,
+        "job_share": 0.0874,
+        "core_h_share": 0.0163
+      },
+      "cmost": {
+        "jobs": 2896,
+        "studies": 25,
+        "job_share": 0.8671,
+        "core_h_share": 0.815
+      },
+      "standalone": {
+        "jobs": 152,
+        "studies": 115,
+        "job_share": 0.0455,
+        "core_h_share": 0.1687
+      }
+    },
+    "T1_concentration": {
+      "studies": 144,
+      "studies_ge10": 25,
+      "top1_jobs": 0.2356,
+      "top3_jobs": 0.4781,
+      "top5_jobs": 0.5722,
+      "top5_core_h": 0.6548,
+      "effective_studies_jobs": 9.91,
+      "effective_studies_core_h": 7.8,
+      "jobs_in_studies_ge10": 0.9503
+    },
+    "T2_naming": {
+      "name_is_study_plus_run": 0.9922,
+      "rerun_share": 0.0266,
+      "spearman_run_vs_submit": {
+        "brkalman": {
+          "median": 0.187,
+          "min": 0.18,
+          "studies": 2
+        },
+        "cmost": {
+          "median": 1.0,
+          "min": 0.878,
+          "studies": 23
+        }
+      }
+    },
+    "T3_name_heuristic": {
+      "ari_name_groups_vs_studies": 0.9285,
+      "ensemble_label_agreement": 0.9898,
+      "heuristic_ensemble_but_standalone": 20,
+      "tool_member_but_heuristic_single": 14
+    },
+    "T4_modal_request": {
+      "observed": 0.9991,
+      "null_mean": 0.4549,
+      "null_p99": 0.4579,
+      "p_value": 0.0004997501249375312
+    },
+    "T5_runtime_eta2": {
+      "observed": 0.7887,
+      "null_mean": 0.0101,
+      "null_p99": 0.0199,
+      "p_value": 0.0004997501249375312
+    },
+    "T5_runtime_cv": {
+      "within_study_median": 0.065,
+      "pooled": 2.27
+    },
+    "T6_submit_std_min": {
+      "observed": 44.6891,
+      "null_mean": 68.309,
+      "null_p01": 68.0806,
+      "p_value": 0.0004997501249375312,
+      "window": 239.9
+    },
+    "T1_projects": {
+      "projects": 129,
+      "top1_jobs": 0.2581,
+      "top5_jobs": 0.7895,
+      "effective_projects_jobs": 6.08
+    },
+    "T7_script_templates": null,
+    "threshold_sensitivity": {
+      "2": 0.9737,
+      "5": 0.9536,
+      "10": 0.9503,
+      "20": 0.9446,
+      "50": 0.9344
+    },
+    "T8_lifetimes": {
+      "studies": 29,
+      "window_share_of_study_median": 0.34,
+      "jobs_2024_median": 100,
+      "jobs_2024_max": 32930,
+      "active_days_median": 0.5,
+      "iterations_brkalman": [
+        2,
+        8,
+        10,
+        1
+      ]
+    }
+  },
+  "base_rate_2024": {
+    "jobs": 2745759,
+    "job_share": {
+      "brkalman": 0.366,
+      "cmost": 0.4052,
+      "standalone": 0.2287
+    },
+    "core_h_share": {
+      "brkalman": 0.312,
+      "cmost": 0.3852,
+      "standalone": 0.3028
+    },
+    "studies": {
+      "brkalman": 894,
+      "cmost": 1351,
+      "standalone": 0
+    }
+  }
+}

@@ -360,6 +360,8 @@ PYBIND11_MODULE(_moea, m) {
             d["n_auto_off"] = R.best.n_auto_off; d["pen_g"] = R.best.pen_g;
             d["trace"] = R.trace; d["mu"] = R.mu; d["deadline"] = R.dl; d["serial"] = R.dec;
             d["mu_hist"] = R.mu_hist; d["deadline_hist"] = R.dl_hist; d["serial_hist"] = R.dec_hist;
+            d["init_cloud"] = R.init_cloud; d["init_best"] = R.init_best; d["gens"] = R.gens;
+            d["dec_x"] = R.dec_x; d["dec_ls"] = R.dec_ls; d["polish_gain"] = R.polish_gain; d["init_ms"] = R.init_ms; d["seeds"] = R.seeds;
             return py::make_tuple(R.asgn, R.best.f1, R.best.f2, R.best.g, d);
         },
         py::arg("n_jobs"), py::arg("job_slots"), py::arg("type_cap"),
