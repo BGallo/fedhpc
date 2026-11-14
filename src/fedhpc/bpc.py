@@ -7,17 +7,87 @@ set-partitioning master over "instance-lifetime" columns (source-to-sink paths
 in each type's space-time network ``G_m``) plus one shortest-path pricing
 subproblem per instance type.
 
-Running jobs
-------------
-Every public entry point first rewrites ``inst.running_jobs`` as pinned
-pseudo-jobs (:func:`_absorb_running_jobs`): a running job on capacitated type
-``m`` ending at ``e`` becomes a job feasible only on ``m``, only at start 0,
-with ``p_occ = min(e, H)``, cost 0 and weight 0. Covering it exactly once
-takes one of the ``N_m`` instance lifetimes out of service on ``[0, e)`` —
-precisely the compact model's ``y_{m,-1} = N_m - n_running[m]`` boundary plus
-its ghost completion at ``e``. Pseudo-jobs add nothing to f1 or f2, do not
-activate a type's fixed cost, and are stripped from every returned
-assignment.
+Running jobs, unbounded types and reduced start sets (``_Prep``)
+-----------------------------------------------------------------
+Every entry point preprocesses the instance once (:func:`_prepare`; a Pareto
+search shares one result across all its box solves):
+
+- **Running jobs as release groups.** A capacitated type's instances are
+  grouped by the slot they become free: 0 for the ``N_m - n_running[m]``
+  idle ones, ``min(e, H)`` for one held by a running job ending at ``e``.
+  Each group ``(m, r)`` has its own fleet row, and its columns are paths
+  from node ``r`` — exactly the compact model's ``y_{m,-1}`` boundary plus
+  ghost completions. (This replaced one pinned pseudo-job per running job,
+  which cost the pricing DP one mask bit each — 1525 on pos_congestion.)
+- **Unbounded types get no pricing.** On a type whose capacity never binds
+  (``formulations.unbounded_types``, e.g. cloud), any column splits into
+  single-job columns of the same total cost and the fleet is never short,
+  so such a type has no fleet row and all its single-job columns are
+  enumerated upfront (``static_columns``).
+- **Exact start-set reductions** (nonnegative data only): normal-pattern
+  starts (Kramer et al. 2020), R1 (a job on an unbounded type starts at its
+  release) and R2 (dominated unbounded options dropped), from
+  ``formulations``. None of them raises f1 or f2 for any schedule, so they
+  stay valid under both bound rows and under every branching decision. The
+  objective-dependent rules (R3, lex deadlines) are not valid under an f2
+  cap and are not used. ``reduce=False`` turns the reductions off.
+- **Seeds and incumbents.** :func:`heuristic_schedules` (list-scheduling
+  baselines, optionally an NSGA-II front) seed the root's columns, and the
+  best one inside the bound rows is the starting incumbent. A lex-min's
+  phase 2 starts from phase 1's schedule and columns.
+
+Compiled pricing, ng-routes and the Lagrangian bound
+----------------------------------------------------
+Column generation prices with the C++ label-setting DP ``_bpcprice``
+(:class:`PricingOptions`, default ``engine="cpp"``; the Python
+:func:`_price_type` remains the reference and runs whenever subset-row cuts
+are active):
+
+- **One active set, no wait copies.** A label created at slot ``t`` is
+  available from ``t`` on, so dominance (cost ``<=``, job memory a subset,
+  same Ryan-Foster parity) is checked against everything available, and
+  there is no bucket cap: a call is exact unless it exhausts
+  ``max_labels``, and says so.
+- **Completion bound.** ``g(t)``, the cheapest completion from slot ``t``
+  with repeats allowed (one backward pass), retires every label that can no
+  longer reach a negative reduced cost. The call returns the type's
+  minimum reduced cost as a valid lower bound either way.
+- **Many columns per call** (``cols_per_type``, the most negative distinct
+  labels), instead of one per type and iteration.
+- **ng-routes** (Baldacci, Mingozzi & Roberti 2011). A label remembers
+  only the jobs in its last job's neighbourhood (``ng_size`` nearest by
+  start window and length), so a column may repeat a job outside it. Such a
+  column gets the visit count as its coefficient in the coverage and
+  fixed-cost rows, so it can never be part of an integer solution, and the
+  LP lies between the compact LP and the elementary master's. When the
+  converged LP still uses one, the neighbourhoods on its cycle grow (up to
+  ``ng_max``), every repeating column leaves the RMP and generation resumes
+  (dynamic ng, Roberti & Mingozzi 2014) — usually ending at the
+  elementary bound: on rm_M5N25_1 the root takes 0.5 s instead of the
+  elementary DP's 116 s, at the same bound. ``ng_size=None`` prices
+  elementary paths.
+- **Lagrangian bound** (:func:`_lagrangian_bound`): every exact pricing
+  round gives a bound valid for any sign-feasible duals. A node stops as
+  soon as it reaches the cutoff (``"pruned"``) or the RMP value (the RMP
+  is then optimal, though its duals may not price everything out —
+  degenerate masters have many optimal duals). ``smoothing > 0`` prices at
+  Wentges-smoothed duals around the best-bound duals first, falling back
+  to the RMP duals on a mispricing.
+- **Activation rows.** For each fixed-cost path type the master adds
+  ``sum_{p non-null on m} lambda_p <= N_m z_m`` (``_build_rmp``'s
+  ``activation``), priced as a once-per-column constant. With ``N_m = 1``
+  (Rm machines) this is Chen et al.'s "``U_k`` in the column cost": on the
+  Rm instances it cuts the f1 + f2 root gap from about 13% to 0-2.7%. The
+  per-job rows alone let a column pay ``U_m`` only in proportion to its
+  largest single job share.
+- **Exactness.** The Python DP's per-node ``bucket_cap`` (200) drops labels
+  and can miss the best column (found by ``tests/test_bpc_pricing.py``:
+  the compiled pricer's columns are valid and up to 9% cheaper there), so
+  the Python engine may stop column generation early. It remains the
+  engine under subset-row cuts only.
+- **Objective grid.** Pruning uses the step of ``w1·f1 + w2·f2``
+  (:func:`_objective_step`) for any weights on a common grid, not only
+  ``w2 = 0``.
 
 The development notes below, and some function docstrings, cite timings on
 ``tiny_*`` instances (5-25-job subsets of the fedhpc trace). Those instances
@@ -34,6 +104,13 @@ root LP relaxation of this master must equal the LP relaxation of the compact
 polytope (a pure DAG flow) is integral. That equality is Phase 1's load-
 bearing correctness test (``tests/test_bpc.py``).
 
+Caveat: the pricing below enforces *elementary* paths (no job twice on one
+column), which the DAG-flow polytope does not, so in general the master's
+bound can exceed the compact LP's; equality on the test instances means
+elementarity does not bind there, not that it never can. The reduced start
+sets of ``_Prep`` likewise can only raise the bound
+(``tests/test_bpc_prep.py``).
+
 Master (RMP)
 ------------
 A column ``p`` for type ``m`` is an ordered sequence of non-overlapping
@@ -42,8 +119,10 @@ instance of type ``m``. Variables ``lambda_{m,p} >= 0`` count how many
 instances of type ``m`` follow pattern ``p``. Rows:
 
 - job coverage (equality, dual ``sigma_j``): every job covered exactly once.
-- fleet-size (equality, dual ``rho_m``, **one per type, including cloud**):
-  ``sum_p lambda_{m,p} = N_m``. MOFE fixes ``y_{m,-1} := N_m`` and
+- fleet-size (equality, dual ``rho_{m,r}``, one per capacitated type and
+  release group ``r`` — see "Running jobs" below; unbounded types such as
+  cloud have none): ``sum_p lambda_{m,r,p} = N_{m,r}``. (Originally one
+  row per type, cloud included, with ``N_m = n_jobs`` for unlimited types.) MOFE fixes ``y_{m,-1} := N_m`` and
   ``y_{m,H} := N_m`` as *parameters* (not a variable to optimize), so flow
   conservation forces exactly ``N_m`` instance-lifetime paths through ``G_m``
   at all times, including idle ones. A canonical **null column** (no jobs,
@@ -425,6 +504,7 @@ instances, same as any RCSP-based column generation.
 """
 from __future__ import annotations
 
+import math
 import time
 from collections import Counter
 from dataclasses import dataclass, field, replace
@@ -436,8 +516,13 @@ from . import formulations
 from .data import Instance, Job
 from .model import Solution, grid_floor
 
+try:
+    from . import _bpcprice  # type: ignore[attr-defined]
+except ImportError:  # extension not built: Python pricing only
+    _bpcprice = None
+
 __all__ = [
-    "BPCTimeLimit", "Column", "RootResult", "solve_root_relaxation",
+    "BPCTimeLimit", "Column", "PricingOptions", "RootResult", "solve_root_relaxation",
     "solve_f1_bpc", "solve_f2_bpc", "solve_weighted_sum_bpc",
     "make_bpc_lexmin_bounded",
 ]
@@ -481,103 +566,53 @@ class Column:
     jobs: tuple[tuple[int, int], ...]
     cost1: float
     cost2: float
-
-
-@dataclass
-class _RunningAsJobs(Instance):
-    """``base`` with its running jobs as pinned pseudo-jobs ``running_ids``
-    (see :func:`_absorb_running_jobs`)."""
-
-    running_ids: frozenset[int] = frozenset()
-    base: Instance | None = None
-
-    def f2_of(self, assignment: dict[int, tuple[int, int]]) -> float:
-        # A running job's type is not used by the schedule: no fixed cost.
-        return self.base.f2_of(
-            {jid: a for jid, a in assignment.items() if jid not in self.running_ids}
-        )
-
-
-def _absorb_running_jobs(inst: Instance) -> Instance:
-    """Rewrite ``inst.running_jobs`` as pinned pseudo-jobs (see the module
-    docstring's "Running jobs" section). Returns ``inst`` itself when no
-    running job occupies capacity.
-
-    Mirrors :meth:`Instance.build`: running jobs on unlimited types are
-    ignored, ends are clipped to the horizon, and a job ending at slot 0
-    never occupies anything.
-    """
-    if isinstance(inst, _RunningAsJobs):
-        return inst
-    capacitated = {m.id for m in inst.instance_types if m.capacity is not None}
-    running = [(rj.type_id, min(rj.end, inst.horizon)) for rj in inst.running_jobs
-               if rj.type_id in capacitated and rj.end > 0]
-    if not running:
-        return inst
-    jobs = list(inst.jobs)
-    F, T = dict(inst.F), dict(inst.T)
-    p_bill, p_occ, c = dict(inst.p_bill), dict(inst.p_occ), dict(inst.c)
-    c_units = dict(inst.c_units)
-    next_id = max((j.id for j in inst.jobs), default=-1) + 1
-    ids = []
-    for mid, end in running:
-        jid = next_id
-        next_id += 1
-        ids.append(jid)
-        jobs.append(Job(id=jid, arrival=0.0, exec_time=0.0, io_volume=0.0,
-                        cpu=0.0, mem=0.0, stor=0.0, weight=0.0))
-        F[jid] = [mid]
-        T[jid, mid] = range(0, 1)
-        p_bill[jid, mid], p_occ[jid, mid], c[jid, mid] = 0.0, end, 0.0
-        c_units[jid, mid] = 0
-    return _RunningAsJobs(
-        jobs=jobs, instance_types=inst.instance_types, horizon=inst.horizon,
-        slot_size_seconds=inst.slot_size_seconds, cost_resolution=inst.cost_resolution,
-        p_bill=p_bill, p_occ=p_occ, c=c, c_units=c_units, F=F, T=T,
-        running_ids=frozenset(ids), base=inst,
-    )
-
-
-def _running_ids(inst: Instance) -> frozenset[int]:
-    return inst.running_ids if isinstance(inst, _RunningAsJobs) else frozenset()
+    release: int = 0   # slot the instance becomes free (a running job's end, or 0)
 
 
 @dataclass(frozen=True)
 class _Arc:
     job_id: int
     p_occ: int
-    start: int
-    stop: int          # exclusive, matches Instance.T's range convention
+    starts: range | frozenset   # allowed start slots (T_jm, or its reduced subset)
     raw_cost2: float    # inst.c[job_id, type_id]
     weight: float       # j.weight — multiplies this arc's cost1 contribution
 
 
-def _build_arcs_by_type(inst: Instance) -> dict[int, list[_Arc]]:
+def _build_arcs_by_type(
+    inst: Instance,
+    starts: dict[tuple[int, int], range | frozenset] | None = None,
+) -> dict[int, list[_Arc]]:
+    """Processing arcs per type. ``starts`` (default ``inst.T``) maps each
+    kept ``(job, type)`` pair to its allowed starts; pairs absent from it are
+    dropped."""
     result: dict[int, list[_Arc]] = {itype.id: [] for itype in inst.instance_types}
     for j in inst.jobs:
         for m_id in inst.F[j.id]:
-            rng = inst.T[j.id, m_id]
+            rng = inst.T[j.id, m_id] if starts is None else starts.get((j.id, m_id))
+            if not rng:
+                continue
             result[m_id].append(_Arc(
                 job_id=j.id,
                 p_occ=inst.p_occ[j.id, m_id],
-                start=rng.start,
-                stop=rng.stop,
+                starts=rng,
                 raw_cost2=inst.c[j.id, m_id],
                 weight=j.weight,
             ))
     return result
 
 
-def _fleet_sizes(inst: Instance) -> dict[int, int]:
-    """N_m per type — capacity if finite, else an n_jobs proxy for 'unlimited'.
-
-    Matches SpaceTimeFormulation's own ``N`` dict exactly (formulations.py).
-    """
-    n_jobs = len(inst.jobs)
-    return {
-        itype.id: itype.capacity if itype.capacity is not None else n_jobs
-        for itype in inst.instance_types
-    }
+def _release_classes(inst: Instance, type_id: int) -> dict[int, int]:
+    """``{release slot: instances}`` of a capacitated type: the instances free
+    at 0, plus one per running job, available from its (horizon-clipped)
+    end. Mirrors :meth:`Instance.build`'s ``n_running``/``rj_arrivals``; an
+    instance released at H can never run anything and is left out."""
+    itype = next(m for m in inst.instance_types if m.id == type_id)
+    out = {0: itype.capacity - inst.n_running.get(type_id, 0)}
+    for (mid, r), n in inst.rj_arrivals.items():
+        if mid == type_id and r < inst.horizon:
+            r = max(r, 0)
+            out[r] = out.get(r, 0) + n
+    return {r: n for r, n in out.items() if n > 0}
 
 
 def _fixed_cost_types(inst: Instance) -> list:
@@ -585,68 +620,191 @@ def _fixed_cost_types(inst: Instance) -> list:
     return [itype for itype in inst.instance_types if itype.fixed_cost]
 
 
-def _heuristic_seed_columns(inst: Instance) -> list[Column]:
-    """Real, valid columns from a quick greedy heuristic, to seed the very
-    root of a search — never at a branch-and-price node deeper than the
-    root, which already inherits real columns from its parent.
+def _single_job_column(inst: Instance, j: Job, mid: int, t: int) -> Column:
+    jid = j.id
+    return Column(type_id=mid, jobs=((jid, t),),
+                  cost1=j.weight * (t + inst.p_occ[jid, mid] - j.arrival),
+                  cost2=inst.c[jid, mid])
 
-    Without this, the root RMP starts with only null columns plus big-M
-    coverage artificials, which makes *every* job's dual look uniformly
-    huge on iteration 1 — and that degenerate "grab as many jobs as
-    possible, order barely matters" regime is exactly what defeats the
-    elementary-path label-setting DP's dominance pruning (see the module
-    docstring's "Elementary-path enforcement" section): with 11-12 jobs
-    feasible on one type, that first pricing call did not return within a
-    minute. A handful of real starting columns keeps early duals
-    differentiated enough that dominance actually prunes.
 
-    Uses ``baselines.greedy_earliest_completion`` (ignores fixed-cost/
-    weight1/weight2 — irrelevant here, this only needs to be *valid*, column
-    generation refines everything from here), split per type into
-    non-overlapping chains via the standard greedy interval-partitioning
-    algorithm (a type's several concurrent instances are one column each,
-    never a single column with overlapping jobs). Jobs the heuristic leaves
-    unscheduled (partial coverage on a constrained instance) simply fall
-    back to their big-M artificial, same as before this seeding existed.
+@dataclass
+class _Prep:
+    """Everything about an instance the master and pricing need, computed once
+    (and shared across every box solve of a Pareto search).
 
-    With running jobs the heuristic runs on the original instance (which
-    respects their occupancy) and each pseudo-job opens its own chain at 0.
+    - ``starts``: allowed starts per ``(job, type)``. With nonnegative data
+      these are the objective-independent exact reductions of
+      ``formulations``: normal-pattern starts (Kramer et al. 2020) plus R1
+      (a job on an unbounded type starts at its release) and R2 (dominated
+      unbounded options dropped). None of them raises f1 or f2 for any
+      schedule, so they stay valid under both bound rows. The
+      objective-dependent rules (R3, lex deadlines) are invalid under an f2
+      cap and are not used.
+    - ``unbounded``: types whose capacity never binds
+      (:func:`formulations.unbounded_types`, e.g. cloud). Any column on such
+      a type splits into single-job columns of equal total cost, and the
+      fleet is never short, so those types get no fleet row and no pricing:
+      their single-job columns (``static_columns``) are all enumerated
+      upfront.
+    - ``releases``: per remaining (*path*) type, its instances grouped by the
+      slot they become free — 0, or a running job's end. Each group has its
+      own fleet row, and a column of group ``r`` is a path from node ``r``;
+      this replaces the earlier pinned pseudo-job per running job.
     """
-    from .baselines import greedy_earliest_completion
+    inst: Instance
+    starts: dict[tuple[int, int], range | frozenset]
+    unbounded: frozenset[int]
+    path_types: tuple[int, ...]
+    releases: dict[int, dict[int, int]]
+    arcs_by_type: dict[int, list[_Arc]]
+    static_columns: list[Column]
+    arrival_of: dict[int, float]
+    weight_of: dict[int, float]
+    # ng-route neighbourhoods per path type, {job: other jobs remembered after
+    # it}; built on first use and grown by _augment_ng (see _NodePricing).
+    ng: dict[int, dict[int, set[int]]] = field(default_factory=dict)
 
-    base = inst.base if isinstance(inst, _RunningAsJobs) else inst
-    assignment = dict(greedy_earliest_completion(base).assignment)
-    for jid in _running_ids(inst):
-        assignment[jid] = (inst.F[jid][0], 0)
+
+def _prepare(inst: Instance, reduce: bool = True) -> _Prep:
+    if reduce and formulations.nonnegative_data(inst):
+        S = formulations._normal_pattern_graph_data(inst)[0]
+        S, _ = formulations.SpaceTimeFormulation()._reduce(inst, S, None)
+    else:
+        S = {(j.id, m): inst.T[j.id, m] for j in inst.jobs for m in inst.F[j.id]}
+    unbounded = frozenset(formulations.unbounded_types(inst))
+    path_types = tuple(m.id for m in inst.instance_types if m.id not in unbounded)
+    releases = {m: _release_classes(inst, m) for m in path_types}
+    arcs = _build_arcs_by_type(inst, S)
     job_by_id = {j.id: j for j in inst.jobs}
+    static = [
+        _single_job_column(inst, job_by_id[jid], mid, t)
+        for (jid, mid), ts in sorted(S.items(), key=lambda kv: kv[0]) if mid in unbounded
+        for t in sorted(ts)
+    ]
+    return _Prep(
+        inst=inst, starts=S, unbounded=unbounded, path_types=path_types,
+        releases=releases,
+        arcs_by_type={m: arcs[m] for m in path_types},
+        static_columns=static,
+        arrival_of={j.id: j.arrival for j in inst.jobs},
+        weight_of={j.id: j.weight for j in inst.jobs},
+    )
 
+
+def _column_key(col: Column) -> tuple:
+    return (col.type_id, col.release, col.jobs)
+
+
+def _schedule_columns(prep: _Prep, assignment: dict[int, tuple[int, int]]) -> list[Column]:
+    """Split a (possibly partial) schedule into master columns: one single-job
+    column per job on an unbounded type, and per path type one chain per
+    instance, built by interval partitioning over the instances' release
+    slots. Processing jobs by start, any instance free at a job's start stays
+    free for every later job, so a capacity-feasible schedule always fits;
+    a job that does not fit (an infeasible input) is left out.
+
+    Starts outside the reduced start sets are fine: such a column is still a
+    valid column of the unreduced problem."""
+    inst = prep.inst
+    job_by_id = {j.id: j for j in inst.jobs}
+    cols: list[Column] = []
     by_type: dict[int, list[tuple[int, int, int]]] = {}
     for jid, (mid, t) in assignment.items():
-        end = t + inst.p_occ[jid, mid]
-        by_type.setdefault(mid, []).append((t, end, jid))
-
-    columns: list[Column] = []
+        if jid not in job_by_id or mid not in inst.F[jid]:
+            continue
+        if mid in prep.unbounded:
+            cols.append(_single_job_column(inst, job_by_id[jid], mid, t))
+        elif mid in prep.releases:
+            by_type.setdefault(mid, []).append((t, t + inst.p_occ[jid, mid], jid))
     for mid, items in by_type.items():
         items.sort()
-        chain_end: list[int] = []
-        chain_jobs: list[list[tuple[int, int]]] = []
+        chains = [[r, r, []] for r, n in sorted(prep.releases[mid].items()) for _ in range(n)]
         for start, end, jid in items:
-            for i, ce in enumerate(chain_end):
-                if ce <= start:
-                    chain_end[i] = end
-                    chain_jobs[i].append((jid, start))
-                    break
-            else:
-                chain_end.append(end)
-                chain_jobs.append([(jid, start)])
-        for jobs in chain_jobs:
-            cost1 = sum(
-                job_by_id[jid].weight * (t + inst.p_occ[jid, mid] - job_by_id[jid].arrival)
-                for jid, t in jobs
-            )
+            pick = None
+            for ch in chains:
+                if ch[1] <= start and (pick is None or ch[1] > pick[1]):
+                    pick = ch
+            if pick is None:
+                continue
+            pick[1] = end
+            pick[2].append((jid, start))
+        for release, _end, jobs in chains:
+            if not jobs:
+                continue
+            cost1 = sum(job_by_id[jid].weight * (t + inst.p_occ[jid, mid] - job_by_id[jid].arrival)
+                        for jid, t in jobs)
             cost2 = sum(inst.c[jid, mid] for jid, t in jobs)
-            columns.append(Column(type_id=mid, jobs=tuple(jobs), cost1=cost1, cost2=cost2))
-    return columns
+            cols.append(Column(type_id=mid, jobs=tuple(jobs), cost1=cost1, cost2=cost2,
+                               release=release))
+    return cols
+
+
+def heuristic_schedules(inst: Instance, *, ea: bool = False) -> list[dict[int, tuple[int, int]]]:
+    """Feasible schedules from cheap list-scheduling heuristics, used to seed
+    the master's columns and the search's incumbent.
+
+    The baselines span the trade-off: earliest completion (min-turnaround
+    side), on-prem only (min-cost side) and a threshold-bursting sweep in
+    between. With ``ea`` (and the compiled extension, no fixed costs), an
+    NSGA-II front is added — a few seconds that the box searches of a
+    Pareto mapping amortise. Partial schedules are dropped.
+    """
+    from . import baselines
+
+    sols = [baselines.greedy_earliest_completion(inst),
+            baselines.greedy_earliest_completion(inst, order="arrival"),
+            baselines.onprem_only_spt(inst)]
+    sols += [s for _th, s in baselines.threshold_bursting_sweep(inst)]
+    if ea:
+        try:
+            from . import moea
+            sols += moea.nsga2_frontier(inst, pop_size=100, n_gen=60, n_threads=1)
+        except Exception:  # extension missing or fixed costs: baselines only
+            pass
+    out, seen = [], set()
+    for s in sols:
+        a = dict(s.assignment)
+        key = tuple(sorted(a.items()))
+        if len(a) == len(inst.jobs) and key not in seen and not inst.schedule_violations(a):
+            seen.add(key)
+            out.append(a)
+    return out
+
+
+def _heuristic_seed_columns(inst: Instance, prep: _Prep | None = None) -> list[Column]:
+    """Columns of :func:`heuristic_schedules`' schedules (see there), to seed
+    the very root of a search.
+
+    Without real starting columns the root RMP holds only null columns plus
+    big-M coverage artificials, which makes *every* job's dual look uniformly
+    huge on iteration 1 — the degenerate regime that defeats the
+    elementary-path label-setting DP's dominance pruning (see the module
+    docstring's "Elementary-path enforcement" section).
+    """
+    prep = prep or _prepare(inst)
+    cols: dict[tuple, Column] = {}
+    for a in heuristic_schedules(inst):
+        for c in _schedule_columns(prep, a):
+            cols.setdefault(_column_key(c), c)
+    return list(cols.values())
+
+
+def _schedule_objective(
+    inst: Instance, assignment: dict[int, tuple[int, int]],
+    weight1: float, weight2: float,
+    bound1_value: float | None, bound2_value: float | None,
+) -> float | None:
+    """``weight1·f1 + weight2·f2`` of a complete feasible schedule within both
+    bound rows, else None."""
+    if len(assignment) != len(inst.jobs) or inst.schedule_violations(assignment):
+        return None
+    completion = {jid: t + inst.p_occ[jid, mid] for jid, (mid, t) in assignment.items()}
+    f1, f2 = inst.f1_of(completion), inst.f2_of(assignment)
+    if bound1_value is not None and f1 > bound1_value + 1e-6:
+        return None
+    if bound2_value is not None and f2 > bound2_value + 1e-6:
+        return None
+    return weight1 * f1 + weight2 * f2
 
 
 # ---------------------------------------------------------------------------
@@ -689,6 +847,8 @@ def _price_type(
     differ_pairs: frozenset[tuple[int, int]] = frozenset(),
     same_pairs: frozenset[tuple[int, int]] = frozenset(),
     cut_duals: dict[frozenset[int], float] | None = None,
+    sources: dict[int, float] | None = None,
+    bucket_cap: int | None = 200,
 ) -> tuple[float, Column] | None:
     """Return ``(reduced_cost, column)`` for the min-reduced-cost *elementary*
     (no job reused) path of ``type_id``, or ``None`` if none prices out below
@@ -721,6 +881,15 @@ def _price_type(
     from this type's arcs entirely (they could never be paired here); (2)
     among the labels reaching node H, only mask-consistent ones (both or
     neither job present) are eligible — see the loop after the DP below.
+    ``sources`` — ``{release slot r: rho_{m,r}}``, the fleet-row dual of each
+    group of instances that becomes free at ``r`` (see :class:`_Prep`). The
+    DP starts one label per group at node ``r`` with cost ``-rho_{m,r}``, so
+    one pass prices every group; the column carries the group it started
+    from. ``None`` means one group free at 0 with dual ``rho_m``.
+    ``bucket_cap`` — labels kept per node (``None``: no cap). The default
+    cap makes the DP *inexact*: once a node holds that many labels, further
+    ones are dropped, which can lose the best column (and so end column
+    generation early). The compiled pricer has no such cap.
     ``nu1``/``nu2`` — dual of the RMP's optional f1-cap/f2-cap bound rows
     (``None`` when that row doesn't exist at all, vs. a float — possibly
     0.0 — when it exists but isn't currently binding; see ``_build_rmp``).
@@ -851,8 +1020,18 @@ def _price_type(
                 sig |= 1 << (base + cidx)
         return sig
 
+    arcs_at: list[list[_Arc]] = [[] for _ in range(H)]
+    for arc in arcs:
+        for t in arc.starts:
+            if 0 <= t < H:
+                arcs_at[t].append(arc)
+
     labels: list[list[_Label]] = [[] for _ in range(H + 1)]
-    labels[0].append(_Label(cost=0.0, mask=0, pred=None, job_id=None, t_prev=0))
+    srcs = {0: rho_m} if sources is None else sources
+    for r, rho_r in sorted(srcs.items()):
+        # one source label per release group; t_prev records the group
+        labels[min(r, H)].append(
+            _Label(cost=-rho_r, mask=0, pred=None, job_id=None, t_prev=r))
 
     # Cross-node dominance for the *same* mask, applied only to genuine
     # job-arc transitions (job_id is not None) — i.e. only when a transition
@@ -907,7 +1086,7 @@ def _price_type(
     # docstring's "Elementary-path enforcement" section for why this
     # instance/dual combination (typically weight1 == 0, many similar-cost
     # incomparable job subsets) needs it at all.
-    _BUCKET_CAP = 200
+    _BUCKET_CAP = bucket_cap if bucket_cap is not None else float("inf")
 
     def try_add(t2: int, cost: float, mask: int, pred: _Label, job_id: int | None, t_prev: int) -> None:
         if job_id is not None and _mask_frontier_dominates(mask, t2, cost):
@@ -952,9 +1131,7 @@ def _price_type(
             try_add(t + 1, lbl.cost, lbl.mask, lbl, None, t)  # wait arc, cost 0, always allowed
 
         for lbl in labels[t]:
-            for arc in arcs:
-                if not (arc.start <= t < arc.stop):
-                    continue
+            for arc in arcs_at[t]:
                 bit = bit_of[arc.job_id]
                 if lbl.mask & bit:
                     continue  # elementary-path: job already used on this label
@@ -1001,7 +1178,7 @@ def _price_type(
 
     assert final_labels, "unreachable node H — instance should be feasible"
     best_label = min(final_labels, key=lambda lbl: lbl.cost)
-    best = best_label.cost - rho_m
+    best = best_label.cost
     if best >= -tol:
         return None
 
@@ -1017,6 +1194,7 @@ def _price_type(
             jobs_seq.append((lbl.job_id, lbl.t_prev))
         lbl = lbl.pred
     jobs_seq.reverse()
+    release = lbl.t_prev   # the source label: its release group
 
     seen = {jid for jid, _t in jobs_seq}
     if len(seen) != len(jobs_seq):
@@ -1032,7 +1210,8 @@ def _price_type(
             f"— the label mask should have prevented this; see the comment above."
         )
 
-    return best, Column(type_id=type_id, jobs=tuple(jobs_seq), cost1=cost1, cost2=cost2)
+    return best, Column(type_id=type_id, jobs=tuple(jobs_seq), cost1=cost1, cost2=cost2,
+                        release=release)
 
 
 @dataclass
@@ -1056,6 +1235,7 @@ def _price_type_relaxed(
     weight_of: dict[int, float],
     forbidden: frozenset[tuple[int, int, int]] = frozenset(),
     pinned: dict[int, tuple[int, int]] | None = None,
+    sources: dict[int, float] | None = None,
 ) -> float:
     """1-cycle-free relaxation of ``_price_type``, adapted from Kramer,
     Dell'Amico, Feillet & Iori (2020)'s ``LC_2l`` (see the module docstring's
@@ -1097,7 +1277,6 @@ def _price_type_relaxed(
 
     f1: list[_RelaxedLabel | None] = [None] * (H + 1)
     f2: list[_RelaxedLabel | None] = [None] * (H + 1)
-    f1[0] = _RelaxedLabel(cost=0.0, last_job=None)
 
     def update(t: int, cand: _RelaxedLabel) -> None:
         cur1 = f1[t]
@@ -1113,6 +1292,16 @@ def _price_type_relaxed(
             if cur2 is None or cand.cost < cur2.cost - 1e-9:
                 f2[t] = cand
 
+    # release groups, as in _price_type's ``sources``
+    for r, rho_r in sorted(({0: rho_m} if sources is None else sources).items()):
+        update(min(r, H), _RelaxedLabel(cost=-rho_r, last_job=None))
+
+    arcs_at: list[list[_Arc]] = [[] for _ in range(H)]
+    for arc in arcs:
+        for t in arc.starts:
+            if 0 <= t < H:
+                arcs_at[t].append(arc)
+
     for t in range(H):
         l1 = f1[t]
         if l1 is None:
@@ -1122,9 +1311,7 @@ def _price_type_relaxed(
         if l2 is not None:
             update(t + 1, _RelaxedLabel(cost=l2.cost, last_job=l2.last_job))
 
-        for arc in arcs:
-            if not (arc.start <= t < arc.stop):
-                continue
+        for arc in arcs_at[t]:
             if (arc.job_id, type_id, t) in forbidden:
                 continue
             pin = pinned.get(arc.job_id)
@@ -1148,7 +1335,278 @@ def _price_type_relaxed(
 
     candidates = [lbl.cost for lbl in (f1[H], f2[H]) if lbl is not None]
     assert candidates, "unreachable node H in relaxed pricer — instance should be feasible"
-    return min(candidates) - rho_m
+    return min(candidates)
+
+
+# ---------------------------------------------------------------------------
+# Compiled pricing (``_bpcprice``): ng-routes, many columns per call, and the
+# Lagrangian bound
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PricingOptions:
+    """How column generation prices (see "Compiled pricing" in the module
+    docstring).
+
+    ``engine`` — ``"cpp"`` (the ``_bpcprice`` label-setting DP; falls back to
+    ``"python"`` when the extension is missing or subset-row cuts are active)
+    or ``"python"`` (:func:`_price_type`, one column per type per iteration).
+    ``ng_size`` — ng-route neighbourhood size, the job itself included;
+    ``None`` prices elementary paths. ``ng_max`` — the size a neighbourhood
+    may grow to when the LP keeps using a column that repeats a job.
+    ``smoothing`` — Wentges dual-smoothing weight on the best-bound duals
+    (0 disables). ``cols_per_type`` — columns added per type per iteration.
+    ``max_labels`` — label budget per pricing call; past it the call is not
+    exact and gives no bound.
+
+    Defaults from ``scripts/bpc_bench.py`` (2026-11): ng 4 beat 8 and 12
+    (Rm f1 + f2: 7 s vs 37 s and 50 s on rm_M2N10_3), 30 columns per type
+    edged 10, and smoothing's gains were search-order noise (rm_M5N25_1
+    1.7-14 s across settings, rm_M2N10_1 slower).
+    """
+    engine: str = "cpp"
+    ng_size: int | None = 4
+    ng_max: int = 24
+    smoothing: float = 0.0
+    cols_per_type: int = 30
+    max_labels: int = 2_000_000
+
+
+# Used wherever no ``pricing`` argument is given (e.g. under pareto.py's
+# box search); replace it to change every solve's pricing at once.
+DEFAULT_PRICING = PricingOptions()
+
+
+def _compiled(opts: PricingOptions | None, cuts) -> bool:
+    """Whether column generation under ``opts`` runs the compiled loop (it
+    needs the extension and no active subset-row cut)."""
+    opts = opts or DEFAULT_PRICING
+    return opts.engine == "cpp" and _bpcprice is not None and not cuts
+
+
+def _is_elementary(col: Column) -> bool:
+    return len({jid for jid, _t in col.jobs}) == len(col.jobs)
+
+
+def _ensure_ng(prep: _Prep, mid: int, size: int) -> dict[int, set[int]]:
+    """Initial neighbourhoods of the type's jobs: the ``size - 1`` jobs whose
+    feasible windows (start-window centre and processing time) on ``mid``
+    are closest — the jobs a short repeat cycle would be built from."""
+    ng = prep.ng.get(mid)
+    if ng is None:
+        arcs = prep.arcs_by_type[mid]
+        key = {a.job_id: ((min(a.starts) + max(a.starts) + a.p_occ) / 2.0, a.p_occ) for a in arcs}
+        ng = {}
+        for a in arcs:
+            c, p = key[a.job_id]
+            others = sorted((abs(c - c2) + abs(p - p2), j2)
+                            for j2, (c2, p2) in key.items() if j2 != a.job_id)
+            ng[a.job_id] = {j2 for _d, j2 in others[:max(0, size - 1)]}
+        prep.ng[mid] = ng
+    return ng
+
+
+def _augment_ng(prep: _Prep, cols: list[Column], ng_max: int) -> bool:
+    """Grow neighbourhoods so the repeat cycles of ``cols`` become infeasible
+    (dynamic ng-routes, Roberti & Mingozzi 2014): for a job ``j`` visited
+    at positions ``a < b``, ``j`` joins the neighbourhood of every job in
+    between. Returns whether any neighbourhood grew."""
+    grew = False
+    for col in cols:
+        ng = prep.ng.get(col.type_id)
+        if ng is None:
+            continue
+        seq = [jid for jid, _t in col.jobs]
+        last: dict[int, int] = {}
+        for b, j in enumerate(seq):
+            a = last.get(j)
+            if a is not None:
+                for i in seq[a + 1:b]:
+                    nb = ng.setdefault(i, set())
+                    if j != i and j not in nb and len(nb) + 1 < ng_max:
+                        nb.add(j)
+                        grew = True
+            last[j] = b
+    return grew
+
+
+@dataclass
+class _Duals:
+    """One dual vector of the RMP's rows (cuts excluded: the compiled path
+    never runs with cuts)."""
+    sigma: dict[int, float]
+    rho: dict[tuple[int, int], float]
+    nu1: float | None
+    nu2: float | None
+    theta: dict[tuple[int, int], float]
+    eta: dict[int, float] = field(default_factory=dict)
+
+    def mix(self, other: "_Duals", a: float) -> "_Duals":
+        """``a * self + (1 - a) * other``."""
+        def lin(x, y):
+            return None if x is None else a * x + (1 - a) * y
+        return _Duals(
+            sigma={k: a * v + (1 - a) * other.sigma[k] for k, v in self.sigma.items()},
+            rho={k: a * v + (1 - a) * other.rho[k] for k, v in self.rho.items()},
+            nu1=lin(self.nu1, other.nu1), nu2=lin(self.nu2, other.nu2),
+            theta={k: a * v + (1 - a) * other.theta[k] for k, v in self.theta.items()},
+            eta={k: a * v + (1 - a) * other.eta[k] for k, v in self.eta.items()},
+        )
+
+
+def _read_duals(state: "_RmpState") -> _Duals:
+    return _Duals(
+        sigma={jid: c.Pi for jid, c in state.coverage.items()},
+        rho={key: c.Pi for key, c in state.fleet.items()},
+        nu1=state.bound1.Pi if state.bound1 is not None else None,
+        nu2=state.bound2.Pi if state.bound2 is not None else None,
+        theta={key: c.Pi for key, c in state.fixed_link.items()},
+        eta={m: c.Pi for m, c in state.activation.items()},
+    )
+
+
+def _column_rc(col: Column, d: _Duals, w1: float, w2: float) -> float:
+    """Reduced cost of ``col`` at duals ``d`` (visit counts as coefficients)."""
+    rc = (w1 - (d.nu1 or 0.0)) * col.cost1 + (w2 - (d.nu2 or 0.0)) * col.cost2
+    for jid, _t in col.jobs:
+        rc -= d.sigma[jid] + d.theta.get((jid, col.type_id), 0.0)
+    if col.jobs:
+        rc -= d.eta.get(col.type_id, 0.0)
+    return rc - d.rho.get((col.type_id, col.release), 0.0)
+
+
+class _NodePricing:
+    """The compiled pricers of one B&B node, one per path type. The node's
+    ``forbidden``/``pinned`` decisions are applied by filtering start sets,
+    Ryan-Foster pairs inside the DP."""
+
+    def __init__(self, prep: _Prep, opts: PricingOptions,
+                 forbidden: frozenset, pinned: dict,
+                 differ_pairs: frozenset, same_pairs: frozenset):
+        self.prep, self.opts = prep, opts
+        self.types: dict[int, tuple] = {}
+        H = prep.inst.horizon
+        for mid in prep.path_types:
+            kept = []
+            for arc in prep.arcs_by_type[mid]:
+                pin = pinned.get(arc.job_id)
+                if pin is not None:
+                    ts = [pin[1]] if pin[0] == mid and pin[1] in arc.starts else []
+                else:
+                    ts = sorted(arc.starts)
+                if forbidden:
+                    ts = [t for t in ts if (arc.job_id, mid, t) not in forbidden]
+                if ts:
+                    kept.append((arc, ts))
+            here = {arc.job_id for arc, _ts in kept}
+            # a same pair with one job impossible here: the other can't come either
+            excl = {k for j, k in same_pairs if j not in here} | {j for j, k in same_pairs if k not in here}
+            kept = [(arc, ts) for arc, ts in kept if arc.job_id not in excl]
+            local = {arc.job_id: i for i, (arc, _ts) in enumerate(kept)}
+            differ = [(local[j], local[k]) for j, k in differ_pairs if j in local and k in local]
+            same = [(local[j], local[k]) for j, k in same_pairs if j in local and k in local]
+            pricer = _bpcprice.Pricer(H, [arc.p_occ for arc, _ts in kept],
+                                      [ts for _arc, ts in kept], differ, same)
+            self.types[mid] = (pricer, [arc for arc, _ts in kept], local)
+        self.refresh_memory()
+
+    def refresh_memory(self) -> None:
+        for mid, (pricer, arcs, local) in self.types.items():
+            if self.opts.ng_size is None:
+                pricer.set_memory(None)
+                continue
+            ng = _ensure_ng(self.prep, mid, self.opts.ng_size)
+            pricer.set_memory([[local[x] for x in ng.get(arc.job_id, ()) if x in local]
+                               for arc in arcs])
+
+    def price(self, mid: int, d: _Duals, w1: float, w2: float, tol: float
+              ) -> tuple[float, bool, int, list[Column]]:
+        """``(min_lb, exact, n_labels, columns)``: ``min_lb`` lower-bounds the
+        type's minimum reduced cost over ng-paths (``-inf`` when not exact)."""
+        pricer, arcs, _local = self.types[mid]
+        prep = self.prep
+        c1 = w1 - (d.nu1 or 0.0)
+        c2 = w2 - (d.nu2 or 0.0)
+        A, B = [], []
+        for arc in arcs:
+            jid = arc.job_id
+            b = c1 * arc.weight
+            A.append(b * (arc.p_occ - prep.arrival_of[jid]) + c2 * arc.raw_cost2
+                     - d.sigma[jid] - d.theta.get((jid, mid), 0.0))
+            B.append(b)
+        sources = [(r, -d.rho[mid, r]) for r in sorted(prep.releases[mid])]
+        min_lb, exact, n_labels, raw = pricer.price(
+            A, B, sources, self.opts.cols_per_type, tol, self.opts.max_labels,
+            max(0.0, -d.eta.get(mid, 0.0)))
+        cols = []
+        for _rc, release, path in raw:
+            jobs = tuple((arcs[i].job_id, t) for i, t in path)
+            cost1 = sum(arcs[i].weight * (t + arcs[i].p_occ - prep.arrival_of[arcs[i].job_id])
+                        for i, t in path)
+            cost2 = sum(arcs[i].raw_cost2 for i, _t in path)
+            cols.append(Column(type_id=mid, jobs=jobs, cost1=cost1, cost2=cost2,
+                               release=release))
+        return min_lb, exact, n_labels, cols
+
+
+def _lagrangian_bound(
+    prep: _Prep, state: "_RmpState", d: _Duals, mins: dict[int, float],
+    w1: float, w2: float, big_m: float, statics_by_job: dict[int, list[Column]],
+    fixed_cost: dict[int, float],
+) -> float:
+    """Lagrangian bound ``L(d)`` of the node's master LP, valid for *any*
+    sign-feasible duals ``d`` (``nu``, ``theta`` <= 0), hence for smoothed
+    ones: the dual objective plus, for every variable, its least possible
+    reduced-cost contribution. Each release group ``(m, r)`` picks
+    ``N_{m,r}`` paths, each no cheaper than ``mins[m]`` (the type's minimum
+    reduced cost over every group); job ``j``'s artificial and static
+    columns together have value at most 1; ``z_m`` lies in its bounds."""
+    L = sum(d.sigma.values())
+    for (mid, r), rho in d.rho.items():
+        L += prep.releases[mid][r] * rho
+    if d.nu1 is not None:
+        L += d.nu1 * state.bound1.RHS
+    if d.nu2 is not None:
+        L += d.nu2 * state.bound2.RHS
+    for mid in prep.path_types:
+        L += sum(prep.releases[mid].values()) * mins[mid]
+    for jid, sig in d.sigma.items():
+        best = big_m - sig
+        for col in statics_by_job.get(jid, ()):
+            best = min(best, _column_rc(col, d, w1, w2))
+        L += min(0.0, best)
+    for mid, zvar in state.z.items():
+        U = fixed_cost[mid]
+        rc = w2 * U - (d.nu2 or 0.0) * U + sum(
+            th for (_jid, m2), th in d.theta.items() if m2 == mid)
+        if mid in d.eta:
+            rc += sum(prep.releases[mid].values()) * d.eta[mid]
+        L += rc * (zvar.LB if rc >= 0 else zvar.UB)
+    return L
+
+
+def _objective_step(inst: Instance, w1: float, w2: float) -> float:
+    """Smallest positive difference between two schedules' ``w1·f1 + w2·f2``
+    when the objective lies on a grid, else 0. f1 moves in multiples of
+    ``gcd(w_j)`` (integral weights, integer completions), f2 in multiples of
+    ``δ·gcd(cost units)``."""
+    def gcd_all(vals) -> int:
+        g = 0
+        for v in vals:
+            g = math.gcd(g, int(v))
+        return g
+    s1 = gcd_all(j.weight for j in inst.jobs)
+    delta = inst.cost_resolution
+    s2 = gcd_all([*inst.c_units.values(),
+                  *(round(m.fixed_cost / delta) for m in inst.instance_types)]) * delta
+    a, b = w1 * s1, w2 * s2
+    if w2 == 0 or b == 0:
+        return a
+    if w1 == 0 or a == 0:
+        return b
+    lo, hi = min(a, b), max(a, b)
+    ratio = hi / lo
+    return lo if abs(ratio - round(ratio)) < 1e-9 else 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -1158,15 +1616,19 @@ def _price_type_relaxed(
 @dataclass
 class _RmpState:
     coverage: dict[int, gp.Constr]
-    fleet: dict[int, gp.Constr]
+    fleet: dict[tuple[int, int], gp.Constr]   # (path type, release slot) -> row
     bound1: gp.Constr | None   # optional f1-cap row (pareto.py's box boundary / lex-min tie-break)
     bound2: gp.Constr | None   # optional f2-cap row — both may be active simultaneously
     art: dict[int, gp.Var]
     fixed_link: dict[tuple[int, int], gp.Constr] = field(default_factory=dict)
+    # Activation rows of fixed-cost path types (compiled engine only):
+    # sum of non-null columns on m <= N_m z_m — see _build_rmp.
+    activation: dict[int, gp.Constr] = field(default_factory=dict)
     z: dict[int, gp.Var] = field(default_factory=dict)
     cuts: dict[frozenset[int], gp.Constr] = field(default_factory=dict)
     columns: list[Column] = field(default_factory=list)
     vars: list[gp.Var] = field(default_factory=list)
+    unbounded: frozenset[int] = frozenset()   # types with no fleet row
 
 
 def _add_column_var(
@@ -1177,15 +1639,25 @@ def _add_column_var(
     state: _RmpState,
     name: str,
 ) -> gp.Var:
-    coeffs = [1.0]
-    constrs: list[gp.Constr] = [state.fleet[col.type_id]]
-    for job_id, _start in col.jobs:
-        coeffs.append(1.0)
+    fleet = state.fleet.get((col.type_id, col.release))
+    if fleet is None and col.type_id not in state.unbounded:
+        raise ValueError(f"column on type {col.type_id} from release {col.release}: "
+                         "no such fleet row")
+    coeffs = [1.0] if fleet is not None else []
+    constrs: list[gp.Constr] = [fleet] if fleet is not None else []
+    # An ng-route column may visit a job twice: its coefficient is the visit
+    # count (it can then never be part of an integer solution).
+    for job_id, n in Counter(jid for jid, _start in col.jobs).items():
+        coeffs.append(float(n))
         constrs.append(state.coverage[job_id])
         link = state.fixed_link.get((job_id, col.type_id))
         if link is not None:
-            coeffs.append(1.0)
+            coeffs.append(float(n))
             constrs.append(link)
+    act = state.activation.get(col.type_id)
+    if act is not None and col.jobs:
+        coeffs.append(1.0)
+        constrs.append(act)
     if state.bound1 is not None:
         coeffs.append(col.cost1)
         constrs.append(state.bound1)
@@ -1240,7 +1712,15 @@ def _build_rmp(
     forbidden_types: frozenset[int] = frozenset(),
     forced_types: frozenset[int] = frozenset(),
     cuts: frozenset[frozenset[int]] = frozenset(),
+    prep: _Prep | None = None,
+    activation: bool = False,
 ) -> tuple[gp.Model, _RmpState]:
+    """The restricted master. ``activation`` adds, per fixed-cost path type
+    ``m`` with ``N_m`` instances, ``sum_{p non-null on m} lambda_p <= N_m z_m``
+    (dual ``eta_m``): valid, and with ``N_m = 1`` (e.g. Rm machines) it puts
+    ``U_m`` into the column cost as Chen et al.'s master does, which the
+    per-job rows alone do not. Only the compiled pricing prices its dual."""
+    prep = prep or _prepare(inst)
     formulations.configure_env()
     mdl = gp.Model("bpc-rmp", env=formulations._shared_env)
     mdl.setParam("OutputFlag", 0)
@@ -1249,10 +1729,11 @@ def _build_rmp(
         j.id: mdl.addConstr(gp.LinExpr() == 1.0, name=f"cover[{j.id}]")
         for j in inst.jobs
     }
-    N = _fleet_sizes(inst)
+    # One fleet row per (path type, release group): exactly n instance
+    # timelines start at r. Unbounded types have none (see _Prep).
     fleet = {
-        itype.id: mdl.addConstr(gp.LinExpr() == float(N[itype.id]), name=f"fleet[{itype.id}]")
-        for itype in inst.instance_types
+        (mid, r): mdl.addConstr(gp.LinExpr() == float(n), name=f"fleet[{mid},{r}]")
+        for mid in prep.path_types for r, n in sorted(prep.releases[mid].items())
     }
     bound1 = mdl.addConstr(gp.LinExpr() <= bound1_value, name="bound1") if bound1_value is not None else None
     bound2 = mdl.addConstr(gp.LinExpr() <= bound2_value, name="bound2") if bound2_value is not None else None
@@ -1283,15 +1764,19 @@ def _build_rmp(
     # job, not one aggregate row, to keep the LP bound as tight as the compact
     # model's). Rows first (empty), then z_m with coefficient -1 on each of
     # its type's rows, so real columns only ever need to add +1 per job later.
-    # Running (pseudo-)jobs never activate a fixed cost: no link row.
-    running_ids = _running_ids(inst)
     fixed_link: dict[tuple[int, int], gp.Constr] = {}
     for itype in _fixed_cost_types(inst):
         for j in inst.jobs:
-            if itype.id in inst.F[j.id] and j.id not in running_ids:
+            if itype.id in inst.F[j.id]:
                 fixed_link[j.id, itype.id] = mdl.addConstr(
                     gp.LinExpr() <= 0.0, name=f"use[{j.id},{itype.id}]"
                 )
+    activation_rows: dict[int, gp.Constr] = {}
+    if activation:
+        for itype in _fixed_cost_types(inst):
+            if itype.id in prep.releases:
+                activation_rows[itype.id] = mdl.addConstr(
+                    gp.LinExpr() <= 0.0, name=f"act[{itype.id}]")
     mdl.update()
 
     z: dict[int, gp.Var] = {}
@@ -1299,6 +1784,9 @@ def _build_rmp(
         rows = [c for (jid, mid), c in fixed_link.items() if mid == itype.id]
         coeffs = [-1.0] * len(rows)
         constrs = list(rows)
+        if itype.id in activation_rows:
+            coeffs.append(-float(sum(prep.releases[itype.id].values())))
+            constrs.append(activation_rows[itype.id])
         # z_m's own contribution to the f2-cap bound row when one is active
         # (matches the compact model's f2_expr — z_m included, see
         # formulations.add_fixed_cost_vars). Missing this was a real bug
@@ -1329,16 +1817,20 @@ def _build_rmp(
         )
 
     state = _RmpState(coverage=coverage, fleet=fleet, bound1=bound1, bound2=bound2,
-                       art=art, fixed_link=fixed_link, z=z, cuts=cut_rows)
+                       art=art, fixed_link=fixed_link, z=z, cuts=cut_rows,
+                       activation=activation_rows,
+                       unbounded=prep.unbounded)
 
-    for itype in inst.instance_types:
-        null_col = Column(type_id=itype.id, jobs=(), cost1=0.0, cost2=0.0)
+    for mid, r in fleet:
+        null_col = Column(type_id=mid, jobs=(), cost1=0.0, cost2=0.0, release=r)
         var = _add_column_var(mdl, null_col, weight1, weight2, state,
-                               name=f"lam[{itype.id}]_null")
+                               name=f"lam[{mid},{r}]_null")
         state.columns.append(null_col)
         state.vars.append(var)
 
     for i, col in enumerate(extra_columns):
+        if not col.jobs:
+            continue   # null columns are added above
         var = _add_column_var(mdl, col, weight1, weight2, state,
                                name=f"lam[{col.type_id}]_seed{i}")
         state.columns.append(col)
@@ -1356,15 +1848,28 @@ class _RmpInfeasible(Exception):
     """
 
 
+@dataclass
+class _CGResult:
+    """Outcome of one node's column generation.
+
+    ``status``: ``"converged"`` (no improving column; ``objective`` is the
+    RMP value), ``"bound"`` (the Lagrangian bound met the RMP value first;
+    ``objective`` is that bound) or ``"pruned"`` (the bound reached the
+    cutoff; the RMP solution is stale and must not be read).
+    """
+    iterations: int
+    status: str
+    objective: float
+    lagrangian: float = -math.inf
+
+
 def _run_column_generation(
     mdl: gp.Model,
     state: _RmpState,
     inst: Instance,
     weight1: float,
     weight2: float,
-    arcs_by_type: dict[int, list[_Arc]],
-    arrival_of: dict[int, float],
-    weight_of: dict[int, float],
+    prep: _Prep,
     max_iters: int,
     tol: float,
     forbidden: frozenset[tuple[int, int, int]] = frozenset(),
@@ -1373,10 +1878,175 @@ def _run_column_generation(
     same_pairs: frozenset[tuple[int, int]] = frozenset(),
     use_relaxed_prescreen: bool = False,
     deadline: float | None = None,
+    timers: dict | None = None,
+    *,
+    opts: PricingOptions | None = None,
+    cutoff: float = math.inf,
+    big_m: float | None = None,
+) -> _CGResult:
+    """Column generation at one node (or the root): the compiled loop
+    (:func:`_run_cg_compiled`) when ``opts.engine == "cpp"``, the extension
+    is built and no subset-row cut is active, else :func:`_run_cg_python`."""
+    opts = opts or DEFAULT_PRICING
+    if state.activation and not _compiled(opts, state.cuts):
+        raise ValueError("activation rows need the compiled pricing")
+    if _compiled(opts, state.cuts):
+        return _run_cg_compiled(
+            mdl, state, inst, weight1, weight2, prep, max_iters, tol,
+            forbidden, pinned or {}, differ_pairs, same_pairs, deadline, timers,
+            opts, cutoff, big_m if big_m is not None else _big_m_for(inst))
+    it = _run_cg_python(mdl, state, inst, weight1, weight2, prep, max_iters, tol,
+                        forbidden, pinned, differ_pairs, same_pairs,
+                        use_relaxed_prescreen, deadline, timers)
+    return _CGResult(it, "converged", mdl.ObjVal)
+
+
+def _run_cg_compiled(
+    mdl: gp.Model, state: _RmpState, inst: Instance, weight1: float, weight2: float,
+    prep: _Prep, max_iters: int, tol: float,
+    forbidden: frozenset, pinned: dict, differ_pairs: frozenset, same_pairs: frozenset,
+    deadline: float | None, timers: dict | None, opts: PricingOptions,
+    cutoff: float, big_m: float,
+) -> _CGResult:
+    """Column generation with the compiled pricer.
+
+    Each iteration solves the RMP and prices every path type, adding up to
+    ``opts.cols_per_type`` columns per type. With ``opts.smoothing = a > 0``
+    pricing first runs at the Wentges duals ``a·center + (1−a)·duals``
+    (``center``: the duals of the best Lagrangian bound so far); if none of
+    those columns prices out at the RMP duals (a mispricing), it reprices at
+    the RMP duals, so convergence is unchanged.
+
+    Every exact pricing round gives a Lagrangian bound
+    (:func:`_lagrangian_bound`). The node stops early when the best bound
+    reaches ``cutoff`` (``"pruned"``) or the RMP value (``"bound"``: the RMP
+    solution is optimal up to the gap).
+
+    ng-routes: when the converged LP uses a column that repeats a job, the
+    neighbourhoods grow to forbid that cycle (:func:`_augment_ng`), every
+    repeating column leaves the RMP, and generation resumes; it stops when
+    the LP is elementary or no neighbourhood can grow.
+    """
+    if timers is None:
+        timers = {}
+    pricing = _NodePricing(prep, opts, forbidden, pinned, differ_pairs, same_pairs)
+    statics: dict[int, list[Column]] = {}
+    for col in prep.static_columns:
+        if _column_allowed(col, forbidden, pinned, differ_pairs, same_pairs):
+            statics.setdefault(col.jobs[0][0], []).append(col)
+    fixed_cost = {m.id: m.fixed_cost for m in inst.instance_types}
+    keys = {_column_key(c) for c in state.columns}
+    best_lb, center = -math.inf, None
+
+    def price_all(d: _Duals) -> tuple[float | None, list[Column]]:
+        t0 = time.perf_counter()
+        mins, cols, exact = {}, [], True
+        for mid in prep.path_types:
+            mn, ex, n_labels, cs = pricing.price(mid, d, weight1, weight2, tol)
+            mins[mid] = mn
+            exact &= ex
+            cols += cs
+            timers["labels"] = max(timers.get("labels", 0), n_labels)
+        lag = (_lagrangian_bound(prep, state, d, mins, weight1, weight2, big_m,
+                                 statics, fixed_cost) if exact else None)
+        timers["pricing_s"] = timers.get("pricing_s", 0.0) + time.perf_counter() - t0
+        if not exact:
+            timers["inexact_pricing"] = timers.get("inexact_pricing", 0) + 1
+        return lag, cols
+
+    for it in range(max_iters):
+        _check_deadline(deadline)
+        t_lp = time.perf_counter()
+        mdl.optimize()
+        timers["lp_s"] = timers.get("lp_s", 0.0) + time.perf_counter() - t_lp
+        timers["cg_iters"] = timers.get("cg_iters", 0) + 1
+        if mdl.Status == GRB.INFEASIBLE:
+            raise _RmpInfeasible
+        if mdl.Status != GRB.OPTIMAL:
+            raise RuntimeError(f"BPC RMP LP not optimal: status={mdl.Status}")
+        rmp = mdl.ObjVal
+        d = _read_duals(state)
+
+        new: list[Column] = []
+        if center is not None and opts.smoothing > 0:
+            sd = center.mix(d, opts.smoothing)
+            lag, cols = price_all(sd)
+            if lag is not None and lag > best_lb:
+                best_lb, center = lag, sd
+            new = [c for c in cols if _column_key(c) not in keys
+                   and _column_rc(c, d, weight1, weight2) < -tol]
+        if not new:
+            lag, cols = price_all(d)
+            if lag is not None and lag > best_lb:
+                best_lb, center = lag, d
+            new = [c for c in cols if _column_key(c) not in keys]
+            if not new and lag is None:
+                raise RuntimeError("BPC pricing hit its label budget (max_labels) "
+                                   "without an improving column")
+        if best_lb >= cutoff:
+            timers["lb_pruned"] = timers.get("lb_pruned", 0) + 1
+            return _CGResult(it + 1, "pruned", best_lb, best_lb)
+        done = not new
+        if not done and best_lb >= rmp - max(tol, 1e-7 * abs(rmp)):
+            timers["lb_stops"] = timers.get("lb_stops", 0) + 1
+            done = True
+        if done:
+            if opts.ng_size is not None and _grow_ng_and_drop(mdl, state, prep, opts):
+                pricing.refresh_memory()
+                keys = {_column_key(c) for c in state.columns}
+                timers["ng_rounds"] = timers.get("ng_rounds", 0) + 1
+                continue
+            if new:   # stopped by the bound: report the bound, not the RMP value
+                return _CGResult(it + 1, "bound", min(best_lb, rmp), best_lb)
+            return _CGResult(it + 1, "converged", rmp, best_lb)
+        for col in new:
+            keys.add(_column_key(col))
+            state.vars.append(_add_column_var(mdl, col, weight1, weight2, state,
+                                              name=f"lam[{col.type_id}]_{len(state.columns)}"))
+            state.columns.append(col)
+    raise RuntimeError("BPC column generation did not converge within max_iters")
+
+
+def _grow_ng_and_drop(mdl: gp.Model, state: _RmpState, prep: _Prep,
+                      opts: PricingOptions) -> bool:
+    """After convergence: if the LP uses repeating columns, grow the
+    neighbourhoods against their cycles and remove every repeating column
+    from the RMP. Returns whether generation must resume."""
+    used = [c for c, v in zip(state.columns, state.vars) if v.X > 1e-9 and not _is_elementary(c)]
+    if not used or not _augment_ng(prep, used, opts.ng_max):
+        return False
+    keep_cols, keep_vars = [], []
+    for c, v in zip(state.columns, state.vars):
+        if _is_elementary(c):
+            keep_cols.append(c)
+            keep_vars.append(v)
+        else:
+            mdl.remove(v)
+    state.columns[:], state.vars[:] = keep_cols, keep_vars
+    mdl.update()
+    return True
+
+
+def _run_cg_python(
+    mdl: gp.Model,
+    state: _RmpState,
+    inst: Instance,
+    weight1: float,
+    weight2: float,
+    prep: _Prep,
+    max_iters: int,
+    tol: float,
+    forbidden: frozenset[tuple[int, int, int]] = frozenset(),
+    pinned: dict[int, tuple[int, int]] | None = None,
+    differ_pairs: frozenset[tuple[int, int]] = frozenset(),
+    same_pairs: frozenset[tuple[int, int]] = frozenset(),
+    use_relaxed_prescreen: bool = False,
+    deadline: float | None = None,
+    timers: dict | None = None,
 ) -> int:
     """Solve -> price every type -> add improving columns -> repeat, until no
     type prices out a negative-reduced-cost column. Returns the iteration
-    count. Shared by the root relaxation and every branch-and-price node.
+    count. The pricing is :func:`_price_type`, one column per type.
 
     ``deadline`` — a ``time.perf_counter()`` value; checked once per
     iteration, raising :class:`BPCTimeLimit` once passed.
@@ -1392,35 +2062,39 @@ def _run_column_generation(
     """
     for it in range(max_iters):
         _check_deadline(deadline)
+        t_lp = time.perf_counter()
         mdl.optimize()
+        if timers is not None:
+            timers["lp_s"] = timers.get("lp_s", 0.0) + time.perf_counter() - t_lp
         if mdl.Status == GRB.INFEASIBLE:
             raise _RmpInfeasible
         if mdl.Status != GRB.OPTIMAL:
             raise RuntimeError(f"BPC RMP LP not optimal: status={mdl.Status}")
 
         sigma = {jid: c.Pi for jid, c in state.coverage.items()}
-        rho = {mid: c.Pi for mid, c in state.fleet.items()}
+        rho = {key: c.Pi for key, c in state.fleet.items()}
         nu1 = state.bound1.Pi if state.bound1 is not None else None
         nu2 = state.bound2.Pi if state.bound2 is not None else None
         theta = {key: c.Pi for key, c in state.fixed_link.items()}
         cut_duals = {triple: c.Pi for triple, c in state.cuts.items()}
 
         improved = False
-        for itype in inst.instance_types:
-            mid = itype.id
+        t_price = time.perf_counter()
+        for mid in prep.path_types:   # unbounded types: all columns are static
+            sources = {r: rho[mid, r] for r in prep.releases[mid]}
             if use_relaxed_prescreen:
                 relaxed_best = _price_type_relaxed(
-                    inst, mid, arcs_by_type[mid], weight1, weight2,
-                    sigma, nu1, nu2, rho[mid], theta,
-                    arrival_of, weight_of, forbidden, pinned,
+                    inst, mid, prep.arcs_by_type[mid], weight1, weight2,
+                    sigma, nu1, nu2, 0.0, theta,
+                    prep.arrival_of, prep.weight_of, forbidden, pinned, sources,
                 )
                 if relaxed_best >= -tol:
                     continue
             result = _price_type(
-                inst, mid, arcs_by_type[mid], weight1, weight2,
-                sigma, nu1, nu2, rho[mid], theta,
-                arrival_of, weight_of, tol, forbidden, pinned,
-                differ_pairs, same_pairs, cut_duals,
+                inst, mid, prep.arcs_by_type[mid], weight1, weight2,
+                sigma, nu1, nu2, 0.0, theta,
+                prep.arrival_of, prep.weight_of, tol, forbidden, pinned,
+                differ_pairs, same_pairs, cut_duals, sources,
             )
             if result is None:
                 continue
@@ -1432,6 +2106,9 @@ def _run_column_generation(
             state.columns.append(col)
             state.vars.append(var)
             improved = True
+        if timers is not None:
+            timers["pricing_s"] = timers.get("pricing_s", 0.0) + time.perf_counter() - t_price
+            timers["cg_iters"] = timers.get("cg_iters", 0) + 1
 
         if not improved:
             return it + 1
@@ -1470,6 +2147,8 @@ def solve_root_relaxation(
     tol: float = 1e-7,
     big_m: float | None = None,
     use_relaxed_prescreen: bool = False,
+    reduce: bool = True,
+    pricing: PricingOptions | None = None,
 ) -> RootResult:
     """Column-generate the root LP relaxation of the BPC master.
 
@@ -1481,24 +2160,26 @@ def solve_root_relaxation(
     ``make_bpc_lexmin_bounded``).
 
     No branching: this is the LP bound only, Phase 1 of the BPC plan.
-    Running jobs are absorbed as pinned pseudo-jobs (see the module
-    docstring), so ``model``/``state`` cover those too.
+    ``reduce`` — use the exact start-set reductions of :class:`_Prep`
+    (``False``: every start in ``T_jm``). ``pricing`` — see
+    :class:`PricingOptions`; with ng-routes the bound lies between the
+    compact LP and the elementary master's.
     """
-    inst = _absorb_running_jobs(inst)
     if big_m is None:
         big_m = _big_m_for(inst)
+    prep = _prepare(inst, reduce)
 
+    seed = {_column_key(c): c for c in prep.static_columns}
+    for c in _heuristic_seed_columns(inst, prep):
+        seed.setdefault(_column_key(c), c)
     mdl, state = _build_rmp(inst, weight1, weight2, bound1_value, bound2_value, big_m,
-                             extra_columns=_heuristic_seed_columns(inst))
-    arrival_of = {j.id: j.arrival for j in inst.jobs}
-    weight_of = {j.id: j.weight for j in inst.jobs}
-    arcs_by_type = _build_arcs_by_type(inst)
+                             extra_columns=list(seed.values()), prep=prep,
+                             activation=_compiled(pricing, frozenset()))
 
     iterations = _run_column_generation(
-        mdl, state, inst, weight1, weight2,
-        arcs_by_type, arrival_of, weight_of, max_iters, tol,
-        use_relaxed_prescreen=use_relaxed_prescreen,
-    )
+        mdl, state, inst, weight1, weight2, prep, max_iters, tol,
+        use_relaxed_prescreen=use_relaxed_prescreen, opts=pricing, big_m=big_m,
+    ).iterations
 
     artificial_total = sum(v.X for v in state.art.values())
     return RootResult(
@@ -1517,7 +2198,7 @@ def solve_root_relaxation(
 
 @dataclass
 class _NodeResult:
-    status: str  # "integral" | "fractional" | "infeasible"
+    status: str  # "integral" | "fractional" | "infeasible" | "pruned" (bound >= cutoff)
     objective: float
     columns: list[Column]
     assignment: dict[int, tuple[int, int]] | None = None
@@ -1592,39 +2273,46 @@ def _solve_node(
     forced_types: frozenset[int],
     cuts: frozenset[frozenset[int]],
     seed_pool: list[Column],
-    arcs_by_type: dict[int, list[_Arc]],
-    arrival_of: dict[int, float],
-    weight_of: dict[int, float],
+    prep: _Prep,
     max_iters: int,
     tol: float,
     big_m: float,
     use_relaxed_prescreen: bool = False,
     heuristic_time_limit: float | None = None,
     deadline: float | None = None,
+    timers: dict | None = None,
+    opts: PricingOptions | None = None,
+    cutoff: float = math.inf,
 ) -> _NodeResult:
     """Column generation at one node, then its status and branching choice.
 
     ``heuristic_time_limit`` — when set and the node is fractional, also run
     :func:`_rmp_integer_heuristic` with that limit (capped by ``deadline``);
-    its result is the returned ``incumbent``.
+    its result is the returned ``incumbent``. ``cutoff`` — the node is
+    ``"pruned"`` as soon as its Lagrangian bound reaches it.
+
+    Columns that repeat a job (ng-routes) are not inherited: the node's own
+    pricing regenerates the ones its neighbourhoods still allow.
     """
     valid_seed = [
         c for c in seed_pool
-        if _column_allowed(c, forbidden, pinned, differ_pairs, same_pairs)
+        if _is_elementary(c) and _column_allowed(c, forbidden, pinned, differ_pairs, same_pairs)
     ]
     mdl, state = _build_rmp(inst, weight1, weight2, bound1_value, bound2_value, big_m,
                              extra_columns=valid_seed,
                              forbidden_types=forbidden_types, forced_types=forced_types,
-                             cuts=cuts)
+                             cuts=cuts, prep=prep, activation=_compiled(opts, cuts))
     try:
-        _run_column_generation(
-            mdl, state, inst, weight1, weight2,
-            arcs_by_type, arrival_of, weight_of, max_iters, tol,
+        cg = _run_column_generation(
+            mdl, state, inst, weight1, weight2, prep, max_iters, tol,
             forbidden, pinned, differ_pairs, same_pairs,
-            use_relaxed_prescreen, deadline,
+            use_relaxed_prescreen, deadline, timers,
+            opts=opts, cutoff=cutoff, big_m=big_m,
         )
     except _RmpInfeasible:
         return _NodeResult(status="infeasible", objective=float("inf"), columns=seed_pool)
+    if cg.status == "pruned":
+        return _NodeResult(status="pruned", objective=cg.objective, columns=state.columns)
 
     artificial_total = sum(v.X for v in state.art.values())
     if artificial_total > 1e-6:
@@ -1687,7 +2375,7 @@ def _solve_node(
             if _INTEGRALITY_TOL < zvar.X < 1 - _INTEGRALITY_TOL
         ]
         if frac_z:
-            return _NodeResult(status="fractional", objective=mdl.ObjVal,
+            return _NodeResult(status="fractional", objective=cg.objective,
                                 columns=state.columns, branch_type=frac_z[0])
 
         assignment = {
@@ -1728,7 +2416,7 @@ def _solve_node(
     ]
     if pair_candidates:
         _dist, branch_j, branch_k = min(pair_candidates)
-        result = _NodeResult(status="fractional", objective=mdl.ObjVal, columns=state.columns,
+        result = _NodeResult(status="fractional", objective=cg.objective, columns=state.columns,
                              branch_pair=(branch_j, branch_k))
     else:
         _dist, branch_j, branch_m, branch_t = min(
@@ -1736,7 +2424,7 @@ def _solve_node(
             for (jid, mid, t), v in agg.items()
             if jid in unsettled
         )
-        result = _NodeResult(status="fractional", objective=mdl.ObjVal, columns=state.columns,
+        result = _NodeResult(status="fractional", objective=cg.objective, columns=state.columns,
                              branch_var=(branch_j, branch_m, branch_t))
     if heuristic_time_limit is not None:
         if deadline is not None:
@@ -1817,9 +2505,8 @@ def _root_cuts_and_price(
     bound1_value: float | None,
     bound2_value: float | None,
     big_m: float,
-    arcs_by_type: dict[int, list[_Arc]],
-    arrival_of: dict[int, float],
-    weight_of: dict[int, float],
+    prep: _Prep,
+    root_pool: list[Column],
     max_iters: int,
     tol: float,
     max_cut_rounds: int,
@@ -1827,6 +2514,7 @@ def _root_cuts_and_price(
     max_total_cuts: int,
     use_relaxed_prescreen: bool = False,
     deadline: float | None = None,
+    opts: PricingOptions | None = None,
 ) -> tuple[bool, frozenset[frozenset[int]], list[Column]]:
     """Separate + add SR-1 cuts at the root only, before the B&B tree starts
     — the simpler, standard variant of branch-and-cut-and-price that avoids
@@ -1842,15 +2530,15 @@ def _root_cuts_and_price(
     ``_branch_and_price`` straight to its own infeasible-result path.
     """
     cuts: frozenset[frozenset[int]] = frozenset()
-    pool = _heuristic_seed_columns(inst)
+    pool = root_pool
     for _round in range(max_cut_rounds):
         mdl, state = _build_rmp(inst, weight1, weight2, bound1_value, bound2_value, big_m,
-                                 extra_columns=pool, cuts=cuts)
+                                 extra_columns=pool, cuts=cuts, prep=prep,
+                                 activation=_compiled(opts, cuts))
         try:
-            _run_column_generation(mdl, state, inst, weight1, weight2,
-                                    arcs_by_type, arrival_of, weight_of, max_iters, tol,
+            _run_column_generation(mdl, state, inst, weight1, weight2, prep, max_iters, tol,
                                     use_relaxed_prescreen=use_relaxed_prescreen,
-                                    deadline=deadline)
+                                    deadline=deadline, opts=opts, big_m=big_m)
         except _RmpInfeasible:
             return False, frozenset(), []
         pool = state.columns
@@ -1861,6 +2549,9 @@ def _root_cuts_and_price(
             break
         cuts = cuts | frozenset(new_cuts)
     return True, cuts, pool
+
+
+_POOL_CAP = 50_000   # columns kept across solves (pool_out)
 
 
 def _branch_and_price(
@@ -1880,6 +2571,14 @@ def _branch_and_price(
     use_relaxed_prescreen: bool = False,
     heuristic_time_limit: float = 5.0,
     time_limit: float | None = None,
+    stats: dict | None = None,
+    *,
+    prep: _Prep | None = None,
+    reduce: bool = True,
+    seed_schedules: list[dict[int, tuple[int, int]]] | None = None,
+    column_pool: list[Column] | None = None,
+    pool_out: dict | None = None,
+    pricing: PricingOptions | None = None,
 ) -> tuple[float, dict[int, tuple[int, int]] | None]:
     """Exact branch-and-price. Returns ``(objective, assignment)``, or
     ``(inf, None)`` if the instance (restricted to any bound row) is
@@ -1930,37 +2629,66 @@ def _branch_and_price(
     a better schedule than the last incumbent); ``0`` disables it. It only supplies incumbents, so the optimum
     is unchanged.
 
-    Pruning uses objective integrality: with ``weight2 == 0``, f1 =
-    Σ w_j C_j − Σ w_j a_j over integer completions C_j and integral weights
-    (an assumption :meth:`Instance.build` enforces), so two schedules'
-    objectives differ by a multiple of ``weight1``. A node then holds a strictly better schedule only if its
-    bound is at most ``best − weight1``; the 1e-3 margin absorbs the column
-    generation's ``tol``-level bound error. Without it, bounds within that
-    error of the optimum (e.g. 187.51663 vs 187.516667 on the deleted tiny_large) never
-    prune.
-    Running jobs are absorbed as pinned pseudo-jobs (see the module
-    docstring); the returned assignment holds the instance's own jobs only.
+    Pruning uses objective integrality: f1 = Σ w_j C_j − Σ w_j a_j over
+    integer completions C_j and integral weights (an assumption
+    :meth:`Instance.build` enforces) moves in steps of ``gcd(w_j)``, f2 in
+    steps of ``δ·gcd(cost units)``, so when ``weight1·f1 + weight2·f2`` lies
+    on a grid of step ``s >= 1e-3`` (:func:`_objective_step`) a node holds a
+    strictly better schedule only if its bound is at most ``best − s``; the
+    1e-3 margin absorbs the column generation's ``tol``-level bound error.
+    Without it, bounds within that error of the optimum (e.g. 187.51663 vs
+    187.516667 on the deleted tiny_large) never prune.
+    ``pricing`` — see :class:`PricingOptions`. Its Lagrangian bound prunes a
+    node as soon as it reaches ``best − s``, before column generation ends.
+    ``prep`` — a :func:`_prepare` result to reuse (built here otherwise, with
+    ``reduce``). ``seed_schedules`` — complete schedules whose columns seed
+    the root and whose best one within the bound rows is the starting
+    incumbent (default: :func:`heuristic_schedules`). ``column_pool`` —
+    further columns for the root, e.g. from earlier solves on the same
+    ``prep``: the bound rows are aggregate, so a column is valid under any
+    bounds. ``pool_out`` — when a dict, receives every column the search
+    generated (keyed by :func:`_column_key`), for the next solve.
+
+    ``stats`` — when a dict, filled with search counters (``nodes``,
+    ``root_bound``, ``root_s``, ``cg_iters``, ``lp_s``, ``pricing_s``,
+    ``columns``) for benchmarking; it never changes the search.
     """
+    t_start = time.perf_counter()
+    timers: dict = stats if stats is not None else {}
+    timers.setdefault("nodes", 0)
     deadline = None if time_limit is None else time.perf_counter() + time_limit
-    inst = _absorb_running_jobs(inst)
-    running_ids = _running_ids(inst)
     if big_m is None:
         big_m = _big_m_for(inst)
     prune_gap = tol
-    if weight2 == 0 and weight1 > 0:
-        prune_gap = max(tol, weight1 - 1e-3)
-    arcs_by_type = _build_arcs_by_type(inst)
-    arrival_of = {j.id: j.arrival for j in inst.jobs}
-    weight_of = {j.id: j.weight for j in inst.jobs}
+    step = _objective_step(inst, weight1, weight2)
+    if step >= 1e-3:
+        prune_gap = max(tol, step - 1e-3 * min(step, 1.0))
+    if prep is None:
+        prep = _prepare(inst, reduce)
+    if seed_schedules is None:
+        seed_schedules = heuristic_schedules(inst)
+
+    best_obj = float("inf")
+    best_assignment: dict[int, tuple[int, int]] | None = None
+    pool: dict[tuple, Column] = {_column_key(c): c for c in prep.static_columns}
+    for c in column_pool or ():
+        pool.setdefault(_column_key(c), c)
+    for a in seed_schedules:
+        for c in _schedule_columns(prep, a):
+            pool.setdefault(_column_key(c), c)
+        obj = _schedule_objective(inst, a, weight1, weight2, bound1_value, bound2_value)
+        if obj is not None and obj < best_obj:
+            best_obj, best_assignment = obj, dict(a)
+    timers["seed_obj"] = best_obj
+    root_pool = list(pool.values())
 
     cuts: frozenset[frozenset[int]] = frozenset()
-    root_pool = _heuristic_seed_columns(inst)
     if use_cuts:
         feasible, cuts, root_pool = _root_cuts_and_price(
             inst, weight1, weight2, bound1_value, bound2_value, big_m,
-            arcs_by_type, arrival_of, weight_of, max_iters_per_node, tol,
+            prep, root_pool, max_iters_per_node, tol,
             max_cut_rounds, max_cuts_per_round, max_total_cuts,
-            use_relaxed_prescreen, deadline,
+            use_relaxed_prescreen, deadline, pricing,
         )
         if not feasible:
             return float("inf"), None
@@ -1974,19 +2702,12 @@ def _branch_and_price(
     stack: Stack = [
         (frozenset(), {}, frozenset(), frozenset(), frozenset(), frozenset(), root_pool)
     ]
-    best_obj = float("inf")
-    best_assignment: dict[int, tuple[int, int]] | None = None
     n_nodes = 0
-
-    def own_jobs(assignment):
-        if assignment is None:
-            return None
-        return {jid: a for jid, a in assignment.items() if jid not in running_ids}
 
     while stack:
         if n_nodes >= max_nodes:
             raise RuntimeError("BPC branch-and-price exceeded max_nodes")
-        forbidden, pinned, differ_pairs, same_pairs, forbidden_types, forced_types, pool = stack.pop()
+        forbidden, pinned, differ_pairs, same_pairs, forbidden_types, forced_types, node_pool = stack.pop()
         n_nodes += 1
 
         try:
@@ -1994,17 +2715,26 @@ def _branch_and_price(
             node = _solve_node(
                 inst, weight1, weight2, bound1_value, bound2_value,
                 forbidden, pinned, differ_pairs, same_pairs, forbidden_types, forced_types,
-                cuts, pool,
-                arcs_by_type, arrival_of, weight_of, max_iters_per_node, tol, big_m,
+                cuts, node_pool,
+                prep, max_iters_per_node, tol, big_m,
                 use_relaxed_prescreen,
                 heuristic_time_limit if heuristic_time_limit > 0 else None,
-                deadline,
+                deadline, timers, pricing, best_obj - prune_gap,
             )
         except BPCTimeLimit:
-            raise BPCTimeLimit(best_obj, own_jobs(best_assignment)) from None
+            raise BPCTimeLimit(best_obj, best_assignment) from None
+        timers["nodes"] = n_nodes
+        timers["columns"] = max(timers.get("columns", 0), len(node.columns))
+        if n_nodes == 1:
+            timers["root_bound"] = node.objective
+            timers["root_s"] = time.perf_counter() - t_start
+        if pool_out is not None and len(pool_out) < _POOL_CAP:
+            for c in node.columns:
+                if c.jobs and _is_elementary(c):
+                    pool_out.setdefault(_column_key(c), c)
         if node.incumbent is not None and node.incumbent[0] < best_obj:
             best_obj, best_assignment = node.incumbent
-        if node.status == "infeasible" or node.objective >= best_obj - prune_gap:
+        if node.status in ("infeasible", "pruned") or node.objective >= best_obj - prune_gap:
             continue
 
         if node.status == "integral":
@@ -2031,7 +2761,7 @@ def _branch_and_price(
             stack.append((forbidden, {**pinned, jid: (mid, t)}, differ_pairs, same_pairs,
                           forbidden_types, forced_types, node.columns))                # up
 
-    return best_obj, own_jobs(best_assignment)
+    return best_obj, best_assignment
 
 
 def _assignment_to_solution(inst: Instance, objective: float,
@@ -2079,6 +2809,35 @@ def _lex_tiebreak(inst: Instance, assignment1: dict[int, tuple[int, int]],
     return _assignment_to_solution(inst, None, assignment2)
 
 
+def _reuse_kwargs(inst: Instance, kwargs: dict) -> dict:
+    """``kwargs`` with a shared ``prep`` and ``seed_schedules`` filled in, so
+    several ``_branch_and_price`` calls on one instance build them once."""
+    kw = dict(kwargs)
+    reduce = kw.pop("reduce", True)
+    if kw.get("prep") is None:
+        kw["prep"] = _prepare(inst, reduce)
+    if kw.get("seed_schedules") is None:
+        kw["seed_schedules"] = heuristic_schedules(inst)
+    return kw
+
+
+def _lexmin(inst: Instance, primary: str, **kwargs) -> Solution:
+    """Both phases of a lex-min. Phase 2 starts from phase 1's columns and
+    from its schedule, which satisfies phase 2's bound row and so is an
+    incumbent from the first node on."""
+    kw = _reuse_kwargs(inst, kwargs)
+    pool: dict = {}
+    w = (1.0, 0.0) if primary == "f1" else (0.0, 1.0)
+    obj1, assignment1 = _branch_and_price(inst, *w, pool_out=pool, **kw)
+    if assignment1 is None:
+        return _assignment_to_solution(inst, obj1, None)
+    kw2 = dict(kw, seed_schedules=[assignment1, *kw["seed_schedules"]],
+               column_pool=[*(kw.get("column_pool") or ()), *pool.values()])
+    if primary == "f1":
+        return _lex_tiebreak(inst, assignment1, 0.0, 1.0, bound1_value=obj1, **kw2)
+    return _lex_tiebreak(inst, assignment1, 1.0, 0.0, bound2_value=obj1, **kw2)
+
+
 def solve_f1_bpc(inst: Instance, **kwargs) -> Solution:
     """Lex-min (f1, f2) via branch-and-price — mirrors ``model.solve_f1``.
 
@@ -2086,11 +2845,7 @@ def solve_f1_bpc(inst: Instance, **kwargs) -> Solution:
     :func:`_lex_tiebreak`). A ``time_limit`` applies to each phase; past it
     in phase 1, :class:`BPCTimeLimit` propagates.
     """
-    f1_star, assignment1 = _branch_and_price(inst, 1.0, 0.0, **kwargs)
-    if assignment1 is None:
-        return _assignment_to_solution(inst, f1_star, None)
-    return _lex_tiebreak(inst, assignment1, 0.0, 1.0,
-                         bound1_value=f1_star, **kwargs)
+    return _lexmin(inst, "f1", **kwargs)
 
 
 def solve_f2_bpc(inst: Instance, **kwargs) -> Solution:
@@ -2099,11 +2854,7 @@ def solve_f2_bpc(inst: Instance, **kwargs) -> Solution:
     Status ``"feasible"`` when the tie-break phase failed (see
     :func:`_lex_tiebreak`). ``time_limit``: as :func:`solve_f1_bpc`.
     """
-    f2_star, assignment1 = _branch_and_price(inst, 0.0, 1.0, **kwargs)
-    if assignment1 is None:
-        return _assignment_to_solution(inst, f2_star, None)
-    return _lex_tiebreak(inst, assignment1, 1.0, 0.0,
-                         bound2_value=f2_star, **kwargs)
+    return _lexmin(inst, "f2", **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -2121,9 +2872,14 @@ def make_bpc_lexmin_bounded(
     zero changes to the box-search algorithm itself.
 
     Returns ``(lexmin_bounded, counters)``, ``counters`` holding a live
-    ``"n_solves"`` entry (incremented once per ``_branch_and_price`` call —
-    ``"build_time"`` is always 0.0, since BPC has no single "model build"
-    step comparable to the Gurobi engine's).
+    ``"n_solves"`` entry (incremented once per ``_branch_and_price`` call)
+    and ``"build_time"``, the one-off preprocessing and seeding time.
+
+    Every solve shares one :func:`_prepare` result, one column pool and the
+    list of schedules found so far (seeded by :func:`heuristic_schedules`,
+    with an NSGA-II front unless ``ea_seeds=False``): the bound rows are
+    aggregate, so every pooled column is valid in every box, and any earlier
+    schedule inside a box's bounds is that solve's first incumbent.
 
     ``time_limit`` caps each ``_branch_and_price`` call (each phase), as
     ``per_solve_time_limit`` caps each Gurobi solve. A phase that runs out of
@@ -2150,6 +2906,31 @@ def make_bpc_lexmin_bounded(
     always the same axis as ``secondary``.
     """
     counters = {"n_solves": 0, "build_time": 0.0}
+    # Shared by every box solve: the preprocessing, the column pool (each
+    # column stays valid under any bound rows) and every schedule found so
+    # far — any of them inside a box's bounds is that solve's first incumbent.
+    ea_seeds = bpc_kwargs.pop("ea_seeds", True)
+    t0 = time.perf_counter()
+    kw = _reuse_kwargs(inst, bpc_kwargs)
+    if bpc_kwargs.get("seed_schedules") is None:
+        kw["seed_schedules"] = heuristic_schedules(inst, ea=ea_seeds)
+    counters["build_time"] = time.perf_counter() - t0
+    schedules: list[dict[int, tuple[int, int]]] = list(kw.pop("seed_schedules"))
+    pool: dict = {_column_key(c): c for c in kw.pop("column_pool", None) or ()}
+
+    def solve(w1, w2, b1, b2):
+        try:
+            obj, a = _branch_and_price(
+                inst, w1, w2, bound1_value=b1, bound2_value=b2, time_limit=time_limit,
+                seed_schedules=schedules, column_pool=list(pool.values()),
+                pool_out=pool, **kw)
+        except BPCTimeLimit as e:
+            if e.assignment is not None:
+                schedules.insert(0, e.assignment)
+            raise
+        if a is not None:
+            schedules.insert(0, a)
+        return obj, a
 
     def lexmin_bounded(
         primary: str, secondary: str,
@@ -2165,10 +2946,7 @@ def make_bpc_lexmin_bounded(
         w1, w2 = (1.0, 0.0) if primary == "f1" else (0.0, 1.0)
         counters["n_solves"] += 1
         try:
-            obj1, assignment1 = _branch_and_price(
-                inst, w1, w2, bound1_value=b1, bound2_value=b2,
-                time_limit=time_limit, **bpc_kwargs,
-            )
+            obj1, assignment1 = solve(w1, w2, b1, b2)
         except BPCTimeLimit as e:
             if e.assignment is None:
                 return Solution(status="feasible", objective=None, f1=None, f2=None,
@@ -2192,8 +2970,15 @@ def make_bpc_lexmin_bounded(
 
         w1s, w2s = (1.0, 0.0) if secondary == "f1" else (0.0, 1.0)
         counters["n_solves"] += 1
-        return _lex_tiebreak(inst, assignment1, w1s, w2s,
-                             bound1_value=b1, bound2_value=b2,
-                             time_limit=time_limit, **bpc_kwargs)
+        try:
+            _obj2, assignment2 = solve(w1s, w2s, b1, b2)
+        except BPCTimeLimit as e:
+            fallback = e.assignment or assignment1
+            return replace(_assignment_to_solution(inst, None, fallback), status="feasible")
+        except RuntimeError:
+            assignment2 = None
+        if assignment2 is None:
+            return replace(_assignment_to_solution(inst, None, assignment1), status="feasible")
+        return _assignment_to_solution(inst, None, assignment2)
 
     return lexmin_bounded, counters

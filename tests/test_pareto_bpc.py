@@ -60,9 +60,18 @@ def test_unknown_engine_rejected(known_pareto_inst):
 # ---------------------------------------------------------------------------
 
 def test_branch_and_price_time_limit_raises(trap_small):
+    """A 0 s limit stops before the first node; the exception carries the
+    seed incumbent (the best heuristic schedule), or nothing without seeds."""
     from fedhpc import bpc
     with pytest.raises(bpc.BPCTimeLimit) as exc:
         bpc._branch_and_price(trap_small, 1.0, 0.0, time_limit=0.0)
+    assert exc.value.assignment is not None
+    trap_small.check_schedule(exc.value.assignment)
+    completion = {j: t + trap_small.p_occ[j, m] for j, (m, t) in exc.value.assignment.items()}
+    assert exc.value.objective == pytest.approx(trap_small.f1_of(completion))
+
+    with pytest.raises(bpc.BPCTimeLimit) as exc:
+        bpc._branch_and_price(trap_small, 1.0, 0.0, time_limit=0.0, seed_schedules=[])
     assert exc.value.assignment is None
 
 
