@@ -98,6 +98,16 @@ def _rm_horizons() -> dict[tuple[str, str], int]:
         return {(r["class"], r["id"]): int(r["horizon"]) for r in csv.DictReader(fh)}
 
 
+def _rm_reference(m: int, n: int, i: int, cls: str = "V1_F1") -> dict:
+    """Chen et al.'s LP bound and optimum (``fedhpc_results.csv``), used for
+    the hard tier instead of a compact-model solve."""
+    with RM_CSV.open() as fh:
+        for r in csv.DictReader(fh):
+            if (r["class"], r["id"]) == (cls, f"M{m}N{n}_{i}"):
+                return {"ws_sum": [float(r["ref_ofv"]), float(r["ref_lb"]), "paper"]}
+    raise KeyError((m, n, i))
+
+
 def rm_instance(m: int, n: int, i: int, cls: str = "V1_F1") -> Instance:
     with zipfile.ZipFile(RM_ZIP) as z:
         text = z.read(f"Benchmarks/{cls}/M{m}_N{n}_{cls}_{i}.txt").decode()
@@ -105,9 +115,31 @@ def rm_instance(m: int, n: int, i: int, cls: str = "V1_F1") -> Instance:
     return rm.to_instance(rm.parse(text), horizon)
 
 
-def suite() -> dict[str, tuple[callable, list[str]]]:
-    from conftest import TRAP_INSTANCES
+HARD_RM = ((2, 30, 1), (5, 50, 1), (8, 40, 1), (8, 40, 2), (10, 50, 1))
+# Rm instances whose root bound has a gap (0.3-3 %): the subset-row cut A/B
+GAP_RM = ((2, 10, 1), (2, 10, 3), (2, 10, 9), (2, 20, 3), (2, 20, 4), (2, 20, 9),
+          (5, 25, 1), (5, 25, 6), (8, 40, 1))
+
+
+def suite(tier: str = "base") -> dict[str, tuple[callable, list[str]]]:
+    """``base``: the suite above. ``hard``: larger instances that the base
+    tier no longer separates — Rm M2N30 .. M10N50 (f1 + f2, scored against
+    the paper's optimum) and trap_medium's Pareto front. (Real slices of 32
+    and 48 jobs solve in under a second, so they are left out.) ``gap``:
+    the Rm instances with a 0.3-3 % root gap (``GAP_RM``), for cut A/Bs
+    such as ``--pricing sr_cuts=8,sr_per_round=4``."""
     out: dict[str, tuple[callable, list[str]]] = {}
+    if tier == "gap":
+        for m, n, i in GAP_RM:
+            out[f"rm_M{m}N{n}_{i}"] = (lambda m=m, n=n, i=i: rm_instance(m, n, i), ["ws_sum"])
+        return out
+    if tier == "hard":
+        for m, n, i in HARD_RM:
+            out[f"rm_M{m}N{n}_{i}"] = (lambda m=m, n=n, i=i: rm_instance(m, n, i), ["ws_sum"])
+        from conftest import TRAP_INSTANCES
+        out["trap_medium"] = (TRAP_INSTANCES["trap_medium"], ["pareto"])
+        return out
+    from conftest import TRAP_INSTANCES
     lex = ["root_f1", "root_f2", "lex_f1", "lex_f2"]
     for name, fn in sorted(TRAP_INSTANCES.items()):
         out[name] = (fn, lex + ["pareto"])
@@ -165,7 +197,11 @@ def load_references(names: list[str], s: dict) -> dict:
         if name not in refs:
             fn, tasks = s[name]
             print(f"[ref] {name}", flush=True)
-            refs[name] = compute_reference(name, fn(), tasks)
+            if name.startswith("rm_") and tasks == ["ws_sum"]:
+                m, n, i = map(int, name[4:].replace("N", " ").replace("_", " ").split())
+                refs[name] = _rm_reference(m, n, i)
+            else:
+                refs[name] = compute_reference(name, fn(), tasks)
             changed = True
     if changed:
         OUT.mkdir(parents=True, exist_ok=True)
@@ -185,6 +221,7 @@ def _bnp(inst, w1, w2, tl, **kw):
         status = "optimal" if a is not None else "infeasible"
     except bpc.BPCTimeLimit as e:
         obj, a, status = e.objective, e.assignment, "timeout"
+        st["open_bound"] = e.bound
     except RuntimeError as e:
         obj, a, status = float("inf"), None, f"error: {e}"
     st["time_s"] = time.perf_counter() - t0
@@ -225,7 +262,12 @@ def run_task(inst: Instance, task: str, ref: dict, tl: float, budget: float) -> 
     if task == "ws_sum":
         obj, a, status, s = _bnp(inst, 1.0, 1.0, tl)
         rec.update(phase1=s, status=status, time_s=s["time_s"], obj=obj, ref=ref["ws_sum"][0])
-        rec["ok"] = abs(obj - rec["ref"]) < 1e-4 if status == "optimal" else None
+        if status != "optimal":
+            rec["ok"] = None
+        elif ref["ws_sum"][2] == "paper":   # the paper's value may not be optimal
+            rec["ok"] = obj <= rec["ref"] + 1e-4
+        else:
+            rec["ok"] = abs(obj - rec["ref"]) < 1e-4
         return rec
     if task == "pareto":
         t0 = time.perf_counter()
@@ -260,8 +302,11 @@ def _pricing(spec: str | None) -> bpc.PricingOptions:
 def cmd_run(args) -> None:
     configure_env()
     bpc.DEFAULT_PRICING = _pricing(args.pricing)
-    print(f"[pricing] {bpc.DEFAULT_PRICING}", flush=True)
-    s = suite()
+    for part in filter(None, (args.tree or "").split(",")):
+        k, v = part.split("=")
+        bpc.TREE_DEFAULTS[k] = int(v) if v.isdigit() else v
+    print(f"[pricing] {bpc.DEFAULT_PRICING}  [tree] {bpc.TREE_DEFAULTS}", flush=True)
+    s = suite(args.suite)
     names = [n for n in s if not args.only or any(o in n for o in args.only)]
     refs = load_references(names, s)
     OUT.mkdir(parents=True, exist_ok=True)
@@ -274,7 +319,8 @@ def cmd_run(args) -> None:
         for task in tasks:
             if args.tasks and task not in args.tasks:
                 continue
-            rec = {"label": args.label, "instance": name, "pricing": args.pricing, **run_task(
+            rec = {"label": args.label, "instance": name, "pricing": args.pricing,
+                   "tree": args.tree, **run_task(
                 inst, task, refs[name], args.time_limit, args.pareto_budget)}
             with out.open("a") as fh:
                 fh.write(json.dumps(rec, default=str) + "\n")
@@ -292,7 +338,8 @@ def _fmt(r: dict) -> str:
             bits.append(f"{ph}: nodes={p.get('nodes')} root={p.get('root_bound', float('nan')):.3f}"
                         f" price={p.get('pricing_s', 0):.1f}s lp={p.get('lp_s', 0):.1f}s"
                         f" it={p.get('cg_iters', 0)} lbstop={p.get('lb_stops', 0)}"
-                        f" lbprune={p.get('lb_pruned', 0)} ng={p.get('ng_rounds', 0)}")
+                        f" lbprune={p.get('lb_pruned', 0)} ng={p.get('ng_rounds', 0)}"
+                        f" fixed={p.get('root_fixed', 0)} bound={p.get('open_bound', float('nan')):.2f}")
     if "n_points" in r:
         bits.append(f"pts={r['n_points']} hits={r['hits']}/{r['n_ref']} wrong={r['wrong']}")
     bits.append(f"ok={r.get('ok')}")
@@ -341,7 +388,9 @@ def main() -> None:
     r.add_argument("--time-limit", type=float, default=60.0, help="seconds per BPC phase")
     r.add_argument("--pareto-budget", type=float, default=300.0)
     r.add_argument("--append", action="store_true")
+    r.add_argument("--suite", choices=["base", "hard", "gap"], default="base")
     r.add_argument("--pricing", help="PricingOptions as k=v,... (e.g. ng_size=none)")
+    r.add_argument("--tree", help="bpc.TREE_DEFAULTS as k=v,... (e.g. node_selection=dfs)")
     c = sub.add_parser("compare")
     c.add_argument("labels", nargs="+")
     args = ap.parse_args()

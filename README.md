@@ -149,7 +149,7 @@ It runs on every MIP extraction (`model._extract`, which also rejects a job star
 
 #### Exact Pareto front
 
-`pareto.true_pareto_frontier` enumerates the complete front by box splitting: about 2 solves per Pareto point. Each solve is a lexicographic minimum under a bound on the other objective. `pareto.map_pareto_frontier` bisects the objective range instead, giving broad coverage under a solve or time budget. Both rely on f1 being integer-spaced (assumption 8). `pareto.hybrid_frontier` runs NSGA-II and MOEA/D, then solves a certified lexicographic minimum under each surviving candidate's cost. Every `"optimal"` point it returns is proven Pareto-optimal, but its front is incomplete: only trade-offs near the EA candidates are visited. Each box solve runs on either the compact Gurobi model (`engine="gurobi"`) or the branch-price-and-cut engine in `bpc.py` (`engine="bpc"`). BPC handles running jobs by turning each into a pinned pseudo-job; it is practical only for instances of about a dozen jobs. `per_solve_time_limit` caps each solve phase on both engines. A phase that runs out of time leaves its box unresolved, and the search reports a partial front.
+`pareto.true_pareto_frontier` enumerates the complete front by box splitting: about 2 solves per Pareto point. Each solve is a lexicographic minimum under a bound on the other objective. `pareto.map_pareto_frontier` bisects the objective range instead, giving broad coverage under a solve or time budget. Both rely on f1 being integer-spaced (assumption 8). `pareto.hybrid_frontier` runs NSGA-II and MOEA/D, then solves a certified lexicographic minimum under each surviving candidate's cost. Every `"optimal"` point it returns is proven Pareto-optimal, but its front is incomplete: only trade-offs near the EA candidates are visited. Each box solve runs on one of three engines. `engine="gurobi"` is the compact Gurobi model. `engine="bpc"` is the branch-and-price engine in `bpc.py`, with C++ ng-route pricing, time-window branching and reduced-cost fixing. It proves 40-50-job Rm instances and the trap instances' Pareto fronts in seconds. `engine="lpfirst"` (`lpfirst.py`) is for large instances whose LP is nearly integral, such as the 964- and 3340-job traces. It runs column generation on the time-indexed LP and proves optimality from the Lagrangian bound and a MIP over the placements that fit in the remaining gap, with no branching. It does not support fixed activation costs. `per_solve_time_limit` caps each solve phase on every engine. A phase that runs out of time leaves its box unresolved, and the search reports a partial front.
 
 ## Project Structure
 
@@ -162,6 +162,7 @@ fedhpc/
 │   ├── model.py              # Single-objective, weighted-sum and ε-constraint solves
 │   ├── pareto.py             # Reference points, exact box-splitting / bisection fronts, hybrid
 │   ├── bpc.py                # Branch-price-and-cut exact engine
+│   ├── lpfirst.py            # LP-first exact engine for large near-integral instances
 │   ├── moea.py               # NSGA-II / NSGA-III / MOEA/D and weighted-sum heuristics
 │   ├── baselines.py          # List-scheduling baselines (greedy, threshold bursting)
 │   ├── instance_gen.py       # Permutative generated instance classes A / B

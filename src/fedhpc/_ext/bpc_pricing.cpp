@@ -18,6 +18,14 @@
 // current slot. Dominance (cost <=, mask subset, same same-pair parity) is
 // checked within a slot's arrivals and against the active set.
 //
+// Limited-memory subset-row cuts (Pecin et al. 2017), at most 64. Cut c has
+// a job set S_c and a memory M_c >= S_c; a label carries one state bit per
+// cut. Visiting i: the state drops to 0 if i is outside M_c; if i is in S_c
+// a set bit pays cost_c (= -dual >= 0) and clears, a clear bit sets. A label
+// a dominates b only if cost_a + sum of cost_c over cuts set in a but not in
+// b is <= cost_b: a pays each such cut at most once more than b would.
+// Cut costs are >= 0, so g() and fixable() below stay valid lower bounds.
+//
 // Completion bound. g(t) = min cost from slot t to H over all paths, repeats
 // allowed (one backward pass); g is nondecreasing in t. A label with
 // cost + g(t) >= thr (thr = -tol) can never yield an improving column, so it
@@ -84,6 +92,21 @@ public:
             set_bit(keep_.data(), a), set_bit(keep_.data(), b);
         }
         set_memory(std::nullopt);
+        inS_.assign(n_, 0);
+        inM_.assign(n_, 0);
+    }
+
+    // cuts[c] = (S_c, M_c) in local job indices; M_c is extended by S_c.
+    void set_cuts(const std::vector<std::pair<std::vector<int>, std::vector<int>>>& cuts) {
+        if (cuts.size() > 64) throw std::invalid_argument("more than 64 subset-row cuts");
+        nc_ = (int)cuts.size();
+        inS_.assign(n_, 0);
+        inM_.assign(n_, 0);
+        for (int c = 0; c < nc_; ++c) {
+            const u64 bit = u64(1) << c;
+            for (int i : cuts[c].first) check(i), inS_[i] |= bit, inM_[i] |= bit;
+            for (int i : cuts[c].second) check(i), inM_[i] |= bit;
+        }
     }
 
     // ng[i] = local jobs remembered after visiting i (besides i itself);
@@ -107,11 +130,16 @@ public:
     // must be >= 0 so g() stays a valid completion bound.
     PriceOut price(const std::vector<double>& A, const std::vector<double>& B,
                    const std::vector<std::pair<int, double>>& sources, int max_cols,
-                   double tol, long long max_labels, double first_cost) {
+                   double tol, long long max_labels, double first_cost,
+                   const std::vector<double>& cut_cost) {
         if ((int)A.size() != n_ || (int)B.size() != n_)
             throw std::invalid_argument("dual vector length != n");
         if (first_cost < 0) throw std::invalid_argument("first_cost must be >= 0");
+        if ((int)cut_cost.size() != nc_) throw std::invalid_argument("cut_cost length != cuts");
+        for (double c : cut_cost)
+            if (c < 0) throw std::invalid_argument("cut costs must be >= 0");
         first_ = first_cost;
+        ccost_ = cut_cost;
         switch (nw_) {
             case 1: return run<1>(A, B, sources, max_cols, tol, max_labels);
             case 2: return run<2>(A, B, sources, max_cols, tol, max_labels);
@@ -124,9 +152,49 @@ public:
 
     int n_jobs() const { return n_; }
 
+    // Reduced-cost fixing: every arc (i, t) whose cheapest path through it —
+    // repeats allowed, first_cost ignored, so a lower bound on any column
+    // using it — has reduced cost >= threshold.
+    //   through(i, t) = F(t) + A_i + B_i t + g(t + p_i)
+    // F(t): cheapest prefix from a source to slot t; g: cheapest completion.
+    std::vector<std::pair<int, int>> fixable(
+            const std::vector<double>& A, const std::vector<double>& B,
+            const std::vector<std::pair<int, double>>& sources, double threshold) const {
+        if ((int)A.size() != n_ || (int)B.size() != n_)
+            throw std::invalid_argument("dual vector length != n");
+        const double INF = std::numeric_limits<double>::infinity();
+        std::vector<double> g(H_ + 1, 0.0), F(H_ + 1, INF);
+        for (int t = H_ - 1; t >= 0; --t) {
+            double v = g[t + 1];
+            for (int i : at_[t]) v = std::min(v, A[i] + B[i] * t + g[t + p_[i]]);
+            g[t] = v;
+        }
+        for (auto [r, c] : sources) {
+            int s = std::min(std::max(r, 0), H_);
+            F[s] = std::min(F[s], c);
+        }
+        for (int t = 0; t < H_; ++t) {
+            if (F[t] == INF) continue;
+            F[t + 1] = std::min(F[t + 1], F[t]);
+            for (int i : at_[t]) {
+                int t2 = t + p_[i];
+                F[t2] = std::min(F[t2], F[t] + A[i] + B[i] * t);
+            }
+        }
+        std::vector<std::pair<int, int>> out;
+        for (int t = 0; t < H_; ++t)
+            for (int i : at_[t]) {
+                double through = F[t] + A[i] + B[i] * t + g[t + p_[i]];
+                if (through >= threshold) out.emplace_back(i, t);
+            }
+        return out;
+    }
+
 private:
-    int H_, n_, nw_;
+    int H_, n_, nw_, nc_ = 0;
     double first_ = 0.0;
+    std::vector<u64> inS_, inM_;   // per job: cuts whose S / M contain it
+    std::vector<double> ccost_;
     std::vector<int> p_;
     std::vector<std::vector<int>> at_;   // at_[t]: local jobs startable at t
     std::vector<u64> keep_, differ_, retain_, toggle_;
@@ -141,22 +209,33 @@ private:
     struct Arena {
         std::vector<double> cost;
         std::vector<int> pred, job, start;
-        std::vector<u64> pend, mask;
+        std::vector<u64> pend, mask, cs;
         std::vector<char> alive;
         double first = 0.0;   // paid by an empty (source) label's first arc
-        int add(double c, int pr, int j, int s, u64 pd, const u64* m) {
+        const double* ccost = nullptr;
+        int add(double c, int pr, int j, int s, u64 pd, u64 cst, const u64* m) {
             cost.push_back(c), pred.push_back(pr), job.push_back(j), start.push_back(s);
-            pend.push_back(pd), alive.push_back(1);
+            pend.push_back(pd), cs.push_back(cst), alive.push_back(1);
             mask.insert(mask.end(), m, m + NW);
             return (int)cost.size() - 1;
         }
         const u64* m(int id) const { return &mask[(size_t)id * NW]; }
-        // a dominates b: cost <=, mask(a) subset of mask(b), same pending
-        // parity. An empty label still owes `first` on its first arc, so it
-        // competes at cost + first against non-empty labels.
+        void pop() {
+            cost.pop_back(), pred.pop_back(), job.pop_back(), start.pop_back();
+            pend.pop_back(), cs.pop_back(), alive.pop_back();
+            mask.resize(mask.size() - NW);
+        }
+        // a dominates b: cost <= (plus the cuts a may still pay and b not),
+        // mask(a) subset of mask(b), same pending parity. An empty label
+        // still owes `first` on its first arc, so it competes at cost +
+        // first against non-empty labels.
         bool dom(int a, int b) const {
             double ca = cost[a] + (job[a] < 0 && job[b] >= 0 ? first : 0.0);
             if (ca > cost[b] + EPS || pend[a] != pend[b]) return false;
+            for (u64 x = cs[a] & ~cs[b]; x; x &= x - 1) {
+                ca += ccost[__builtin_ctzll(x)];
+                if (ca > cost[b] + EPS) return false;
+            }
             const u64 *ma = m(a), *mb = m(b);
             for (int w = 0; w < NW; ++w)
                 if (ma[w] & ~mb[w]) return false;
@@ -180,6 +259,7 @@ private:
 
         Arena<NW> L;
         L.first = first_;
+        L.ccost = ccost_.data();
         std::vector<std::vector<int>> bucket(H_ + 1);
         std::vector<int> active, cand;
         double pruned_min = INF;     // lower bound over everything not enumerated
@@ -188,17 +268,14 @@ private:
         u64 zero[NW] = {0};
         u64 nm[NW];
 
-        auto insert = [&](int t2, double c, int pr, int j, int s, u64 pd, const u64* m) {
+        auto insert = [&](int t2, double c, int pr, int j, int s, u64 pd, u64 cst, const u64* m) {
             // dominance within the arrivals of slot t2
             auto& bk = bucket[t2];
-            int id = L.add(c, pr, j, s, pd, m);
+            int id = L.add(c, pr, j, s, pd, cst, m);
             for (size_t k = 0; k < bk.size();) {
                 int o = bk[k];
                 if (L.dom(o, id)) {
-                    L.alive[id] = 0;
-                    L.cost.pop_back(), L.pred.pop_back(), L.job.pop_back();
-                    L.start.pop_back(), L.pend.pop_back(), L.alive.pop_back();
-                    L.mask.resize(L.mask.size() - NW);
+                    L.pop();
                     return;
                 }
                 if (L.dom(id, o)) {
@@ -212,7 +289,7 @@ private:
             bk.push_back(id);
         };
 
-        for (auto [r, c] : sources) insert(std::min(std::max(r, 0), H_), c, -1, -1, r, 0, zero);
+        for (auto [r, c] : sources) insert(std::min(std::max(r, 0), H_), c, -1, -1, r, 0, 0, zero);
 
         for (int t = 0; t <= H_; ++t) {
             // merge this slot's arrivals into the active set
@@ -257,6 +334,7 @@ private:
                 const double arc = A[i] + B[i] * t;
                 const u64* ret = &retain_[(size_t)i * NW];
                 const u64* dif = &differ_[(size_t)i * NW];
+                const u64 cS = inS_[i], cM = inM_[i];
                 for (size_t k = 0; k < active.size(); ++k) {
                     int a = active[k];
                     const u64* ma = L.m(a);
@@ -266,6 +344,9 @@ private:
                         if (ma[w] & dif[w]) { clash = true; break; }
                     if (clash) continue;
                     double c = L.cost[a] + arc + (L.job[a] < 0 ? first_ : 0.0);
+                    u64 st = L.cs[a] & cM;
+                    for (u64 x = st & cS; x; x &= x - 1) c += ccost_[__builtin_ctzll(x)];
+                    st ^= cS;
                     double lb = c + g[t2];
                     if (lb >= thr) {
                         pruned_min = std::min(pruned_min, lb);
@@ -274,7 +355,7 @@ private:
                     if ((long long)L.cost.size() >= max_labels) { exact = false; break; }
                     for (int w = 0; w < NW; ++w) nm[w] = ma[w] & ret[w];
                     set_bit(nm, i);
-                    insert(t2, c, a, i, t, L.pend[a] ^ toggle_[i], nm);
+                    insert(t2, c, a, i, t, L.pend[a] ^ toggle_[i], st, nm);
                 }
                 if (!exact) break;
             }
@@ -317,9 +398,13 @@ PYBIND11_MODULE(_bpcprice, mod) {
              py::arg("differ") = std::vector<std::pair<int, int>>{},
              py::arg("same") = std::vector<std::pair<int, int>>{})
         .def("set_memory", &Pricer::set_memory, py::arg("ng"))
+        .def("set_cuts", &Pricer::set_cuts, py::arg("cuts"))
         .def("price", &Pricer::price, py::arg("A"), py::arg("B"), py::arg("sources"),
              py::arg("max_cols") = 10, py::arg("tol") = 1e-6,
              py::arg("max_labels") = 2000000LL, py::arg("first_cost") = 0.0,
+             py::arg("cut_cost") = std::vector<double>{},
              py::call_guard<py::gil_scoped_release>())
+        .def("fixable", &Pricer::fixable, py::arg("A"), py::arg("B"), py::arg("sources"),
+             py::arg("threshold"), py::call_guard<py::gil_scoped_release>())
         .def_property_readonly("n_jobs", &Pricer::n_jobs);
 }

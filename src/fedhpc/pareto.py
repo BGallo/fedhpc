@@ -189,13 +189,20 @@ def _make_engine_lexmin_bounded(
     ``engine="bpc"`` runs the exact branch-and-price engine in
     ``fedhpc.bpc``, with ``per_solve_time_limit`` capping each of its
     phases; it ignores ``formulation``/``n_seed_retries``/``params``
-    (Gurobi-solve-specific knobs with no BPC equivalent).
+    (Gurobi-solve-specific knobs with no BPC equivalent). ``engine=
+    "lpfirst"`` (``fedhpc.lpfirst``: column generation on the time-indexed
+    LP, optimality proven by bound and reduced-cost enumeration) takes the
+    same arguments; it suits large instances with tiny LP gaps and no
+    fixed activation costs.
     """
     if engine == "bpc":
         from . import bpc
         return bpc.make_bpc_lexmin_bounded(inst, time_limit=per_solve_time_limit)
+    if engine == "lpfirst":
+        from . import lpfirst
+        return lpfirst.make_lpfirst_lexmin_bounded(inst, time_limit=per_solve_time_limit)
     if engine != "gurobi":
-        raise ValueError(f"unknown engine {engine!r} (expected 'gurobi' or 'bpc')")
+        raise ValueError(f"unknown engine {engine!r} (expected 'gurobi', 'bpc' or 'lpfirst')")
     fmt = formulation or SpaceTimeFormulation()
     return _make_lexmin_bounded(inst, fmt, params, per_solve_time_limit, n_seed_retries)
 
@@ -447,7 +454,8 @@ def true_pareto_frontier(
     """Enumerate the complete true Pareto front via exact box (rectangle) splitting.
 
     ``engine`` — ``"gurobi"`` (default, the compact ``SpaceTimeFormulation``
-    MIP) or ``"bpc"`` (the exact branch-and-price engine in ``fedhpc.bpc``).
+    MIP), ``"bpc"`` (the exact branch-and-price engine in ``fedhpc.bpc``) or
+    ``"lpfirst"`` (``fedhpc.lpfirst``, for large near-integral instances).
     Selecting ``"bpc"`` changes nothing about this function's algorithm —
     see ``_make_engine_lexmin_bounded`` — only which engine resolves each
     box's lex-min-bounded sub-solve. BPC currently has no equivalent of
