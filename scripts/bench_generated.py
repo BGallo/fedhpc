@@ -43,7 +43,9 @@ def _g(lam, f1, f2, ref):
     return lam * (f1 - f1_T) / (f1_0 - f1_T) + (1 - lam) * f2 / f2_T
 
 
-def run_one(name: str, threads: int, time_limit: float, reductions: bool = True) -> dict:
+def run_one(name: str, threads: int, time_limit: float, reductions: bool = True,
+            phase2_presolve: int | None = None, dispatch: bool = True,
+            lex_only: bool = False, ref_rec: dict | None = None) -> dict:
     from fedhpc import baselines
     from fedhpc import instance_gen as g
     from fedhpc.data import Instance
@@ -59,20 +61,29 @@ def run_one(name: str, threads: int, time_limit: float, reductions: bool = True)
     inst = Instance.from_file(path) if path.exists() else g.build(name)
     spec = g.InstanceSpec.parse(name)
     grb = dict(OutputFlag=0, Threads=threads, TimeLimit=time_limit, MIPGap=0)
+    # lex phase 2 only: its dense primary-fix row can stall presolve past TimeLimit
+    p2 = None if phase2_presolve is None else dict(Presolve=phase2_presolve)
     rec = dict(name=name, cls=spec.cls, workload=spec.workload, count=spec.count,
                load=spec.load, io=spec.io, n_jobs=len(inst.jobs),
                io_gb=sum(j.io_volume for j in inst.jobs),
                n_running=sum(inst.n_running.values()),
                onprem_nodes=spec.count * len(g.onprem_types(spec.cls, spec.workload)),
-               reductions=reductions)
+               reductions=reductions, phase2_presolve=phase2_presolve)
 
-    t = time.perf_counter(); s1 = solve_f1(inst, formulation=fmt, **grb)
-    rec["lex_f1"] = dict(status=s1.status, f1=s1.f1, f2=s1.f2, t=time.perf_counter() - t)
-    t = time.perf_counter(); s2 = solve_f2(inst, formulation=fmt, hint=None, **grb)
-    rec["lex_f2"] = dict(status=s2.status, f1=s2.f1, f2=s2.f2, t=time.perf_counter() - t)
-    for s in (s1, s2):
-        inst.check_schedule(s.assignment)
-    ref = (s1.f1, s1.f2, s2.f1)
+    if ref_rec is not None:  # anchors from an earlier lex-only pass
+        rec["lex_f1"], rec["lex_f2"] = ref_rec["lex_f1"], ref_rec["lex_f2"]
+        rec["lex_from"] = "ref_rec"
+    else:
+        t = time.perf_counter(); s1 = solve_f1(inst, formulation=fmt, phase2_params=p2, **grb)
+        rec["lex_f1"] = dict(status=s1.status, f1=s1.f1, f2=s1.f2, t=time.perf_counter() - t)
+        t = time.perf_counter(); s2 = solve_f2(inst, formulation=fmt, hint=None, phase2_params=p2, **grb)
+        rec["lex_f2"] = dict(status=s2.status, f1=s2.f1, f2=s2.f2, t=time.perf_counter() - t)
+        for s in (s1, s2):
+            inst.check_schedule(s.assignment)
+        if lex_only:
+            return rec
+    ref = (rec["lex_f1"]["f1"], rec["lex_f1"]["f2"], rec["lex_f2"]["f1"])
+    f2_0 = rec["lex_f2"]["f2"]
 
     base = {}
     t = time.perf_counter(); b = baselines.greedy_earliest_completion(inst)
@@ -92,16 +103,19 @@ def run_one(name: str, threads: int, time_limit: float, reductions: bool = True)
     for lam in LAMS:
         r = {}
         t = time.perf_counter()
-        sw = solve_weighted_sum(inst, lam, *ref, formulation=fmt, f2_0=s2.f2, **grb)
+        sw = solve_weighted_sum(inst, lam, *ref, formulation=fmt, f2_0=f2_0, **grb)
         r["gurobi"] = dict(status=sw.status, f1=sw.f1, f2=sw.f2, g=_g(lam, sw.f1, sw.f2, ref),
                            t=time.perf_counter() - t)
         inst.check_schedule(sw.assignment)
-        t = time.perf_counter()
-        hd = weighted_solve_dispatch(inst, lam, f1_T=ref[0], f2_T=ref[1], f1_0=ref[2],
-                                     n_threads=threads)
-        r["dispatch"] = dict(f1=hd.f1, f2=hd.f2, g=_g(lam, hd.f1, hd.f2, ref),
-                             t=time.perf_counter() - t)
-        inst.check_schedule(hd.assignment)
+        if dispatch:
+            t = time.perf_counter()
+            hd = weighted_solve_dispatch(inst, lam, f1_T=ref[0], f2_T=ref[1], f1_0=ref[2],
+                                         n_threads=threads)
+            r["dispatch"] = dict(f1=hd.f1, f2=hd.f2, g=_g(lam, hd.f1, hd.f2, ref),
+                                 t=time.perf_counter() - t)
+            inst.check_schedule(hd.assignment)
+        else:
+            r["dispatch"] = None
         best = min(sweep, key=lambda p: _g(lam, p["f1"], p["f2"], ref))
         r["threshold"] = dict(theta=best["theta"], f1=best["f1"], f2=best["f2"],
                               g=_g(lam, best["f1"], best["f2"], ref), t=base["threshold"]["t"])
@@ -118,6 +132,13 @@ def main() -> None:
     ap.add_argument("--time-limit", type=float, default=600)
     ap.add_argument("--no-reductions", action="store_true",
                     help="plain SpaceTime models (no R1/R2/R3/lex reductions)")
+    ap.add_argument("--phase2-presolve", type=int, default=None,
+                    help="Gurobi Presolve for phase 2 of the lex solves only (e.g. 0)")
+    ap.add_argument("--lex-only", action="store_true", help="only the two lex anchors")
+    ap.add_argument("--ref-from", type=Path, default=None,
+                    help="jsonl whose lex_f1/lex_f2 are reused (no lex solve)")
+    ap.add_argument("--no-dispatch", action="store_true",
+                    help="skip weighted_solve_dispatch (lams[λ].dispatch = None)")
     ap.add_argument("--out", type=Path, default=None,
                     help="default results/generated_bench/bench[_noreduc].jsonl")
     args = ap.parse_args()
@@ -136,7 +157,11 @@ def main() -> None:
     todo.sort(key=lambda n: (("pos" not in n), not n.startswith("B"), n))
     print(f"{len(todo)} to run ({len(done)} already in {args.out.name})", flush=True)
     with ProcessPoolExecutor(args.workers) as ex, open(args.out, "a") as f:
-        futs = {ex.submit(run_one, n, args.threads, args.time_limit, not args.no_reductions): n for n in todo}
+        refs = {} if args.ref_from is None else {
+            (r := json.loads(l))["name"]: r for l in args.ref_from.read_text().splitlines() if l.strip()}
+        futs = {ex.submit(run_one, n, args.threads, args.time_limit, not args.no_reductions,
+                          args.phase2_presolve, not args.no_dispatch, args.lex_only,
+                          refs[n] if args.ref_from else None): n for n in todo}
         for k, fut in enumerate(as_completed(futs), 1):
             n = futs[fut]
             try:
@@ -145,8 +170,8 @@ def main() -> None:
                 print(f"[{k}/{len(todo)}] {n} FAILED {type(e).__name__}: {e}", flush=True)
                 continue
             f.write(json.dumps(rec) + "\n"); f.flush()
-            ts = rec["lex_f1"]["t"] + rec["lex_f2"]["t"] + sum(
-                r["gurobi"]["t"] for r in rec["lams"].values())
+            ts = (0 if rec.get("lex_from") else rec["lex_f1"]["t"] + rec["lex_f2"]["t"]) + sum(
+                r["gurobi"]["t"] for r in rec.get("lams", {}).values())
             print(f"[{k}/{len(todo)}] {n} gurobi {ts:.0f}s", flush=True)
 
 

@@ -1,9 +1,11 @@
 % !TeX program = xelatex
 %
 % The Memetic Weighted-Sum Solver — FED-HPC
-% A Metropolis-themed Beamer deck describing the memetic metaheuristic that
-% minimises the weighted-sum scalarisation of the FED-HPC bi-objective
-% scheduling problem (src/fedhpc/_ext/weighted.hpp).
+% A Metropolis-themed Beamer deck describing the memetic metaheuristics that
+% minimise the weighted-sum scalarisation of the FED-HPC bi-objective
+% scheduling problem: the slot-genome GA (src/fedhpc/_ext/weighted.hpp,
+% moea.weighted_solve) and its port onto the dispatch decoder
+% (src/fedhpc/_ext/weighted_memetic.hpp, moea.weighted_solve_memetic).
 %
 % Compile with:  latexmk -xelatex memetic_weighted_sum_solver.tex
 % (or)           xelatex memetic_weighted_sum_solver.tex   (run twice)
@@ -58,23 +60,24 @@
     \item FED-HPC schedules jobs onto resource \alert{types} (on-prem pools, cloud
       instance classes) at \alert{start times}, trading off two objectives:
     \begin{itemize}
-      \item $f_1$ --- total turnaround: $\sum_j (\text{completion}_j - \text{arrival}_j)$
-      \item $f_2$ --- monetary cost: $\sum_j c_{j,m}$
+      \item $f_1$ --- weighted turnaround: $\sum_j w_j\,(C_j - a_j)$, where
+        $w_j$ is job $j$'s importance (given by the instance, default 1)
+      \item $f_2$ --- monetary cost: $\sum_j c_{j,m}$ (on-demand cloud only)
     \end{itemize}
     \item The weighted-sum method collapses these into a single scalar,
-      normalised by three reference points (fedhpc.pdf, eq.~34/38):
+      normalised by the reference points (\code{model.weighted\_sum\_terms}):
   \end{itemize}
   \begin{block}{Reference-point weighted sum}
     \[
-      \min_x \;\; \frac{\lambda}{f_1^{0} - f_1^{T}}\, f_1(x)
-                \;+\; \frac{1-\lambda}{f_2^{T}}\, f_2(x)
+      \min_x \;\; \lambda\,\frac{f_1(x) - f_1^{T}}{f_1^{0} - f_1^{T}}
+                \;+\; (1-\lambda)\,\frac{f_2(x) - f_2^{0}}{f_2^{T} - f_2^{0}}
       \qquad \text{s.t.} \quad f_1(x) \le f_1^{0}
     \]
   \end{block}
   \begin{itemize}
-    \item $f_1^{T}$: lexicographic minimum turnaround \quad
-          $f_2^{T}$: minimum cost at that turnaround \quad
-          $f_1^{0}$: minimum turnaround at zero cost
+    \item $f_1^{T}$: lex-min turnaround \quad $f_2^{T}$: min cost at that
+          turnaround \quad $(f_1^{0}, f_2^{0})$: lex-min $(f_2, f_1)$ point
+          ($f_2^{0}{=}0$ if a free schedule exists)
     \item $\lambda \in [0,1]$ is the trade-off knob; $\lambda{=}1$ is pure turnaround
   \end{itemize}
 \end{frame}
@@ -82,8 +85,8 @@
 \begin{frame}{The metaheuristic's fitness}
   \begin{itemize}
     \item The wrapper converts $\lambda$ into internal weights
-      $w_1 = \lambda/(f_1^{0}{-}f_1^{T})$, $w_2 = (1{-}\lambda)/f_2^{T}$, and a soft
-      cap $f_1^{\text{cap}} = f_1^{0}$.
+      $w_1 = \lambda/(f_1^{0}{-}f_1^{T})$, $w_2 = (1{-}\lambda)/(f_2^{T}{-}f_2^{0})$,
+      soft cap $f_1^{\text{cap}} = f_1^{0}$ (constant offset dropped)
     \item The solver then minimises a \alert{penalised scalar fitness} \g:
   \end{itemize}
   \begin{block}{$G(x)$ --- \code{struct WeightedScalar}}
@@ -94,8 +97,9 @@
     \]
   \end{block}
   \begin{itemize}
-    \item $p_{\text{cap}} = 10^{3}\max(w_1, w_2)$ --- soft Pareto-region penalty
-    \item $cv(x)$ --- aggregate capacity / budget violation
+    \item $p_{\text{cap}} = 10^{3}\,w_1$ ($10^{3}\,w_2$ when $w_1{=}0$) --- soft
+      Pareto-region penalty
+    \item $cv(x)$ --- aggregate on-prem capacity violation (no budget constraint)
     \item Feasibility is lexicographically dominant, but infeasible individuals
       stay \emph{ordered} by violation --- selection always has a gradient
   \end{itemize}
@@ -334,9 +338,9 @@
       \small
       \textbf{Randomised remainder} (\code{make\_random}):
       \begin{itemize}
-        \item each gene drawn from a cost/risk-biased distribution over the
+        \item each gene drawn from a cost-biased distribution over the
           job's slots
-        \item cheaper, lower-risk slots weighted higher (worst slot keeps
+        \item cheaper slots weighted higher (worst slot keeps
           20\% of the best slot's weight)
         \item degenerates to uniform when there is no cost signal
       \end{itemize}
@@ -497,15 +501,20 @@
     \code{shortlist}         & candidates decoded exactly per LS step            & 24 \\
     \code{restart\_patience} & non-improving gens.\ before an ILS kick           & 6 \\
     \code{xover\_mode}       & recombination operator                            & 2 (MSXF) \\
-    \code{decode\_order}     & 0 = SPT only, 1 = + Extract-from-Preempt          & \textbf{1} \\
+    \code{decode\_order}     & 0 = SPT only, 1 = + Extract-from-Preempt, 2 = + WSPT (Smith rule) & \textbf{1} \\
+    \code{mut\_mode}         & 0 = uniform resample, 1 = scalar-directed         & 0 \\
+    \code{ls\_mode}          & 0 = type flip, 1 = on-prem/cloud split flip (one candidate per job, half est-ranked, half random) & 0 \\
+    \code{fbi\_passes}       & forward--backward improvement (double justification) passes & 0 \\
+    \code{lp\_seed}          & extra seeds from the rounded LP relaxation of the MIP (Gurobi) & off \\
     $p_{\text{mut}}$         & per-gene mutation probability                     & $2/n_{\text{jobs}}$ \\
     \bottomrule
   \end{tabular}
   \end{center}
   \vspace{1mm}
-  \scriptsize Deterministic --- bit-for-bit stable for a fixed \code{(seed,
-  n\_threads)}: per-thread RNGs are seeded from the master RNG before every
-  parallel region.
+  \scriptsize Defaults of \code{moea.weighted\_solve}; the raw \code{\_ext.weighted}
+  binding still defaults \code{xover\_mode} and \code{decode\_order} to 0.
+  Deterministic --- bit-for-bit stable for a fixed \code{(seed, n\_threads)}:
+  per-thread RNGs are seeded from the master RNG before every parallel region.
 \end{frame}
 
 \begin{frame}{What kind of algorithm is this?}
@@ -566,6 +575,277 @@
 \end{frame}
 
 % =====================================================================
+\section{The dispatch memetic}
+% =====================================================================
+
+\begin{frame}{Same GA, different representation \hfill{\small\code{weighted\_memetic.hpp}}}
+  \begin{itemize}
+    \item The slot genome wastes its search on \alert{pool$\leftrightarrow$pool
+      plateaus}: on the 10-min instances every on-prem type is equivalent per
+      job (same $p_{\text{occ}}$, cost~0)
+    \item \code{weighted\_solve\_memetic} keeps the control flow of
+      \code{run\_weighted} (seeds, tournament, MSXF, mutation, capped LS,
+      elitism, ILS kicks) and swaps the three problem-specific parts:
+  \end{itemize}
+  \begin{center}
+  \footnotesize
+  \begin{tabular}{@{}p{1.6cm}p{4.6cm}p{6.6cm}@{}}
+    \toprule
+    & \textbf{slot GA} (\code{weighted.hpp}) & \textbf{dispatch memetic} \\
+    \midrule
+    genome  & slot index per job & $0$ = auto, $1$ = cloud, $2$ = on-prem \\
+    decoder & SPT repair + SRPT re-decode & time-driven non-delay dispatch: waiting
+              jobs in priority order start on any free pool; \emph{auto} jobs
+              are offloaded once waiting longer scores worse than cloud
+              (deadline rule) \\
+    LS      & type-flip hill climb & \code{dispatch\_ls}: single on-prem/cloud
+              flips, fast \code{DEngine} decode \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+\end{frame}
+
+\begin{frame}{Dispatch priorities \& self-adaptive settings}
+  \begin{itemize}
+    \item Priority $v_j = (w_1 w_j + \mu\,\text{regret}_j)/p_j$, highest first
+      ($\mu{=}0$ is WSPT; larger $\mu$ favours jobs whose cloud option is dear;
+      $\text{regret}_j$ is defined in ``EDF, step 2'')
+    \item \alert{EDF} (\code{flags} 4096): an alternative priority, earliest
+      \emph{indifference deadline} first --- explained in the next three slides
+    \item \code{adapt} bits make decoder settings \emph{per individual}:
+      spread over the initial population, inherited by crossover (MSXF treats
+      ``adopt the other parent's settings'' as one more step), mutated ---
+      1 = $\mu$-grid index, 2 = deadline offload on/off, 4 = dispatch /
+      serial-SGS decoder, 8 = LS also tries neighbouring settings
+    \item LS decodes with the fast \code{DEngine}; scores are re-summed in job
+      order (\code{canon}) so fast and reference decoders follow
+      bit-identical trajectories
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{EDF, step 1 --- what one job adds to the objective}
+  \begin{itemize}
+    \item The solver minimises one number,
+      $g = w_1 f_1 + w_2 f_2$ (plus penalties; slide ``The metaheuristic's
+      fitness''). Two kinds of weight appear --- do not confuse them:
+  \end{itemize}
+  \begin{center}
+  \footnotesize
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    symbol & meaning & set by \\
+    \midrule
+    $w_1$ & price of one unit of weighted turnaround in $g$
+          ($=\lambda/(f_1^0{-}f_1^T)$) & $\lambda$ + reference points \\
+    $w_2$ & price of one unit of money in $g$
+          ($=(1{-}\lambda)/(f_2^T{-}f_2^0)$) & $\lambda$ + reference points \\
+    $w_j$ & importance of job $j$ inside $f_1$ & the instance \\
+    $a_j$, $r_j$ & arrival of $j$; earliest time it can start on-prem & the instance \\
+    $p_j$, $c_j$ & runtime and money cost of $j$ on a given machine type & the instance \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+  \begin{itemize}
+    \item $g$ is a sum over jobs, so each job has its \alert{own score}:
+      $\;g_j = w_1\, w_j\,(C_j - a_j) + w_2\, c_j$
+    \item \textbf{On-prem}, started at time $s$: \quad
+      $g^{\text{on}}_j(s) = w_1 w_j\,(s + p_j - a_j) + w_2\, c^{\text{on}}_j$
+      \quad --- every unit of waiting adds $w_1 w_j$
+    \item \textbf{Cloud}: starts at once (cloud capacity is unlimited), so its
+      score $g^{\text{cl}}_j$ is a \emph{constant}, known before scheduling
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{EDF, step 2 --- the indifference deadline}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.54\textwidth}
+      \begin{itemize}
+        \item $\text{regret}_j = g^{\text{cl}}_j - g^{\text{on}}_j(r_j)$: how
+          much \emph{worse} cloud is than on-prem started as early as possible
+        \item Each unit of waiting costs $w_1 w_j$. Once the regret is used
+          up, both options score the same: that start time is the
+          \alert{indifference deadline} $d_j$. Later, cloud is better and the
+          decoder offloads the job
+        \item \textbf{EDF} (\emph{Earliest Deadline First}): when a pool has
+          room, start the waiting job with the smallest $d_j$ --- the one
+          closest to being better off in the cloud
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.44\textwidth}
+      \centering
+      \begin{tikzpicture}[x=0.62cm, y=0.55cm, font=\scriptsize]
+        \draw[-{Stealth[length=1.8mm]}] (0,0) -- (6.3,0) node[below left]{start $s$};
+        \draw[-{Stealth[length=1.8mm]}] (0,0) -- (0,4.6) node[left]{$g_j$};
+        \draw[mDarkTeal, very thick] (0.8,1.0) -- (5.6,4.2)
+          node[above, align=center]{on-prem $g^{\text{on}}_j(s)$\\[-1mm]slope $w_1 w_j$};
+        \draw[mLightBrown, very thick] (0.8,2.6) -- (6.0,2.6);
+        \node[mLightBrown, above right, inner sep=1pt] at (0.8,2.6) {cloud $g^{\text{cl}}_j$};
+        \draw[dashed] (3.2,2.6) -- (3.2,0) node[below]{$d_j$};
+        \draw[dashed] (0.8,1.0) -- (0.8,0) node[below]{$r_j$};
+        \draw[{Stealth[length=1.5mm]}-{Stealth[length=1.5mm]}] (0.55,1.0) -- (0.55,2.6)
+          node[midway, left]{regret$_j$};
+        \fill (3.2,2.6) circle (1.3pt);
+        \node[mDarkTeal, align=center] at (2.0,4.1) {on-prem\\[-1mm]better};
+        \node[mLightBrown, align=center] at (4.8,1.0) {cloud\\[-1mm]better};
+      \end{tikzpicture}
+      \[
+        d_j = \min\Big(\ell_j,\; r_j + \frac{\max(\text{regret}_j, 0)}{w_1 w_j}\Big)
+      \]
+      \scriptsize $\ell_j$: latest on-prem start; it is the deadline
+      when $j$ has no cloud option or $w_1{=}0$.
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{EDF, step 3 --- a worked example}
+  \textbf{One job $j$}: $w_1 = 1$, weight $w_j = 2$, arrives at $a_j = r_j = 0$,
+  runs $p_j = 3$ on both sides; on-prem is free, the cloud run's money
+  adds $w_2 c = 8$ to $g$.
+  \begin{center}
+  \footnotesize
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    & formula & value \\
+    \midrule
+    cloud score         & $w_1 w_j\,p_j + w_2 c = 1\cdot2\cdot3 + 8$ & $g^{\text{cl}}_j = 14$ \\
+    on-prem, start $s$  & $w_1 w_j\,(s + p_j - a_j) = 2(s + 3)$        & $g^{\text{on}}_j(0) = 6$ \\
+    regret              & $14 - 6$                                     & $8$ \\
+    deadline            & $r_j + \text{regret}/(w_1 w_j) = 0 + 8/2$    & $d_j = \mathbf{4}$ \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+  \begin{itemize}
+    \item On-prem start $s=2$: $2\cdot5 = 10 < 14$, on-prem better;
+      \; $s=4$: $2\cdot7 = 14$, tie ($=d_j$);
+      \; $s=6$: $2\cdot9 = 18 > 14$, cloud better
+    \item So if $j$ is still waiting at $t = 4$, the decoder offloads it
+    \item A heavier job ($w_j$ larger) or a cheaper cloud (regret smaller)
+      gets an \alert{earlier} deadline, so EDF starts it sooner
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Why EDF: WSPT starves long jobs into the cloud}
+  \begin{itemize}
+    \item The decoder offloads a waiting \emph{auto} job once it passes $d_j$.
+      Under \textbf{WSPT/$\mu$} order on congested pos instances, long
+      low-priority jobs wait past their deadlines and are offloaded one by one
+    \item Each offload is locally rational; together they cost
+      \alert{20$\times$} the optimum's cost term (0.277 vs 0.014,
+      A\_pos\_n300\_lH, $\lambda{=}0.25$). A gene flip to on-prem keeps the
+      order, so the job just waits longer
+    \item EDF serves each job \emph{before} cloud becomes cheaper; $d_j$
+      tracks the optimum's on-prem start (Spearman $\rho = 0.6$--$0.9$).
+      Median gap at $\lambda{=}0.25$: \textbf{30\,\% $\to$ 9\,\%}
+    \item \textbf{How the solvers use it:} as an \emph{extra} priority, since
+      EDF loses at $\lambda{=}0.75$ where the optimum offloads most jobs; in
+      the GA it is one more value of the evolved priority index ($\mu=-2$).
+      With \code{flags} 8192, EDF individuals skip the deadline offload (late
+      jobs wait on-prem); keeping the offload raises GA-mid's gap 4.5 $\to$
+      5.5\,\%
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Why EDF needs converged seeds}
+  \begin{alertblock}{The first EDF port still lost to the ILS (2026-11-04)}
+    The LS is capped at 4--8 moves per individual. From all-auto, the EDF
+    start needs \textbf{166--1634} moves; the $\mu$ start needs 3--46. After
+    the initial LS, EDF individuals sit at 60--128\,\% gap and selection
+    removes them by generation 0--1.
+  \end{alertblock}
+  \begin{itemize}
+    \item The ILS does not suffer: each of its starts gets a full LS and its
+      own kicks before being compared
+    \item Fixes, as \code{adapt} bits:
+    \begin{itemize}
+      \item \textbf{16} --- all-auto seed individuals, LS run to a local
+        optimum (K~64 / K\textsubscript{max}~256)
+      \item \textbf{128} --- with 16, seed only the ILS's two starts (best
+        $\mu$ by all-auto decode, EDF)
+      \item \textbf{64} --- niche elitism: each priority's best survives
+        every generation
+      \item 32 --- final polish to a local optimum (not used)
+    \end{itemize}
+    \item The GA then starts from the ILS's converged starts and
+      recombination improves on them
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Tuning \& ablation}
+  \begin{columns}[T,onlytextwidth]
+    \begin{column}{0.46\textwidth}
+      \small
+      \textbf{Tuned arms} --- all \code{flags=12352}, \code{adapt=215},
+      \code{shortlist=48}:
+      \begin{center}
+      \footnotesize
+      \begin{tabular}{lcc}
+        \toprule
+        arm & \code{pop\_size} & \code{n\_gen} \\
+        \midrule
+        GA-fast    & 16 & 60 \\
+        GA-mid     & 16 & 120 \\
+        GA-quality & 32 & 120 \\
+        \bottomrule
+      \end{tabular}
+      \end{center}
+      \scriptsize Tuned on 22 instances (66 cells); MSXF beat two-point and no
+      crossover; \code{restart\_patience} made no difference.
+
+      \vspace{1mm}
+      \alert{Opt-in:} \code{weighted\_solve\_memetic} still defaults to
+      \code{flags=64}, \code{adapt=7}, \code{shortlist=24}, pop~32 / 60~gen.
+    \end{column}
+    \begin{column}{0.52\textwidth}
+      \small
+      \textbf{Ablation of GA-mid} (base 4.5\,\% mean):
+      \begin{center}
+      \footnotesize
+      \begin{tabular}{lcl}
+        \toprule
+        removed & mean & verdict \\
+        \midrule
+        EDF priority          & 9.5 & essential \\
+        converged seeds       & 7.1 & essential \\
+        crossover             & 6.2 & essential \\
+        no-deadline EDF       & 5.5 & matters \\
+        mutation              & 4.8 & small help \\
+        niche elitism         & 4.3 & slightly harmful \\
+        kick, polish, dl/dec bits & 4.2--4.5 & neutral \\
+        \bottomrule
+      \end{tabular}
+      \end{center}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Dispatch memetic vs ILS}
+  \begin{center}
+  \footnotesize
+  \begin{tabular}{lcccc}
+    \toprule
+    arm & mean gap (\%) & median (\%) & time / seed (s) & median $t$ / cell (s) \\
+    \midrule
+    ILS (\code{weighted\_solve\_dispatch}) & 6.87 & 3.60 & 652  & 2.2 \\
+    ILS-long                               & 6.25 & 2.99 & 1302 & 5.6 \\
+    GA-fast                                & 6.24 & 2.44 & 845  & 3.9 \\
+    GA-mid                                 & 5.66 & 1.92 & 1307 & 6.3 \\
+    \textbf{GA-quality}                    & \textbf{5.09} & \textbf{1.30} & 3330 & 15.8 \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+  \scriptsize 195 held-out test cells (65 generated instances $\times$
+  $\lambda \in \{0.25, 0.5, 0.75\}$) $\times$ seeds 42/1/7; gap to the bench
+  Gurobi $g^*$.
+  \small
+  \begin{itemize}
+    \item GA-fast ties ILS-long in 65\,\% of the time; GA-mid beats it at equal
+      time ($-0.59$\,pp, $p = 4\cdot10^{-5}$)
+    \item The \alert{ILS wins below $\sim$2--3\,s per cell}: the GA has no
+      incumbent until its converged seeds finish ($\sim$1--2\,s)
+  \end{itemize}
+\end{frame}
+
+% =====================================================================
 \section{Summary}
 % =====================================================================
 
@@ -574,20 +854,23 @@
     \item An \alert{indirect-encoding memetic algorithm}: search the
       type-assignment space, \textbf{decode} start times with a
       capacity-aware list scheduler
-    \item \textbf{Two decoders}, cheaper kept: SPT (fast, near-optimal
-      without contention) and \textbf{Extract-from-Preempt} (release-date
-      aware, now default)
-    \item \textbf{Local search} does the intensification (Lamarckian
-      type-flip hill climbing); \textbf{MSXF} recombination is itself a
-      guided search between parents; \textbf{ILS kicks} escape stagnation
-    \item Deterministic, parallel, and validated against the exact Gurobi
-      MIP and an ablation of every component
+    \item \textbf{Two decoders}, lower $f_1$ kept: SPT and
+      \textbf{Extract-from-Preempt} (release-date aware, default)
+    \item \textbf{Local search} intensifies (Lamarckian type-flip hill
+      climbing); \textbf{MSXF} is a guided search between parents;
+      \textbf{ILS kicks} escape stagnation
+    \item The \textbf{dispatch memetic} runs the same GA on an
+      auto/cloud/on-prem genome and a dispatch decoder; with EDF and
+      converged seeds it beats the dispatch ILS from $\sim$3\,s per cell
+    \item Deterministic, parallel, validated against the exact Gurobi MIP
+      and by ablation
   \end{itemize}
-  \vspace{2mm}
   \begin{block}{Source}
-    \code{src/fedhpc/\_ext/\{ga\_common,weighted\}.hpp} $\cdot$ binding
-    \code{moea.cpp} $\cdot$ wrapper \code{fedhpc/moea.py} $\cdot$ exact
-    counterpart \code{model.solve\_weighted\_sum}
+    \scriptsize
+    \code{\_ext/\{ga\_common,weighted,weighted\_dispatch,weighted\_memetic\}.hpp}
+    $\cdot$ \code{moea.weighted\_solve\{,\_memetic\}} $\cdot$ exact:
+    \code{model.solve\_weighted\_sum} $\cdot$ study:
+    \code{results/generated\_bench/dispatch\_study/}
   \end{block}
 \end{frame}
 

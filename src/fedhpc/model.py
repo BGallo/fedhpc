@@ -192,6 +192,7 @@ def _solve(
     *,
     hint_objective=None,
     bounds: tuple[tuple[str, float, str], ...] = (),
+    phase2_params: dict | None = None,
 ) -> Solution:
     """Build a fresh model and minimise ``primary``; with ``secondary``, then
     fix primary at its optimum and minimise secondary (lex-min).
@@ -206,6 +207,12 @@ def _solve(
     is ``"optimal"`` only when every phase is certified (:func:`is_certified`);
     otherwise it is ``"feasible"``. A callable primary keeps Gurobi's own
     status (its scalar objective has no step to certify against).
+
+    ``phase2_params`` are applied on top for the secondary phase only, e.g.
+    ``{"Presolve": 0}``: the primary-fix row has a coefficient on every x, and
+    when it leaves slack Gurobi's presolve can run far past TimeLimit on it
+    (B_pos_n300_lE_iH lex f1: 3013 s in presolve, uncertified; 26 s optimal
+    without presolve).
     """
     fmt = formulation or _default_formulation()
     t0 = time.perf_counter()
@@ -240,7 +247,7 @@ def _solve(
         mdl.addConstr(fmt.bound_constr(inst, x, primary, getattr(sol, primary)),
                       name=f"fix_{primary}")
         mdl.setObjective(exprs[secondary], GRB.MINIMIZE)
-        _apply_params(mdl, certify_params(inst, secondary, params))
+        _apply_params(mdl, {**certify_params(inst, secondary, params), **(phase2_params or {})})
         mdl.optimize()
         sol = _extract(inst, mdl, vars)
         certified = sol.f1 is not None and is_certified(inst, mdl, secondary,
@@ -261,6 +268,7 @@ def solve_f1(
     inst: Instance,
     formulation: Formulation | None = None,
     hint: Solution | None = None,
+    phase2_params: dict | None = None,
     **params,
 ) -> Solution:
     """Lex-min (f1, f2): minimise total turnaround, breaking ties by minimum cost.
@@ -269,13 +277,15 @@ def solve_f1(
     seed Gurobi's MIP start. Purely a search-order hint: it cannot change the
     proven-optimal result, only how fast the solver finds it.
     """
-    return _solve(inst, formulation, hint, params, "f1", "f2", hint_objective=LEX_F1)
+    return _solve(inst, formulation, hint, params, "f1", "f2", hint_objective=LEX_F1,
+                  phase2_params=phase2_params)
 
 
 def solve_f2(
     inst: Instance,
     formulation: Formulation | None = None,
     hint: Solution | None = None,
+    phase2_params: dict | None = None,
     **params,
 ) -> Solution:
     """Lex-min (f2, f1): minimise total cost, breaking ties by minimum turnaround.
@@ -285,7 +295,7 @@ def solve_f2(
     ``hint`` — an optional prior/heuristic Solution used to seed Gurobi's MIP
     start; see :func:`solve_f1`.
     """
-    return _solve(inst, formulation, hint, params, "f2", "f1")
+    return _solve(inst, formulation, hint, params, "f2", "f1", phase2_params=phase2_params)
 
 
 def weighted_sum_degenerate(f1_T: float, f2_T: float, f1_0: float, f2_0: float = 0.0) -> bool:

@@ -204,17 +204,33 @@ nohup nice -n 10 uv run python scripts/bench_generated.py --manifest --no-reduct
 - **Timing noise.** There was no CPU pinning, and the CPU mixes P- and
   E-cores. Another user's LLM inference server shared the machine. Compare
   times between methods only through medians.
-- **Solves without a proof of optimality.** 13 of 540 Gurobi solves hit the
+- **Solves without a proof of optimality.** 10 of 540 Gurobi solves hit the
   time limit:
   - 8 lex f2 (B/A·pos, N = 100, load H/E);
-  - 3 lex f1 (B·pos n300 E iH, A·pos n300 H iH, B·fedhpc n100 E iH);
   - 2 weighted sums (B·pos n100 E iM and A·pos n100 E iL, both at λ = 0.25).
+
+  Before the 2026-11-18 re-run, 3 lex f1 solves also hit it (B·pos n300 E iH,
+  A·pos n300 H iH, B·fedhpc n100 E iH); see the next item.
 
   A non-certified anchor rescales g for every method alike. At the two
   time-limited weighted sums, the reported dispatch gap is a lower bound.
-- **An unexplained run time.** `B_pos_n300_lE_iH` lex f1 took 3194 s, beyond
-  the 2 × 600 s limit plus build time. The record has no per-phase timing, so
-  the cause, most likely contention, cannot be attributed.
+- **Lex f1 phase-2 presolve (fixed 2026-11-18).** `B_pos_n300_lE_iH` lex f1
+  took 3194 s, beyond the 2 × 600 s limit. A timed re-run in isolation
+  reproduced it (3115 s): phase 1 was optimal at the root in 63 s, and phase 2
+  (min f2 with f1 fixed by a row over all 7.8 M x) spent 3013 s in
+  single-threaded presolve, which ignores TimeLimit (64 302 work units, so not
+  contention). It returned only the phase-1 incumbent's cost. When f1_T sits
+  on its floor, presolve uses that row to remove almost every column in
+  seconds. With slack (here 354) it stalls. With `Presolve=0` in phase 2
+  (`solve_f1(..., phase2_params={"Presolve": 0})`), lex f1 was re-solved on all
+  108 instances: 108/108 optimal (was 105), 5873 s in total (was 11610).
+  f2_T fell on the 3 formerly time-limited instances (B·pos n300 E iH
+  11313.59 → 8640.79, A·pos n300 H iH 13152.94 → 10809.01, B·fedhpc n100 E iH
+  7958.91 → 7172.29). Their weighted sums and heuristic arms were re-run;
+  every other instance kept its results, with gaps recomputed against the new
+  g*. Lex f2 keeps presolve: with it off there, 10 lex f2 hit the limit
+  instead of 8. Details: `scripts/presolve0_merge.py`; originals in
+  `../archive_presolve_default/`.
 - **Dispatch was run once,** with seed 42, so there is no variance estimate.
   The re-run was on the same machine, but not while Gurobi was running.
 - **Threshold θ is an oracle choice** (§4), which favours that baseline.

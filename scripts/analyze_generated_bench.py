@@ -338,7 +338,8 @@ def setup_lines():
         f"- Software: {sw['os']}; {sw['python']}; gurobipy {sw['gurobipy']}; numpy {sw['numpy']}.",
         f"- Code: fedhpc {code['base_commit'][:7]} + `{Path(code['uncommitted_patch'].split()[0]).name}` "
         f"(sha256 {code['uncommitted_patch_sha256'][:12]}…).",
-        f"- {s['reproducibility_check']}.", "",
+        f"- {s['reproducibility_check']}.",
+        *(f"- Re-run {r['date']}: {r['what']}" for r in s.get("reruns", [])), "",
     ]
 
 

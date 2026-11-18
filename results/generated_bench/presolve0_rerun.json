@@ -1,0 +1,76 @@
+{
+ "validate_F_ils_s42.jsonl": [
+  "B_pos_n300_lE_iH",
+  "A_pos_n300_lH_iH"
+ ],
+ "validate_F_ils_s1.jsonl": [
+  "B_pos_n300_lE_iH",
+  "A_pos_n300_lH_iH"
+ ],
+ "validate_F_ils_s7.jsonl": [
+  "B_pos_n300_lE_iH",
+  "A_pos_n300_lH_iH"
+ ],
+ "validate_F_ilslong_s42.jsonl": [
+  "B_pos_n300_lE_iH",
+  "A_pos_n300_lH_iH"
+ ],
+ "validate_F_ilslong_s1.jsonl": [
+  "B_pos_n300_lE_iH",
+  "A_pos_n300_lH_iH"
+ ],
+ "validate_F_ilslong_s7.jsonl": [
+  "B_pos_n300_lE_iH",
+  "A_pos_n300_lH_iH"
+ ],
+ "validate_F_gafast_s42.jsonl": [
+  "B_pos_n300_lE_iH",
+  "A_pos_n300_lH_iH"
+ ],
+ "validate_F_gafast_s1.jsonl": [
+  "B_pos_n300_lE_iH",
+  "A_pos_n300_lH_iH"
+ ],
+ "validate_F_gafast_s7.jsonl": [
+  "B_pos_n300_lE_iH",
+  "A_pos_n300_lH_iH"
+ ],
+ "validate_F_gamid_s42.jsonl": [
+  "B_pos_n300_lE_iH",
+  "A_pos_n300_lH_iH"
+ ],
+ "validate_F_gamid_s1.jsonl": [
+  "B_pos_n300_lE_iH",
+  "A_pos_n300_lH_iH"
+ ],
+ "validate_F_gamid_s7.jsonl": [
+  "B_pos_n300_lE_iH",
+  "A_pos_n300_lH_iH"
+ ],
+ "validate_F_gaqual_s42.jsonl": [
+  "B_pos_n300_lE_iH",
+  "A_pos_n300_lH_iH"
+ ],
+ "validate_F_gaqual_s1.jsonl": [
+  "B_pos_n300_lE_iH",
+  "A_pos_n300_lH_iH"
+ ],
+ "validate_F_gaqual_s7.jsonl": [
+  "B_pos_n300_lE_iH",
+  "A_pos_n300_lH_iH"
+ ],
+ "validate_T_sl48p16g120_s42.jsonl": [
+  "B_fedhpc_n100_lE_iH"
+ ],
+ "validate_T_gamid_s1.jsonl": [
+  "B_fedhpc_n100_lE_iH"
+ ],
+ "validate_T_gamid_s7.jsonl": [
+  "B_fedhpc_n100_lE_iH"
+ ],
+ "validate_ils_s42.jsonl": [
+  "B_pos_n300_lE_iH",
+  "A_pos_n300_lH_iH",
+  "B_fedhpc_n100_lE_iH"
+ ]
+}

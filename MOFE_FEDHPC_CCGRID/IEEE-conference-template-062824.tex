@@ -1,0 +1,472 @@
+
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+% The preceding line is only needed to identify funding in the first footnote. If that is unneeded, please comment it out.
+%Template version as of 6/27/2024
+
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithm}     
+\usepackage{algorithmicx}  
+\usepackage{algpseudocode} 
+% Quiet line numbers and comments
+\algrenewcommand{\alglinenumber}[1]{%
+  \scriptsize\textcolor{gray}{#1:}}
+\algrenewcommand{\algorithmiccomment}[1]{%
+  \hfill{\footnotesize\color{gray}$\triangleright$~#1}}
+\algrenewcommand{\algorithmicindent}{1.2em}
+
+% Explicit parallel loop
+\algblockdefx{ParFor}{EndParFor}[1]%
+  {\textbf{for} #1 \textbf{in parallel do}}%
+  {\textbf{end for}}
+\usepackage[noend]{algpseudocode}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+\begin{document}
+
+\title{{\bf MOSPACE}:{\bf M}ulti-{\bf o}bjective {\bf S}cheduler of {\bf Pa}rallel Jobs on a Federated {\bf C}omputing  {\bf E}nvironment 
+
+\thanks{Identify applicable funding agency here. If none, delete this.}
+}
+
+\author{\IEEEauthorblockN{1\textsuperscript{st} Bernardo Gallo}
+\IEEEauthorblockA{\textit{Institute of Computing} \\
+\textit{Universidade Federal Fluminense}\\
+Niterói, Brazil\\
+bgallo@id.uff.br}
+\and
+\IEEEauthorblockN{2\textsuperscript{nd} Lucia Drummond}
+\IEEEauthorblockA{\textit{Institute of Computing} \\
+\textit{Unversidade Federal Fluminense}\\
+Niterói, Brazil \\
+lucia@ic.uff.br}
+\and
+\IEEEauthorblockN{3\textsuperscript{rd} José Viterbo}
+\IEEEauthorblockA{\textit{dept. name of organization (of Aff.)} \\
+\textit{name of organization (of Aff.)}\\
+Niterói, Brazil \\
+viterbo@ic.uff.br}
+\and
+\IEEEauthorblockN{4\textsuperscript{th} Eduardo Uchoa}
+\IEEEauthorblockA{\textit{dept. name of organization (of Aff.)} \\
+\textit{name of organization (of Aff.)}\\
+Niterói, Brazil \\
+eduardo.uchoa@gmail.com}
+}
+
+\maketitle
+
+\begin{abstract}
+A federated high-performance computing (HPC) system coordinates computational resources across distinct execution platforms. At the scheduling layer, resource federation requires joint decisions regarding where and when jobs execute, particularly when resource types differ in capacity, performance, availability, and monetary cost. In this work, we propose MOSPACE, a multi-objective scheduler for parallel jobs on a hybrid computing federation comprising fixed-capacity on-premises resources and pools of on-demand cloud virtual machines. We formulate the scheduling problem as a weighted bi-objective optimization model that minimizes both total job turnaround time and financial cost. To solve this problem, we introduce a arc-flow mixed-integer linear programming (MILP) formulation alongside a Genetic Algorithm (GA) that provides faster approximate solutions. We evaluate both approaches across 108 problem instances featuring varying numbers of jobs and cluster configurations. The MILP formulation solved all instances to optimality in an average of 110 seconds, whereas the GA achieved an average optimality gap of 5.66\% in under 6 seconds. Furthermore, we evaluate our proposed approach in a simulated environment using a production cluster job log and a federated platform consisting of a 1,654-node HPC cluster with access to AWS EC2 instances. Finally, we compare MOSPACE against isolated infrastructures, each maintaining its own independent job queue, as well as the state-of-the-art cloud-bursting strategy from the literature.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Federated HPC, heterogeneous scheduling, multi-objective optimization, mixed-integer linear programming.
+\end{IEEEkeywords}
+
+\section{Introduction}
+
+High-performance computing  (HPC) systems support computationally intensive applications in areas such as energy, climate modeling, aerospace engineering, drug discovery, and machine learning. These applications frequently require more processors, memory, accelerators, or storage than conventional computing infrastructures can provide. HPC clusters address this demand through large collections of interconnected computational resources managed as an integrated system.
+Despite their computational capacity, on-premises HPC systems remain finite. Their acquisition and expansion require substantial capital investment, while their operation involves energy, maintenance, cooling, and administrative costs. Since permanently provisioning enough hardware for occasional demand peaks is economically inefficient, HPC centers are commonly designed around an expected workload rather than the maximum workload they may receive. Periods of high demand can therefore produce long queues, increased job turnaround times, and delayed access to computational resources. To provide access to a greater variety and quantity of hardware as well as improve utilization of the computing resources are all reasons to integrate geographically distributed HPC infrastructure\cite{Magugliani2025}. Federated HPC seeks to coordinate geographically distributed and independently operated infrastructures through common services for access, resource allocation, data management, and workflow execution.  Federation does not imply that geographically separate machines form a single tightly coupled supercomputer or that their local schedulers are replaced by one global scheduler. The individual facilities retain different capacities, architectures, availability constraints, and operational policies. At the federation level, a user or broker can instead select an execution platform for a submitted job and coordinate access to resources that remain locally managed. Consequently, the scheduling problem includes a placement decision across heterogeneous resource pools in addition to the execution-time decisions encountered within a single HPC cluster.
+
+
+In that scenario, cloud computing has also  provided an alternative source of computational capacity. Its on-demand provisioning model allows resources to be allocated temporarily without the permanent acquisition of additional hardware. An HPC organization can therefore retain its on-premises infrastructure as its primary computational platform while using cloud resources during periods of congestion. This strategy is commonly referred to as cloud bursting.\cite{BUYYA2009599,mell2011nist}. The use of several cloud providers extends this scenario to a multi-cloud environment. Different providers and instance types offer distinct combinations of processing performance, memory, storage, accelerator availability, provisioning delay, and monetary cost. When these resources are combined with an on-premises HPC cluster, the resulting environment is heterogeneous in both technical and economic terms. Hybrid HPC--cloud infrastructures are an important configuration of this broader setting. A fixed-capacity HPC centre can augment its resources with virtual machines acquired from external cloud providers. Such resources have different performance characteristics, provisioning delays, transfer overheads, and usage prices. The hybrid-computing architecture of Mateescu et al. explicitly connects traditional HPC, resource sharing across sites, and elastic cloud provisioning~\cite{Mateescu2011}. In this work we refer to an environment as a federated multi-platform HPC environment, namely a computational environment composed of capacity-constrained geographically distributed on-premises resources and elastically provisioned resources from one or more cloud providers.%\cite{Grozev14}
+
+In this work we propose an arc-flow formulation of the problem of scheduling parallel jobs across a heterogeneous infrastructure that when solved using Gurobi is capable of solving instances with 3340 jobs to schedule across 1200 on-premises nodes and two cloud providers with 5 VM types each in under 5 minutes. The formulation takes into account data movement between on-premises and the cloud while factoring egress fees into the monetary cost. With two objective functions, one being turnaround time and the other being monetary cost the problem constitute a multi-objective optimization problem that we solve via a weighted-sum of the scalarized objectives. We also propose a genetic algorithm with local search that is able to find solutions with a mean gap of 5.66\% in under 6 seconds on average.
+
+
+
+
+
+
+
+
+
+
+
+
+
+\section{Related Work}
+
+A recent survey by Wu et al.~\cite{Wu2025} organizes geo-distributed scheduling research across cloud, edge, and supercomputing settings. Each environment is organized by objective (performance, fairness, fault tolerance) and by technique (heuristic, AI-based, mathematical, hybrid). Performance is divided into compute utilization and data management, the latter covering network routing, data placement and replication. The authors include HPC because its focus on extreme performance and large-scale utilization sets it apart from the other paradigms, and they position the survey as the first to span all four.
+
+Brotcorne et al.~\cite{Brotcorne2023} proposed mathematical programming models for multi-cloud VM provisioning that jointly consider makespan and cost, with both global and time-dependent limits on instance availability. Their workloads consist of bags of identical tasks, and their
+time objective differs from per-job turnaround. In hybrid fixed/elastic clusters, Ambati et al.~\cite{ambati2021good} analyzed policies that
+trade waiting time against public-cloud expenditure. Starburst, by Luo et al.~\cite{Luo24}, implements a higher-level scheduler over private and elastic cloud clusters and adjusts waiting budgets to improve the trade-off
+between cloud expenditure and job turnaround time. 
+
+Kramer et al.~\cite{Kramer2020} studied minimizing total weighted completion time with release dates on identical parallel machines, using
+mixed-integer formulations and arc-flow-based branch-and-price.
+Chen et al.~\cite{Chen2024} developed exact models and branch-and-price
+for unrelated parallel machines with weighted completion-time and
+machine-usage costs. These advances motivate strong exact methods, but most of the literature consider jobs without release time, available at time 0 , and none models the same combination of release times, resource-type-specific monetary costs, and bounded hybrid on-premises/cloud instance pools. Our work studies that combination under a centralized federation-level scheduling abstraction, without claiming a multi-supercomputer deployment or decentralized scheduler interoperability.
+
+Tabela com artigos, contribuicoes, igual ao paper que tem seu nome...
+
+\section{Mathematical model}
+\label{sec:model}
+
+We formulate the joint selection of an instance type and a start time for each job as a bi-objective arc-flow MILP. Each instance type has a time-expanded network in which processing arcs occupy an instance for a job's full duration and waiting arcs allow idle capacity. The model minimizes priority-weighted turnaround and monetary expenditure, subject to release times and bounded instance availability.
+
+\subsection{Setting and notation}
+
+Let $J=\{1,\ldots,n\}$ be the jobs and let $M$ be the instance types, partitioned into on-premises types $M^{\mathrm{on}}$ and cloud types $M^{\mathrm{cloud}}$. Each type $m$ comprises at most $N_m\in\mathbb{Z}_{>0}$ homogeneous instances. Jobs are independent and non-preemptive; each occupies one entire instance, without sharing it with another job. The horizon is discretized as $T=\{0,\ldots,H\}$ with step duration $\Delta>0$.
+
+Each job $j$ has arrival time $a_j\in T$, base execution time $e_j^{\mathrm{raw}}\geq0$, I/O volume $\iota_j\geq0$, priority weight $w_j\geq0$, and resource demands $q_j^r\geq0$ for $r\in R=\{\mathrm{cpu},\mathrm{mem},\mathrm{stor}\}$. Each type $m$ has capacities $C_m^r$, performance factor $P_m>0$, I/O time per volume unit $\tau_m^{\mathrm{IO,raw}}\geq0$, and provisioning time $\pi_m^{\mathrm{raw}}\geq0$. Feasible types are
+\begin{equation}
+ F_j=\{m\in M:q_j^r\leq C_m^r\ \forall r\in R\},
+ \qquad j\in J.
+\end{equation}
+We assume $F_j\neq\emptyset$ for every job. Resource demands determine type compatibility; simultaneous-job capacity is enforced through the instance counts $N_m$.
+
+The nonnegative rates $\kappa_m^{\mathrm{VM}}$, $\kappa_m^{\mathrm{S}}$, and $\kappa_m^{\mathrm{IO}}$ charge instance use per physical time unit, allocated storage per physical time unit, and I/O volume, respectively. All three rates are zero for $m\in M^{\mathrm{on}}$, so the cost objective excludes fixed on-premises expenses. Provisioning occupies the instance at the beginning of every job but is not billed; idle intervals are also uncharged.
+
+\subsection{Durations and execution costs}
+
+For $j\in J$ and $m\in F_j$, the continuous billable duration and its discretized value are
+\begin{align}
+ p_{jm}^{\mathrm{bill,raw}}
+ &=e_j^{\mathrm{raw}}/P_m+\tau_m^{\mathrm{IO,raw}}\iota_j,\\
+ p_{jm}^{\mathrm{bill}}
+ &=\max\{1,\lceil p_{jm}^{\mathrm{bill,raw}}/\Delta\rceil\}.
+\end{align}
+Provisioning extends occupation without increasing billable time:
+\begin{equation}
+ \pi_m=\lceil\pi_m^{\mathrm{raw}}/\Delta\rceil,
+ \qquad p_{jm}^{\mathrm{occ}}=p_{jm}^{\mathrm{bill}}+\pi_m.
+\end{equation}
+The execution cost is therefore
+\begin{equation}
+ c_{jm}^{\mathrm{proc}}=\kappa_m^{\mathrm{IO}}\iota_j+
+ (\kappa_m^{\mathrm{VM}}+\kappa_m^{\mathrm{S}}q_j^{\mathrm{stor}})
+ p_{jm}^{\mathrm{bill}}\Delta.
+\end{equation}
+This models billing in blocks of duration $\Delta$, with a minimum of one block. Rounded billable time exceeds its continuous value by less than $\Delta$ for positive durations, and by exactly $\Delta$ for a zero duration.
+
+Feasible occupation starts respect arrivals and completion within the horizon:
+\begin{equation}
+ T_{jm}=\{t\in T:t\geq a_j,\ t+p_{jm}^{\mathrm{occ}}\leq H\}.
+\end{equation}
+The horizon must admit a feasible schedule for all jobs jointly, not merely a nonempty start set for each job. A constructive schedule respecting type compatibility and instance limits can provide such a horizon.
+
+\subsection{Network and constraints}
+
+For each type $m$, let $G_m=(T,A_m)$ be a directed acyclic graph with waiting and job-indexed processing arcs:
+\begin{align}
+ A_m^{\mathrm{wait}}&=\{(t,t+1):t\in T\setminus\{H\}\},\\
+ A_m^{\mathrm{proc}}&=\{(j,t,t+p_{jm}^{\mathrm{occ}}):
+ j\in J,\ m\in F_j,\ t\in T_{jm}\},\\
+ A_m&=A_m^{\mathrm{wait}}\cup A_m^{\mathrm{proc}}.
+\end{align}
+Processing arcs occupy an instance over $[t,t+p_{jm}^{\mathrm{occ}})$, including provisioning. Their job indices distinguish arcs with identical endpoints.
+
+The binary variable $x_{jmt}$ selects a processing arc, and the integer variable $y_{mt}$ counts idle instances over $[t,t+1)$. Define the fixed boundary values $y_{m,-1}=y_{m,H}=N_m$ to inject and collect $N_m$ units of flow. The model imposes
+\begin{align}
+ &\sum_{m\in F_j}\sum_{t\in T_{jm}}x_{jmt}=1
+ && j\in J,\label{eq:model-assignment}\\
+ &\begin{aligned}
+ y_{m,v-1}
+ &+\sum_{\substack{j:m\in F_j\\v-p_{jm}^{\mathrm{occ}}\in T_{jm}}}
+ x_{jm,v-p_{jm}^{\mathrm{occ}}}\\
+ &=y_{mv}+\sum_{\substack{j:m\in F_j\\v\in T_{jm}}}x_{jmv}
+ \end{aligned}
+ &&\substack{m\in M,\\v\in T},\label{eq:model-flow}\\
+ &x_{jmt}\in\{0,1\}
+ &&\substack{j\in J,\ m\in F_j,\\t\in T_{jm}},\\
+ &y_{mt}\in\{0,\ldots,N_m\}
+ &&\substack{m\in M,\\t\in T\setminus\{H\}}.
+\end{align}
+Constraint~\eqref{eq:model-assignment} executes each job exactly once. Constraint~\eqref{eq:model-flow} conserves instance flow at every time node. Integral flow decomposes into $N_m$ paths, each corresponding to one instance; hence overlapping jobs cannot exceed available capacity. The upper bound on $y_{mt}$ is implied by nonnegative flow and the boundary values and is retained as an explicit variable bound.
+
+\subsection{Objectives and scalarization}
+
+Let $X$ denote the feasible set above, including both $x$ and $y$. The objectives are priority-weighted turnaround and total monetary cost:
+\begin{align}
+ f_1(x)&=\sum_{j\in J}\sum_{m\in F_j}\sum_{t\in T_{jm}}
+ w_j(t+p_{jm}^{\mathrm{occ}}-a_j)x_{jmt},\\
+ f_2(x)&=\sum_{j\in J}\sum_{m\in F_j}\sum_{t\in T_{jm}}
+ c_{jm}^{\mathrm{proc}}x_{jmt}.
+\end{align}
+Physical weighted turnaround is $\Delta f_1$, so the constant time conversion does not affect its minimizers. Idle flow incurs no monetary cost.
+
+Assume that a zero-cost schedule exists within $H$, as is the case when on-premises capacity alone can complete all jobs. Auxiliary optimization problems define the time-first lexicographic extreme and the best zero-cost turnaround:
+\begin{align}
+ f_1^{\mathrm{lex}}&=\min_{(x,y)\in X}f_1(x),\\
+ f_2^{\mathrm{lex}}&=\min\{f_2(x):(x,y)\in X,\ f_1(x)=f_1^{\mathrm{lex}}\},\\
+ f_1^0&=\min\{f_1(x):(x,y)\in X,\ f_2(x)=0\}.
+\end{align}
+The lexicographic extreme minimizes cost among minimum-turnaround schedules. Every positive-cost schedule with $f_1\geq f_1^0$ is dominated by the best zero-cost schedule, so the restriction $f_1\leq f_1^0$ preserves all Pareto-optimal objective vectors.
+
+When $f_1^0>f_1^{\mathrm{lex}}$ and $f_2^{\mathrm{lex}}>0$, define
+\begin{equation}
+ \widehat f_1=\frac{f_1-f_1^{\mathrm{lex}}}{f_1^0-f_1^{\mathrm{lex}}},
+ \qquad \widehat f_2=\frac{f_2}{f_2^{\mathrm{lex}}}.
+\end{equation}
+For a preference parameter $\lambda\in[0,1]$, solve
+\begin{equation}
+ \min_{(x,y)\in X}\ \lambda\widehat f_1+(1-\lambda)\widehat f_2
+ \quad\text{s.t.}\quad f_1(x)\leq f_1^0.
+\end{equation}
+Increasing $\lambda$ favors turnaround. These reference values scale the objectives; they do not bound $\widehat f_2$ by one for every feasible schedule. Exact reference solves justify the stated extremes; heuristic estimates alone do not certify them or the dominance-based restriction.
+
+Under zero-cost feasibility, $f_1^0=f_1^{\mathrm{lex}}$ if and only if $f_2^{\mathrm{lex}}=0$. In this degenerate case, a zero-cost minimum-turnaround schedule optimizes both objectives and normalization is unnecessary. Otherwise, strictly positive scalarization weights yield supported Pareto-optimal solutions; endpoint weights require tie-breaking by the other objective to exclude dominated ties. Unsupported Pareto points are not recovered by weighted sums and can instead be sought with an $\epsilon$-constraint method.
+
+\section{Proposed Solutions}
+
+Mixed-integer linear programming (MILP) is the class of optimization problems in which a linear objective is minimized or maximized over a polyhedron, subject to the requirement that some or all decision variables take integer values.\cite{Nemhauser88} Integer variables, binary ones in particular, let a model express discrete decisions such as whether a resource is used, which machine a task goes to, or the order in which two activities run. Continuous variables can still capture quantities such as start times, costs, or loads. This expressiveness comes at a price. MILP is NP-hard in general\cite{Karp1972}, so no polynomial-time algorithm for the whole class is expected to exist. Even so, decades of algorithmic work have made MILP one of the most dependable exact approaches to combinatorial optimization in practice. Modern solvers rest on the LP-based branch-and-bound framework\cite{Land1960} , strengthened by cutting planes descended from Gomory’s work\cite{bams/1183522679}. Around this core, they add presolve reductions , primal heuristics, sophisticated branching rules, and parallel tree search.
+Scheduling is among the most natural and longest-standing application areas of MILP. Integer programming formulations of machine scheduling appeared as early as Wagner\cite{Wagner1959}. Since then, several families of formulations have been studied in depth, notably disjunctive (big-M) models and time-indexed models. Each family offers a different balance between the size of the model and the strength of its LP relaxation\cite{Ku2016}.
+
+\subsection{Genetic Algorithm}
+
+Although the arc-flow formulation implemented in Gurobi did exceed expectations in terms of time to solution we designed and implemented a GA for several reasons: one is the necessity of having a commercial license to run Gurobi in production scenarios and the other being that while metaheuristics can not guaranteed optimality they can approach it while taking significantly less time.
+
+The proposed method is a memetic algorithm~\cite{Moscato1989}, i.e., a GA in which every offspring is improved by local search before it enters the population. It solves the scalarized problem of Section~\ref{sec:model} for one value of $\lambda$ per run. The GA does not search start times directly. Each chromosome fixes the platform decision of every job, and a constructive decoder derives the complete schedule from it. This choice follows from the structure of the problem: on-premises execution is free, so $f_2$ depends only on which jobs are sent to the cloud, and once that set is fixed, minimizing $f_1$ reduces to list scheduling on the bounded on-premises pools. Algorithm~\ref{alg:memetic-search} summarizes the method, and the following paragraphs describe each of its components.
+
+\subsubsection{Fitness function}
+The fitness of an individual is computed on the schedule $S$ obtained by decoding its chromosome $\chi$; lower is better. It is the sum of three terms,
+\begin{equation}
+ \Phi(\chi)=\underbrace{Z(S)}_{\text{objective}}
+ +\underbrace{P_{\mathrm{cap}}(S)}_{\text{cap penalty}}
+ +\underbrace{P_{\mathrm{inf}}(S)}_{\text{infeasibility}},
+ \label{eq:fitness}
+\end{equation}
+which we describe in turn.
+
+\emph{Objective term.} Expanding the normalized objectives of Section~\ref{sec:model} gives
+\begin{equation*}
+ \lambda\widehat f_1+(1-\lambda)\widehat f_2=\alpha_1f_1+\alpha_2f_2-\alpha_1f_1^{\mathrm{lex}},
+\end{equation*}
+with the constants
+\begin{equation}
+ \alpha_1=\frac{\lambda}{f_1^0-f_1^{\mathrm{lex}}},\qquad
+ \alpha_2=\frac{1-\lambda}{f_2^{\mathrm{lex}}}.
+\end{equation}
+The last term does not depend on the schedule, so it can be dropped without changing which individual is better, and the objective term is
+\begin{equation}
+ Z(S)=\alpha_1f_1(S)+\alpha_2f_2(S).
+\end{equation}
+Intuitively, $\alpha_1$ is the price, in fitness units, of one unit of weighted turnaround, and $\alpha_2$ is the price of one unit of money.
+
+\emph{Cap penalty.} The model only searches schedules with $f_1\leq f_1^0$. The decoder cannot guarantee this bound, so it is imposed as a soft constraint:
+\begin{equation}
+ P_{\mathrm{cap}}(S)=\beta\max\bigl\{0,\;f_1(S)-f_1^0\bigr\},\qquad \beta=10^3\alpha_1.
+\end{equation}
+Schedules within the cap are unaffected. Beyond it, each extra unit of turnaround costs a thousand times its normal price, so such schedules survive only while nothing better is available.
+
+\emph{Infeasibility penalty.} A job is \emph{unplaced} when it has no cloud option and no on-premises start is left before the horizon. With $v(S)$ the number of unplaced jobs,
+\begin{equation}
+ P_{\mathrm{inf}}(S)=
+ \begin{cases}
+  0, & v(S)=0,\\
+  \Omega_1+\Omega_2\,v(S), & v(S)>0,
+ \end{cases}
+\end{equation}
+with $\Omega_1=10^9$ and $\Omega_2=10^6$. The constant $\Omega_1$ is far larger than the other two terms for any schedule, so every feasible individual is fitter than every infeasible one. The term $\Omega_2v(S)$ still ranks infeasible individuals by how many jobs they fail to place, which gives selection a direction toward feasibility instead of a flat penalty.
+
+\subsubsection{Job scores}
+Both $f_1$ and $f_2$ are sums over jobs, so $Z$ is too. The contribution of job $j$ when it runs on type $m$ starting at step $t$ is its \emph{score}
+\begin{equation}
+ \sigma_j(m,t)=\underbrace{\alpha_1w_j\bigl(t+p_{jm}^{\mathrm{occ}}-a_j\bigr)}_{\text{turnaround}}+\underbrace{\alpha_2c_{jm}^{\mathrm{proc}}}_{\text{money}},
+\end{equation}
+and $Z(S)$ is the sum of the scores of all jobs. Every step that a job waits adds $\alpha_1w_j$ to its score. The decoder and the local search compare jobs and options through these scores, using the following per-job quantities, all computed once per run. Let $M_j^{\mathrm{on}}=F_j\cap M^{\mathrm{on}}$ and $M_j^{\mathrm{cl}}=F_j\cap M^{\mathrm{cloud}}$ be the on-premises and cloud types of job $j$, and $t_{jm}^{\min}=\min T_{jm}$ its earliest start on type $m$.
+\begin{itemize}
+ \item \emph{Cloud score} $\sigma_j^{\mathrm{cl}}=\min_{m\in M_j^{\mathrm{cl}}}\sigma_j(m,t_{jm}^{\min})$ ($\infty$ if $M_j^{\mathrm{cl}}=\emptyset$). The decoder treats cloud bounds $N_m$ as non-binding, which holds in our instances, so a job sent to the cloud never waits: it starts at once on its best cloud type, and its score is this constant.
+ \item \emph{No-wait on-premises score}: the best the job can score on premises, reached only if it starts as early as possible, $\sigma_j^{\mathrm{on}}=\min_{m\in M_j^{\mathrm{on}}}\sigma_j(m,t_{jm}^{\min})$.
+ \item \emph{On-premises release} $r_j=\min_{m\in M_j^{\mathrm{on}}}t_{jm}^{\min}$ and \emph{latest on-premises start} $\ell_j=\max_{m\in M_j^{\mathrm{on}}}\max T_{jm}$.
+ \item \emph{Shortest on-premises occupation} $p_j^{\min}=\min_{m\in M_j^{\mathrm{on}}}p_{jm}^{\mathrm{occ}}$.
+\end{itemize}
+
+\subsubsection{Chromosome}
+An individual is represented by a chromosome $\chi=(\chi_1,\ldots,\chi_n;\,\pi,\delta,\eta)$ with one \emph{job gene} per job and three \emph{strategy genes}. Each job gene takes one of three alleles: $\chi_j=1$ (\emph{cloud}) forces the job onto its best cloud type, $\chi_j=2$ (\emph{on-premises}) forbids voluntary offloading, and $\chi_j=0$ (\emph{auto}) lets the decoder offload the job when waiting on premises becomes worse than the cloud. The genes do not name a specific on-premises pool or start time. Pools with equal durations and zero cost are interchangeable, so encoding them would create large plateaus of equally fit genotypes. The strategy genes configure the decoder of each individual, so the decoding rule evolves alongside the solution, which is a form of self-adaptation~\cite{Eiben1999}:
+\begin{itemize}
+ \item $\pi\in\{0,\ldots,|\Pi|-1\}$ selects a priority rule from $\Pi=\{\mathrm{P}(\mu):\mu\in\mathcal{U}\}\cup\{\mathrm{EDF}\}$, with $\mathcal{U}=\{0,0.01,0.03,0.1,0.3,1,3,10,30,100\}$;
+ \item $\delta\in\{0,1\}$ enables the deadline offload rule;
+ \item $\eta\in\{0,1\}$ selects the dispatch ($\eta=0$) or serial ($\eta=1$) decoder.
+\end{itemize}
+The rule list is ordered, so $\pi\pm1$ refers to the neighboring value of $\mu$.
+
+\subsubsection{Priority rules}
+Define the regret of offloading job $j$ as $\rho_j=\max\{0,\sigma_j^{\mathrm{cl}}-\sigma_j^{\mathrm{on}}\}$, replaced by the large constant $10^6(\alpha_1+\alpha_2)$ when $j$ has no cloud option. Rule $\mathrm{P}(\mu)$ sorts jobs by decreasing index
+\begin{equation}
+ v_j(\mu)=\frac{\alpha_1w_j+\mu\rho_j}{p_j^{\min}}.
+\end{equation}
+For $\mu=0$, this is Smith's weighted-shortest-processing-time (WSPT) rule~\cite{Smith1956}. Larger values of $\mu$ give contended on-premises capacity to the jobs whose cloud alternative is most expensive. The EDF rule sorts jobs by increasing \emph{indifference deadline}
+\begin{equation}
+ d_j=\min\Bigl\{\ell_j,\;r_j+\frac{\rho_j}{\alpha_1w_j}\Bigr\},
+ \label{eq:deadline}
+\end{equation}
+where $d_j=\ell_j$ if $j$ has no cloud option or $\alpha_1w_j=0$. Each step of waiting adds $\alpha_1w_j$ to the on-premises score, so $d_j$ is the last start at which on-premises execution still scores no worse than the cloud. EDF therefore serves first the job closest to being better off in the cloud. Under WSPT, long low-priority jobs tend to wait past their deadlines and are offloaded one at a time, so EDF is the main source of good solutions at low $\lambda$. Ties are broken by increasing $r_j$. All priority orders are computed once per run.
+
+\subsubsection{Decoders}
+Both decoders start by placing the jobs with $\chi_j=1$, and the jobs without on-premises options, on the cloud. Capacity is tracked as the number of idle instances of each on-premises type $m$ at each step, initialized to $N_m$ minus the instances occupied by jobs that are already running. Because instances of a type are identical, an occupation interval can start at $t$ whenever at least one instance is idle at every step of $[t,t+p_{jm}^{\mathrm{occ}})$. The two decoders are:
+
+\emph{Dispatch decoder} ($\eta=0$). This is a time-driven, non-delay list scheduler. For $t=0,\ldots,H-1$, jobs released at $t$ join a waiting queue sorted by the rule $\pi$. The queue is scanned in priority order. For each job $j$, the decoder chooses, among the types $m\in M_j^{\mathrm{on}}$ with $t\in T_{jm}$ and room over the whole occupation interval, the one that minimizes $\sigma_j(m,t)$. Let $\sigma^\ast$ be the score of that choice. If $\delta=1$, $\chi_j=0$ and $\sigma^\ast\geq\sigma_j^{\mathrm{cl}}$, the job is offloaded. Otherwise it starts at $t$ and occupies the capacity. If no type has room, the job is offloaded when $\delta=1$, $\chi_j=0$ and even the optimistic score of starting at $t+1$, namely $\alpha_1w_j(t+1+p_j^{\min}-a_j)+\alpha_2\min_{m\in M_j^{\mathrm{on}}}c_{jm}^{\mathrm{proc}}$, is at least $\sigma_j^{\mathrm{cl}}$. If $t+1>\ell_j$, the job overflows to the cloud. In any other case it keeps waiting. Jobs that remain unplaced when the horizon ends also overflow to the cloud, and a job without a cloud option that overflows is counted in $v(S)$. The deadline offload is the constructive counterpart of the indifference deadline~\eqref{eq:deadline}. Individuals that use the EDF rule are decoded without it, irrespective of $\delta$, so that late jobs keep waiting on premises.
+
+\emph{Serial decoder} ($\eta=1$). Jobs are taken once each in priority order. Each job is placed at the earliest capacity-feasible start on the on-premises type of least score, with the same offload and overflow tests as the dispatch decoder. This is the serial schedule-generation scheme~\cite{Kolisch1996}. It reproduces the exact on-premises schedule well on lightly loaded instances but fragments capacity under congestion, which is why the choice of decoder is left to evolution.
+
+The output of both decoders is a complete, capacity-feasible schedule: $\Phi$ is evaluated on the decoded schedule, never on the chromosome alone.
+
+\subsubsection{Local search}
+Every new individual is improved by a best-improvement hill climber over the \emph{flip} neighborhood. A job placed on premises is moved to the cloud ($\chi_j\gets1$). A job placed on the cloud is recalled, either as \emph{auto} ($\chi_j\gets0$) if its gene was \emph{cloud}, or as \emph{on-premises} ($\chi_j\gets2$) if the decoder had offloaded it. Decoding a neighbor is the dominant cost, so each move is first ranked by an $O(1)$ estimate of its fitness change. For an on-premises job, the estimate is $\sigma_j^{\mathrm{cl}}$ minus its current score. For a cloud job, it is $\sigma_j^{\mathrm{on}}-\sigma_j^{\mathrm{cl}}$. In each step, a shortlist of $K$ candidates is decoded exactly: half are the best-ranked moves and half are drawn at random from the rest, so the search is not restricted to the moves the estimate favors. The best candidate is accepted if it lowers $\Phi$, and the search stops after $B$ accepted moves or at the first step without improvement. The search is Lamarckian, i.e., the improved chromosome replaces the original in the population. A neighbor differs from the current solution in a single job gene, so its decoding is identical up to the first step at which that gene can change a decision. An implementation can therefore resume decoding from a stored checkpoint of the current solution and stop as soon as the two states coincide again.
+
+\subsubsection{Initial population}
+The population of $N$ individuals combines three kinds of individuals:
+\begin{enumerate}
+ \item \emph{Heuristic seeds}: eight constructive schedules (greedy minimum turnaround, greedy minimum cost, as soon as possible, all-cloud, fixed waiting of 25\% and 50\% of the horizon, index-staggered waiting, and capacity-aware first-fit list scheduling). Each is mapped to a chromosome by setting $\chi_j=1$ for jobs it places on the cloud and $\chi_j=0$ otherwise.
+ \item \emph{Converged seeds}: two all-\emph{auto} chromosomes, one with the rule $\mathrm{P}(\mu)$ whose decoding of the all-\emph{auto} chromosome has the best fitness and one with EDF. Each is improved by the local search until it reaches a local optimum (batches of $64$ candidates, at most $256$ non-improving candidates per step). This step is needed because an EDF solution typically requires hundreds to thousands of flips to become competitive. Under the short budgets given to ordinary individuals, EDF individuals would be eliminated by selection in the first generations.
+ \item \emph{Random individuals}: for each job, a feasible (type, start) pair is drawn with a probability biased toward cheaper pairs (the most expensive pair keeps 20\% of the weight of the cheapest), and the gene is set to \emph{cloud} if the type is a cloud type and to \emph{auto} otherwise.
+\end{enumerate}
+The strategy genes of the non-converged individuals are spread systematically: individual $k$ receives rule $\pi=k\bmod|\Pi|$, and the remaining quotient alternates $\delta$ and $\eta$. Every non-converged initial individual is improved by the local search with budget $B$.
+
+\subsubsection{Selection, crossover and mutation}
+Parents are chosen by binary tournament selection on $\Phi$. Offspring are produced by multi-step crossover fusion (MSXF)~\cite{Yamada1996}, which replaces gene-wise recombination with a short guided walk from parent $b$ toward parent $a$. At each of at most $\lceil B/2\rceil$ steps, up to $12$ job genes in which the current point differs from $a$ are sampled, and each is tried as a single-gene adoption from $a$. If the strategy genes differ, adopting all of $a$'s strategy genes at once is one more candidate. The walk moves to the best candidate even when it is worse than the current point, and the offspring is the best point visited along the walk. Because recombination is guided by $\Phi$, it does not break up coherent groups of offloading decisions the way index-based crossover can. Each job gene of the offspring is then mutated independently with probability $p_{\mathrm{mut}}=2/n$: a \emph{cloud} gene becomes \emph{auto}, and any other gene becomes \emph{cloud}. With probability $0.2$, the strategy genes move to a random neighboring configuration ($\pi\pm1$, or $\delta$ or $\eta$ flipped). Finally, the offspring is improved by the local search with budget $\lceil B/2\rceil$.
+
+\subsubsection{Replacement, elitism and perturbation}
+Replacement is generational. The best individual found so far (the incumbent $\chi^\star$) is copied into the next population. For each other priority rule present in the population, the best individual using that rule is also copied (niche elitism), so that a rule that is temporarily behind is not lost. The remaining slots are filled with offspring. When the incumbent has not improved for $p$ consecutive generations, an iterated local search (ILS) kick~\cite{Lourenco2003} is applied. A copy of $\chi^\star$ receives $\max\{3,\lfloor n/40\rfloor\}$ random flips, is driven back to a local optimum by the local search with budget $B$, and replaces one non-elite individual. It becomes the new incumbent if it improves $\Phi$, and the stagnation counter is reset. The algorithm stops after $g_{\max}$ generations, applies a final local search with budget $3B$ to the incumbent, and returns its decoded schedule.
+
+Offspring are generated independently, so the body of a generation is parallel. Drawing one random seed per offspring from a master generator keeps the run deterministic for a fixed seed, regardless of the number of threads. Table~\ref{tab:ga-params} lists the parameter values used in this work.
+
+\begin{table}[t]
+ \caption{GA parameters}
+ \label{tab:ga-params}
+ \centering
+ \footnotesize
+ \begin{tabular}{llr}
+  \hline
+  Symbol & Meaning & Value \\
+  \hline
+  $N$ & population size & 16 \\
+  $g_{\max}$ & number of generations & 120 \\
+  $B$ & local-search moves (seeds, kicks) & 8 \\
+  $\lceil B/2\rceil$ & local-search moves and MSXF steps (offspring) & 4 \\
+  $3B$ & local-search moves (final refinement) & 24 \\
+  $K$ & candidates decoded per local-search step & 48 \\
+  $p$ & stagnant generations before a kick & 6 \\
+  $p_{\mathrm{mut}}$ & job-gene mutation probability & $2/n$ \\
+  -- & strategy-gene mutation probability & 0.2 \\
+  $|\Pi|$ & priority rules (10 values of $\mu$ + EDF) & 11 \\
+  \hline
+ \end{tabular}
+\end{table}
+
+\begin{algorithm}[t]
+  \caption{Memetic Genetic Algorithm}
+  \label{alg:memetic-search}
+  \small
+  \begin{algorithmic}[1]
+    \Require Fitness $\Phi$, population size $N$, generation limit
+             $g_{\max}$, restart patience $p$, search budget $B$
+    \Ensure Best chromosome found $\chi^\star$
+
+    \State $P \gets
+      \Call{HeuristicSeeds}{} \cup \Call{WeightedRandomSeeds}{}$
+    \ForAll{$\chi \in P$}
+      \State \Call{LocalSearch}{$\chi, B$}
+    \EndFor
+    \State $P \gets P \cup \Call{ConvergedSeeds}{}$
+           \Comment{LS to local optimum}
+    \State $\chi^\star \gets \arg\min_{\chi \in P} \Phi(\chi)$;
+           \quad $s \gets 0$
+
+    \Statex
+    \For{$g = 1,\ldots,g_{\max}$}
+      \State $E \gets \{\chi^\star\} \cup \Call{NicheBest}{P}$
+             \Comment{Elitism}
+      \State $Q[1..|E|] \gets E$
+      \ParFor{$k = |E|+1,\ldots,N$}
+        \State $a \gets \Call{Tournament}{P}$;
+               \quad $b \gets \Call{Tournament}{P}$
+        \State $c \gets \Call{MSXF}{b \rightarrow a,\Phi}$
+        \State \Call{Mutate}{$c$}
+        \State \Call{LocalSearch}{$c,\lceil B/2\rceil$}
+        \State $Q[k] \gets c$
+      \EndParFor
+      \State $P \gets Q$
+
+      \Statex
+      \State $\widehat{\chi} \gets \arg\min_{\chi \in P} \Phi(\chi)$
+      \If{$\Phi(\widehat{\chi}) < \Phi(\chi^\star)$}
+        \State $\chi^\star \gets \widehat{\chi}$;
+               \quad $s \gets 0$
+      \Else
+        \State $s \gets s+1$
+      \EndIf
+      \If{$s \ge p$}
+        \State \Call{ILSKick}{$\chi^\star, B$};
+               \quad $s \gets 0$
+      \EndIf
+    \EndFor
+
+    \Statex
+    \State \Return \Call{LocalSearch}{$\chi^\star,3B$}
+           \Comment{Final refinement}
+  \end{algorithmic}
+\end{algorithm}
+
+
+
+\section{Experimental Setup}
+
+To evaluate both solutions we employ both a trace-driven simulation of a realistic HPC cluster with access to a commercial public cloud and offline benchmark instances generated from the same trace job characteristics and varying state of cluster size, load and data moving characteristics.
+All online experiments are simulated with Batsim~5~\cite{batsim_jsspp16}, a SimGrid-based simulator of resource and job management systems. Batsim owns the simulation: the clock, job submissions, job execution on the simulated platform and the output traces. Scheduling decisions are not taken by Batsim
+but by an External Decision Component (EDC) that Batsim queries over its message protocol. We wrote a bespoke EDC that calls the correct strategy(Gurobi, Metaheuristic or others) together with a wrapper that exports the platform and the workload to Batsim's input formats, launches Batsim and collects the metrics. 
+
+The on-premises side is a production cluster dedicated to reservoir simulation. It is modeled from its Slurm node definitions four homogeneous node groups of two-socket Intel Xeon nodes,
+$1{,}654$ nodes and $76{,}912$ cores. The cloud side is one partition with 12 AWS EC2 on-demand instance types, priced at their us-east-1 Linux list prices. Each on-premises node type has a curated list of compatible cloud types, chosen to have at least its physical core count and clock frequency and a CPU generation that is not older. An offloaded job may use only types compatible with the node type it requests. We assume that all types run jobs at the same
+speed as the on-premises nodes. 
+Both workloads come from the cluster's Slurm accounting log. Each is cut at a time $t_0$, which splits it into two populations. The \emph{initial-state jobs} were submitted before $t_0$: some are already running at $t_0$, the rest are pending. The \emph{window jobs} are submitted during a submission window that starts at $t_0$. The simulation starts at $t_0$ and ends when the last job completes. Every strategy may offload window jobs only. Initial-state jobs
+always run on-premises: they are part of the load each strategy faces, not part of the decisions it makes.
+
+\section{Results}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[]{figures/strategy_quality_vs_time.pdf}
+    \caption{Comparison of the speed and quality of the different strategies}
+    \label{fig:quality_time}
+\end{figure}
+The graphs in the figure \ref{fig:quality_time}
+shows the weighted-sum objective value at three different weights (0.25, 0.5 and 0.75) versus time of each solve, there is a clear trend of Gurobi taking the longest but always encountering the best solution, with the GA having a mean gap of 5.66\% to the Gurobi solution while being on average 17 times faster.  While threshold bursting is the fastest it is also the worse in terms of quality having a mean gap of 257\% to the best solution.  In terms of absolute time to solution Gurobi solves on average on 71 seconds, the GA  5.5 seconds and threshold 8.5 miliseconds.  
+
+\begin{table}[H]
+\caption{Simulation results of the 964 instance}
+\centering
+\begin{tabular}{l|l|l|l|}
+\cline{2-4}
+                                   & Turnaround(min) & Cost(\$) & Time(s) \\ \hline
+\multicolumn{1}{|l|}{FedHPC(0.25)} & 106.15          & 1186.61  & 12.60   \\ \hline
+\multicolumn{1}{|l|}{FedHPC(0.5)}  & 105.94          & 1669.52  & 11.21   \\ \hline
+\multicolumn{1}{|l|}{FedHPC(0.75)} & 105.85          & 1688.11  & 7.54    \\ \hline
+\multicolumn{1}{|l|}{No-Burst}     & 183.25          & 1615.66  & 12.80   \\ \hline
+\multicolumn{1}{|l|}{Full-Burst}   & 105.85          & 6714.20  & 13.04   \\ \hline
+\multicolumn{1}{|l|}{No-Wait}      & 105.86          & 1939.08  & 12.76   \\ \hline
+\multicolumn{1}{|l|}{Compute-Wait} & 111.93          & 1610.27  & 90.97   \\ \hline
+\multicolumn{1}{|l|}{Wise-Burst}   & 106.24          & 1556.56  & 74.08   \\ \hline
+\multicolumn{1}{|l|}{Supervised}   & 129.06          & 1220.66  & 13.49   \\ \hline
+\end{tabular}
+\end{table}
+
+\begin{table}[]
+\centering
+\begin{tabular}{l|l|l|l|}
+\cline{2-4}
+                                   & Turnaround(min) & Cost(\$) & Time(s) \\ \hline
+\multicolumn{1}{|l|}{FedHPC(0.25)} & 144.18          & 6471.17  & 441.98  \\ \hline
+\multicolumn{1}{|l|}{FedHPC(0.5)}  & 143.16          & 12347.90 & 34.71   \\ \hline
+\multicolumn{1}{|l|}{FedHPC(0.75)} & 143.14          & 11254.55 & 24.88   \\ \hline
+\multicolumn{1}{|l|}{No-Burst}     & 231.11          & 0        & 2.03    \\ \hline
+\multicolumn{1}{|l|}{Full-Burst}   & 143.14          & 30367.84 & 0.9     \\ \hline
+\multicolumn{1}{|l|}{No-Wait}      & 143.14          & 4166.52  & 1       \\ \hline
+\multicolumn{1}{|l|}{Compute-Wait} & 150.21          & 1610.27  & 377.90  \\ \hline
+\multicolumn{1}{|l|}{Wise-Burst}   & 152.46          & 9401.66  & 310.28  \\ \hline
+\multicolumn{1}{|l|}{Supervised}   & 164.05          & 8859.02  & 2.13    \\ \hline
+\end{tabular}
+\end{table}
+
+\bibliographystyle{IEEEtran}
+\bibliography{bibliography.bib}
+\end{document}

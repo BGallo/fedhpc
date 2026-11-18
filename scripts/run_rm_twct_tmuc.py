@@ -124,7 +124,7 @@ def run_fedhpc(p, w, U, L, *, horizon: int, pop_size: int, n_gen: int,
             pk = p[j][k]
             c = float(L[k] * pk)
             for t in range(0, horizon - pk + 1):
-                sl.append((k, t, pk, float(w[j] * (t + pk)), c))
+                sl.append((k, t, pk, float(w[j] * (t + pk)), c, float(w[j])))
         job_slots.append(sl)
     asgn, f1, f2, _g, _ls = _ext.weighted(
         n_jobs=n, job_slots=job_slots,

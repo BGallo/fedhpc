@@ -252,7 +252,7 @@ def fig_tradeoff(cells):
         ax.set_xscale("log")
         ax.xaxis.set_major_formatter(PLAIN)
         ax.margins(x=0.3 if len(HEUR) == 1 else 0.1, y=0.15)
-        ax.set_xlabel("median time per cell (s)")
+        ax.set_xlabel("median time per solve (s)")
         title(ax, f"{'All workloads' if name == 'all' else 'Workload ' + WNAME[name]}"
                   f" ({len(sub)} cells)")
     axes[0].set_ylabel("mean gap to optimum (%)")
@@ -313,7 +313,7 @@ def fig_quality_scatter(cells):
         ax.set_yticks([FLOOR, 1e-2, 1e-1, 1, 10, 100, 1000],
                       ["≈0", "0.01", "0.1", "1", "10", "100", "1000"])
         ax.set_ylim(FLOOR / 1.6, 5000)
-        ax.set_xlabel("wall time per cell (s)")
+        ax.set_xlabel("wall time per solve (s)")
         title(ax, f"Workload {WNAME[w]} ({len(sub) // 3} instances × 3 $\\lambda$)")
     axes[0].set_ylabel("gap to optimum (%)")
     fig.tight_layout(w_pad=0.8)
