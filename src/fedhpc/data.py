@@ -2,7 +2,10 @@
 
 Key design:
 - InstanceType represents a homogeneous family of VMs (e.g. c7e, m6i, on-premises).
-- F_j is computed from resource feasibility (CPU / mem / stor), not given as input.
+- F_j is computed from resource feasibility (CPU / mem / stor / GPU per instance, and enough instances for a
+  multi-instance job), not given as input.
+- A job runs on ``nodes`` instances of one type at once (default 1, a multi-node job otherwise); its cpu / mem /
+  stor / gpu are per instance. Capacity counts instances, so a job holds ``nodes`` units of its type.
 - Two distinct processing times per (job, type) pair:
     p_bill  — billable time (no deploy penalty): used for monetary cost.
     p_occ   — occupation time (includes deploy): used for scheduling / time indexing.
@@ -41,6 +44,8 @@ class Job:
     # Must be integral (checked by Instance.build): with integer completions,
     # f1 values of two schedules then differ by an integer, which the exact
     # Pareto searches and BPC pruning rely on.
+    nodes: int = 1       # q_j — instances the job holds at once (a multi-node job: > 1)
+    gpu: float = 0.0     # q^gpu_j — GPUs per instance
 
 
 @dataclass
@@ -58,6 +63,7 @@ class InstanceType:
     stor: float          # C^stor_m
     capacity: int | None = None  # max simultaneous instances (None = unlimited)
     fixed_cost: float = 0.0
+    gpu: float = 0.0     # C^gpu_m — GPUs per instance (declared last: positional constructors keep working)
     # U_m — one-off monetary charge added to f2 when at least one (new) job is
     # scheduled on this type (e.g. rental setup / activation fee). For a
     # capacity-1 type this is exactly a per-machine usage fee. Modelled in the
@@ -80,10 +86,12 @@ class RunningJob:
     end      : slot at which it finishes (exclusive); must satisfy end >= 1.
                Values beyond the planning horizon are clipped to ``horizon`` during
                ``Instance.build()``, so the slot is returned at the very last step.
+    units    : capacity units (instances) it holds (default 1).
     """
     id: int
     type_id: int
     end: int             # slot when the job finishes (exclusive); >= 1
+    units: int = 1
 
 
 @dataclass
@@ -120,7 +128,7 @@ class Instance:
     # c^proc_jm = κ^IO_m·ι_j + κ^VM_m·p^bill_jm + κ^S_m·q^stor_j·p^bill_jm
 
     F: dict[int, list[int]] = field(default_factory=dict)
-    # F_j = {m : q^cpu_j ≤ C^cpu_m, q^mem_j ≤ C^mem_m, q^stor_j ≤ C^stor_m}
+    # F_j = {m : q^cpu_j ≤ C^cpu_m, q^mem_j ≤ C^mem_m, q^stor_j ≤ C^stor_m, q^gpu_j ≤ C^gpu_m, q_j ≤ N_m}
 
     T: dict[tuple[int, int], range] = field(default_factory=dict)
     # T_jm = {t ∈ T : t ≥ a_j, t + p^occ_jm ≤ H}
@@ -131,20 +139,35 @@ class Instance:
     # ---- Populated by build() for running jobs --------------------------------
 
     n_running: dict[int, int] = field(default_factory=dict)
-    # {type_id: count of running jobs on that type at t=0}
+    # {type_id: capacity units held by running jobs at t=0}
 
     rj_arrivals: dict[tuple[int, int], int] = field(default_factory=dict)
-    # {(type_id, slot): count of running jobs completing at that slot}
+    # {(type_id, slot): capacity units of running jobs completing at that slot}
     # Used by SpaceTimeFormulation to inject ghost completions into flow equations.
 
     occupied: dict[tuple[int, int], int] = field(default_factory=dict)
-    # {(type_id, t): count of running jobs occupying type during [t, t+1)}
+    # {(type_id, t): capacity units of running jobs occupying type during [t, t+1)}
     # Used by OccupancyFormulation to tighten the capacity upper bound on w[m,t].
+
+    @property
+    def unit_demand(self) -> bool:
+        """Every job and running job holds one capacity unit (no multi-node job)."""
+        return all(j.nodes == 1 for j in self.jobs) and all(rj.units == 1 for rj in self.running_jobs)
+
+    def require_unit_demand(self, solver: str) -> None:
+        """Raise for a solver that assumes one capacity unit per job."""
+        if not self.unit_demand:
+            raise NotImplementedError(f"{solver} assumes one instance per job: this instance has multi-node "
+                                      "jobs (Job.nodes > 1 or RunningJob.units > 1); use the MIP formulations")
 
     def build(self) -> None:
         fractional = [j.id for j in self.jobs if not float(j.weight).is_integer()]
         if fractional:
             raise ValueError(f"Job weights must be integral (jobs {fractional})")
+        bad_nodes = [j.id for j in self.jobs if not (isinstance(j.nodes, int) and j.nodes >= 1)] + \
+            [rj.id for rj in self.running_jobs if not (isinstance(rj.units, int) and rj.units >= 1)]
+        if bad_nodes:
+            raise ValueError(f"Job nodes / running-job units must be integers >= 1 ({bad_nodes})")
         if not self.cost_resolution > 0:
             raise ValueError(f"cost_resolution must be positive, got {self.cost_resolution}")
         delta = self.cost_resolution
@@ -159,7 +182,8 @@ class Instance:
             # (eq. 1) Resource-based feasibility
             self.F[j.id] = [
                 m.id for m in self.instance_types
-                if j.cpu <= m.cpu and j.mem <= m.mem and j.stor <= m.stor
+                if j.cpu <= m.cpu and j.mem <= m.mem and j.stor <= m.stor and j.gpu <= m.gpu
+                and (m.capacity is None or j.nodes <= m.capacity)
             ]
 
             for m_id in self.F[j.id]:
@@ -173,11 +197,11 @@ class Instance:
                 self.p_occ[j.id, m_id] = max(1, math.ceil(p_bill + m.deploy))
 
                 # (eq. 4) Monetary cost — uses p_bill (deploy is free),
-                # rounded to the cost grid δ
+                # rounded to the cost grid δ. Every instance of a multi-node
+                # job is billed (VM and storage); the I/O volume is the job's.
                 units = round((
                     m.cost_io * j.io_volume
-                    + m.cost_vm * p_bill
-                    + m.cost_stor * j.stor * p_bill
+                    + j.nodes * (m.cost_vm * p_bill + m.cost_stor * j.stor * p_bill)
                 ) / delta)
                 self.c_units[j.id, m_id] = units
                 self.c[j.id, m_id] = units * delta
@@ -212,7 +236,7 @@ class Instance:
             raise ValueError(f"Job-type pairs with no feasible start time: {no_times}")
 
         # ---- Running-job derived indices ------------------------------------
-        # Each running job occupies exactly one capacity unit from slot 0 until
+        # Each running job occupies its ``units`` capacity units from slot 0 until
         # it finishes.  Jobs finishing beyond the horizon are treated as if they
         # finish at H (they permanently occupy a slot in the planning window).
         #
@@ -229,7 +253,7 @@ class Instance:
         n_listed: dict[int, int] = {}
         for rj in self.running_jobs:
             if rj.type_id in capacity_map:
-                n_listed[rj.type_id] = n_listed.get(rj.type_id, 0) + 1
+                n_listed[rj.type_id] = n_listed.get(rj.type_id, 0) + rj.units
         over = {mid: (n, capacity_map[mid]) for mid, n in n_listed.items()
                 if n > capacity_map[mid]}
         if over:
@@ -246,18 +270,18 @@ class Instance:
             if cap is None:
                 continue
 
-            self.n_running[mid] = self.n_running.get(mid, 0) + 1
+            self.n_running[mid] = self.n_running.get(mid, 0) + rj.units
 
             # Clip end to horizon so the slot is returned within the window
             end_slot = min(rj.end, self.horizon)
 
-            # Ghost completion: instance returns to idle pool at end_slot
+            # Ghost completion: instances return to the idle pool at end_slot
             key = (mid, end_slot)
-            self.rj_arrivals[key] = self.rj_arrivals.get(key, 0) + 1
+            self.rj_arrivals[key] = self.rj_arrivals.get(key, 0) + rj.units
 
             # Occupancy during [0, end_slot): counts towards per-slot capacity usage
             for t in range(end_slot):
-                self.occupied[mid, t] = self.occupied.get((mid, t), 0) + 1
+                self.occupied[mid, t] = self.occupied.get((mid, t), 0) + rj.units
 
     # ---- Schedule feasibility ----------------------------------------------
 
@@ -271,12 +295,13 @@ class Instance:
         messages (empty when feasible).
 
         Checks known job ids, an allowed type (m ∈ F_j), a start in T_jm
-        (release and horizon), and, per finite-capacity type, that new jobs
-        plus running jobs never exceed the capacity in any slot. With
+        (release and horizon), and, per finite-capacity type, that the units of
+        new jobs plus running jobs never exceed the capacity in any slot. With
         ``complete`` (the default) every job must be assigned.
         """
         out: list[str] = []
         known = {j.id for j in self.jobs}
+        nodes = {j.id: j.nodes for j in self.jobs}
         if complete:
             missing = sorted(known - assignment.keys())
             if missing:
@@ -297,8 +322,8 @@ class Instance:
                            f"{self.T[jid, mid].start}..{self.T[jid, mid].stop - 1}")
                 continue
             if mid in delta:
-                delta[mid][t] += 1
-                delta[mid][t + self.p_occ[jid, mid]] -= 1
+                delta[mid][t] += nodes[jid]
+                delta[mid][t + self.p_occ[jid, mid]] -= nodes[jid]
         for mid, d in delta.items():
             busy = 0
             for t in range(H):

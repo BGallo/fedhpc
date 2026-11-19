@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import bisect
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .data import Instance
 from .model import Solution
@@ -64,9 +64,15 @@ class _Capacity:
     """Mutable per-type occupancy state for incremental list scheduling."""
 
     inst: Instance
-    occ: dict[int, list[int]]          # type_id -> per-slot running count (finite types)
+    occ: dict[int, list[int]]          # type_id -> per-slot units in use (finite types)
     cap: dict[int, int | None]         # type_id -> capacity (None = unlimited)
     full: dict[int, list[int]]         # type_id -> sorted list of saturated slots
+    nodes: dict[int, int] = field(default_factory=dict)  # job id -> units it holds (Job.nodes)
+
+    def _units(self, jid: int) -> int:
+        if not self.nodes:
+            self.nodes.update((j.id, j.nodes) for j in self.inst.jobs)
+        return self.nodes[jid]
 
     @classmethod
     def fresh(cls, inst: Instance) -> "_Capacity":
@@ -91,6 +97,16 @@ class _Capacity:
         t = max(rng.start, not_before)
         if self.cap[mid] is None:                     # unlimited cloud type
             return t if t < rng.stop else None
+        q = self._units(jid)
+        if q > 1:
+            # A multi-node job needs q free units in every slot: scan the occupancy.
+            row, c = self.occ[mid], self.cap[mid]
+            while t < rng.stop:
+                bad = next((s for s in range(t, t + p) if row[s] + q > c), None)
+                if bad is None:
+                    return t
+                t = bad + 1
+            return None
         fs = self.full[mid]
         while t < rng.stop:
             i = bisect.bisect_left(fs, t)
@@ -108,9 +124,11 @@ class _Capacity:
         row = self.occ[mid]
         c = self.cap[mid]
         fs = self.full[mid]
+        q = self._units(jid)
         for s in range(t, t + p):
-            row[s] += 1
-            if row[s] == c:
+            before = row[s]
+            row[s] += q
+            if before < c <= row[s]:
                 bisect.insort(fs, s)
 
 

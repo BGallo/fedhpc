@@ -818,6 +818,7 @@ def heuristic_schedules(inst: Instance, *, ea: bool = False) -> list[dict[int, t
     NSGA-II front is added — a few seconds that the box searches of a
     Pareto mapping amortise. Partial schedules are dropped.
     """
+    inst.require_unit_demand("branch-and-price (bpc)")
     from . import baselines
 
     sols = [baselines.greedy_earliest_completion(inst),
@@ -2383,6 +2384,7 @@ def solve_root_relaxation(
     :class:`PricingOptions`; with ng-routes the bound lies between the
     compact LP and the elementary master's.
     """
+    inst.require_unit_demand("branch-and-price (bpc)")
     if big_m is None:
         big_m = _big_m_for(inst)
     prep = _prepare(inst, reduce)
@@ -3208,6 +3210,7 @@ def _assignment_to_solution(inst: Instance, objective: float,
 
 def solve_weighted_sum_bpc(inst: Instance, weight1: float, weight2: float, **kwargs) -> Solution:
     """Exact branch-and-price solve of ``min weight1*f1 + weight2*f2``."""
+    inst.require_unit_demand("branch-and-price (bpc)")
     obj, assignment = _branch_and_price(inst, weight1, weight2, **kwargs)
     return _assignment_to_solution(inst, obj, assignment)
 
@@ -3273,6 +3276,7 @@ def solve_f1_bpc(inst: Instance, **kwargs) -> Solution:
     :func:`_lex_tiebreak`). A ``time_limit`` applies to each phase; past it
     in phase 1, :class:`BPCTimeLimit` propagates.
     """
+    inst.require_unit_demand("branch-and-price (bpc)")
     return _lexmin(inst, "f1", **kwargs)
 
 
@@ -3282,6 +3286,7 @@ def solve_f2_bpc(inst: Instance, **kwargs) -> Solution:
     Status ``"feasible"`` when the tie-break phase failed (see
     :func:`_lex_tiebreak`). ``time_limit``: as :func:`solve_f1_bpc`.
     """
+    inst.require_unit_demand("branch-and-price (bpc)")
     return _lexmin(inst, "f2", **kwargs)
 
 
@@ -3333,6 +3338,7 @@ def make_bpc_lexmin_bounded(
     they do coincide), though in ``pareto.py``'s actual usage ``bound`` is
     always the same axis as ``secondary``.
     """
+    inst.require_unit_demand("branch-and-price (bpc)")
     counters = {"n_solves": 0, "build_time": 0.0}
     # Shared by every box solve: the preprocessing, the column pool (each
     # column stays valid under any bound rows) and every schedule found so

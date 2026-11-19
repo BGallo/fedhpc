@@ -299,9 +299,12 @@ def nonnegative_data(inst: Instance) -> bool:
 
 def unbounded_types(inst: Instance) -> set[int]:
     """Types whose capacity can never bind: unlimited, or with at least as many
-    instances free at t = 0 as there are jobs feasible on them (running jobs
-    only ever release capacity)."""
-    n_feasible = Counter(m for j in inst.jobs for m in inst.F[j.id])
+    instances free at t = 0 as the jobs feasible on them hold together (running
+    jobs only ever release capacity)."""
+    n_feasible = Counter()
+    for j in inst.jobs:
+        for m in inst.F[j.id]:
+            n_feasible[m] += j.nodes
     return {
         m.id for m in inst.instance_types
         if m.capacity is None
@@ -510,12 +513,14 @@ class SpaceTimeFormulation(Formulation):
         mdl = gp.Model("fedhpc", env=_shared_env)
         mdl.setParam("OutputFlag", 0)
 
-        # N_m: boundary flow (eq. 14). Use job count as upper bound when unlimited.
-        n_jobs = len(inst.jobs)
+        # N_m: boundary flow (eq. 14). When unlimited, the units all jobs hold
+        # together (the job count without multi-node jobs) bound it.
+        n_jobs = sum(j.nodes for j in inst.jobs)
         N = {
             itype.id: itype.capacity if itype.capacity is not None else n_jobs
             for itype in inst.instance_types
         }
+        nodes_of = {j.id: j.nodes for j in inst.jobs}
 
         # ---- Decision variables -------------------------------------------
 
@@ -570,15 +575,29 @@ class SpaceTimeFormulation(Formulation):
         # (type, start) and (type, completion) node, so each row below is a
         # lookup instead of a scan over the type's jobs. x is keyed job-major,
         # so every bucket lists jobs in instance order, as the rows did.
+        # A multi-node job's arc carries its q_j units of flow (coefficient q_j).
         flow_ids = {m.id for m in flow_types}
         by_job: dict[int, list[gp.Var]] = {j.id: [] for j in inst.jobs}
         starting_at: dict[tuple[int, int], list[gp.Var]] = {}
         arriving_at: dict[tuple[int, int], list[gp.Var]] = {}
+        units_at: dict[tuple[str, int, int], list[int]] = {}
         for (jid, mid, t), var in x.items():
             by_job[jid].append(var)
             if mid in flow_ids:
+                q = nodes_of[jid]
+                end = t + inst.p_occ[jid, mid]
                 starting_at.setdefault((mid, t), []).append(var)
-                arriving_at.setdefault((mid, t + inst.p_occ[jid, mid]), []).append(var)
+                arriving_at.setdefault((mid, end), []).append(var)
+                units_at.setdefault(("s", mid, t), []).append(q)
+                units_at.setdefault(("a", mid, end), []).append(q)
+
+        def flow_sum(side: str, bucket: dict, key: tuple):
+            # Unit arcs (and no arc) build the very expression the unit model did: an empty bucket is an empty
+            # LinExpr, not 0, so every flow row reaches Gurobi as before (the same row, not a negated one, which
+            # on these degenerate models can make Gurobi return another of the tied optima).
+            arcs = bucket.get(key, ())
+            coefs = units_at.get((side, *key), ())
+            return gp.quicksum(arcs) if all(q == 1 for q in coefs) else gp.LinExpr(coefs, arcs)
 
         if self.compressed_flow:
             # Every start and completion must be a node of the compressed
@@ -619,10 +638,10 @@ class SpaceTimeFormulation(Formulation):
                     lhs_wait = nm_available if v == 0 else y[mid, v - 1]
                     rhs_wait = nm if v == H else y[mid, v]
                 arriving = (
-                    gp.quicksum(arriving_at.get((mid, v), ()))
+                    flow_sum("a", arriving_at, (mid, v))
                     + inst.rj_arrivals.get((mid, v), 0)  # ghost completions
                 )
-                starting = gp.quicksum(starting_at.get((mid, v), ()))
+                starting = flow_sum("s", starting_at, (mid, v))
                 mdl.addConstr(
                     lhs_wait + arriving == rhs_wait + starting,
                     name=f"flow[{mid},{v}]",
@@ -692,7 +711,7 @@ class OccupancyFormulation(Formulation):
             for itype in inst.instance_types
         }
 
-        # Occupancy definition: w_mt = Σ jobs running during [t, t+1)
+        # Occupancy definition: w_mt = Σ units of the jobs running during [t, t+1)
         # tau <= t < tau + p_occ  ⟺  tau ∈ (t − p_occ, t], intersected with the
         # feasible-start range T_jm.  Since T_jm is a contiguous range, this
         # intersection is computed directly instead of scanning all of T_jm.
@@ -701,7 +720,7 @@ class OccupancyFormulation(Formulation):
             jobs_mid = jobs_by_type[mid]
             for t in range(H):
                 running = gp.quicksum(
-                    x[j.id, mid, tau]
+                    j.nodes * x[j.id, mid, tau]
                     for j in jobs_mid
                     for tau in range(
                         max(inst.T[j.id, mid].start, t - inst.p_occ[j.id, mid] + 1),
@@ -714,7 +733,8 @@ class OccupancyFormulation(Formulation):
         # Running jobs pre-occupy some slots, so new jobs can only use the remainder.
         for itype in inst.instance_types:
             mid = itype.id
-            base_ub = itype.capacity if itype.capacity is not None else len(jobs_by_type[mid])
+            base_ub = (itype.capacity if itype.capacity is not None
+                       else sum(j.nodes for j in jobs_by_type[mid]))
             for t in range(H):
                 # Subtract running jobs still active during [t, t+1)
                 rj_occ = inst.occupied.get((mid, t), 0)

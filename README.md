@@ -270,5 +270,5 @@ Managed with [uv](https://docs.astral.sh/uv/). See `pyproject.toml` for the full
 
 ## References
 
-FED-HPC problem formulation: `MOFE__Multi_Objective_Scheduling_on_Federated_Enviroments.pdf` (not in the repository). Formulation reductions: `docs/formulation_reductions.tex`.
+FED-HPC problem formulation: `MOFE__Multi_Objective_Scheduling_on_Federated_Enviroments.pdf` (not in the repository). Formulation reductions: `docs/formulation_reductions.tex`. Data transfer between distributed on-prem sites (design note): `docs/geo_distributed_transfer.md`.
 

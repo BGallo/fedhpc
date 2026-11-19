@@ -90,6 +90,7 @@ def _job_slots(inst: Instance) -> list[list[tuple[int, int, int, float, float]]]
     _prune_dominated_cloud_types) — this only shrinks the heuristic search
     space, never the exact MIP's.
     """
+    inst.require_unit_demand("the C++ heuristics (moea)")
     _require_no_fixed_costs(inst)
     cap_of = {m.id: m.capacity for m in inst.instance_types}
     slots: list[list[tuple[int, int, int, float, float]]] = []
@@ -113,6 +114,7 @@ def _job_slots_ext(inst: Instance):
 
 def _type_cap(inst: Instance) -> list[int]:
     """Capacity list indexed by type_id. -1 = unlimited."""
+    inst.require_unit_demand("the C++ heuristics (moea)")
     max_id = max(m.id for m in inst.instance_types)
     cap = [-1] * (max_id + 1)
     for m in inst.instance_types:

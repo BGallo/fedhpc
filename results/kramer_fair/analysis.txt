@@ -1,0 +1,60 @@
+Installed 2 packages in 27ms
+== Table-3 layout, default params (12 inst/line): opt | gap_lp% | gap% | nodes | t(s) ==
+  n  m                 TI                 |                 AF                 |               fed_st               |               fed_af              
+ 20  2   12 0.232 0.000     7.7    1.1    |   12 0.232 0.000     7.7    0.3    |   12 0.232 0.000     6.2    0.3    |   12 0.232 0.000     6.9    0.3   
+ 20  3   12 0.021 0.000     1.0    0.7    |   12 0.021 0.000     1.0    0.1    |   12 0.021 0.000     1.0    0.2    |   12 0.021 0.000     1.0    0.1   
+ 20  5   12 0.034 0.000     1.0    0.4    |   12 0.034 0.000     1.0    0.1    |   12 0.034 0.000     1.0    0.1    |   12 0.034 0.000     1.0    0.1   
+ 20 10   12 0.000 0.000     1.0    0.2    |   12 0.000 0.000     1.0    0.0    |   12 0.000 0.000     1.0    0.0    |   12 0.000 0.000     1.0    0.0   
+ 50  2   12 0.109 0.000  1143.7   47.4    |   12 0.109 0.000   149.8   17.0    |   12 0.109 0.000   588.7   26.6    |   12 0.109 0.000   150.3   14.9   
+ 50  3   12 0.095 0.000   579.1   21.4    |   12 0.095 0.000   113.8    7.1    |   12 0.095 0.000   324.8   10.1    |   12 0.095 0.000   168.4    7.5   
+ 50  5   12 0.028 0.000   119.2    5.8    |   12 0.028 0.000    63.4    2.4    |   12 0.028 0.000    67.9    1.9    |   12 0.028 0.000    59.8    2.4   
+ 50 10   12 0.016 0.000     2.2    1.7    |   12 0.016 0.000     1.5    0.3    |   12 0.016 0.000     1.5    0.3    |   12 0.016 0.000     1.8    0.2   
+100  2    8 0.097 0.150  2624.2  722.7    |    8 0.097 0.115  1490.1  651.2    |    9 0.097 0.047  4015.2  691.1    |    8 0.097 0.110  2345.5  683.6   
+100  3    9 0.055 0.029  4228.2  747.4    |    9 0.055 0.010  4882.5  670.7    |   10 0.055 0.012  4912.3  465.9    |   10 0.055 0.008  4341.2  471.8   
+100  5   12 0.032 0.000 11812.7  273.2    |   12 0.032 0.000  2014.5   99.3    |   12 0.032 0.000  5587.0  124.5    |   12 0.032 0.000  2135.1   91.3   
+100 10   12 0.013 0.000   273.5   14.3    |   12 0.013 0.000   206.7    8.8    |   12 0.013 0.000   294.5    8.2    |   12 0.013 0.000   140.0    7.8   
+Sum/Avg 137 0.0149  1732.8  153.0 | 137 0.0105   744.4  121.4 | 139 0.0049  1316.8  110.8 | 138 0.0099   779.3  106.7
+
+== Overall per config (144 inst): solved, sgm time (PAR2, shift 10), mean build ==
+TI      default: 137 /  18.8s   tuned: 137 /  18.7s   tuned+ws: 136 /  18.8s   build 2.28s
+AF      default: 137 /  10.5s   tuned: 137 /  10.5s   tuned+ws: 137 /  10.2s   build 0.40s
+fed_st  default: 139 /  10.2s   tuned: 138 /  10.4s   tuned+ws: 137 /  10.1s   build 0.44s
+fed_af  default: 138 /  10.0s   tuned: 138 /  10.2s   tuned+ws: 137 /   9.9s   build 0.44s
+
+== Noise baseline (identical params, different run) ==
+AF default vs AF tuned (same params)         n= 66 geo ratio AF/AF = 1.005  AF faster on  31/66  Wilcoxon p=0.706
+   per-instance |log ratio| median 0.024
+
+== Model comparisons, default params ==
+TI -> AF                                     n=102 geo ratio AF/TI = 0.354  AF faster on  86/102  Wilcoxon p=2.62e-15
+fed_st -> fed_af                             n= 66 geo ratio fed_af/fed_st = 0.952  fed_af faster on  40/66  Wilcoxon p=0.156
+AF -> fed_af                                 n= 65 geo ratio fed_af/AF = 0.940  fed_af faster on  38/65  Wilcoxon p=0.0623
+AF -> fed_st                                 n= 67 geo ratio fed_st/AF = 0.988  fed_st faster on  29/67  Wilcoxon p=0.708
+TI -> fed_st                                 n=102 geo ratio fed_st/TI = 0.354  fed_st faster on  92/102  Wilcoxon p=3.18e-17
+
+== Model comparisons, each at its tuned params ==
+TI -> AF                                     n=101 geo ratio AF/TI = 0.358  AF faster on  86/101  Wilcoxon p=6.84e-15
+fed_st -> fed_af                             n= 66 geo ratio fed_af/fed_st = 0.943  fed_af faster on  37/66  Wilcoxon p=0.309
+AF -> fed_af                                 n= 66 geo ratio fed_af/AF = 0.944  fed_af faster on  42/66  Wilcoxon p=0.0123
+AF -> fed_st                                 n= 65 geo ratio fed_st/AF = 1.001  fed_st faster on  30/65  Wilcoxon p=0.947
+
+== Tuning effect (default -> tuned) and warm start (tuned -> tuned+ws) ==
+TI tuning                                    n=103 geo ratio TI/TI = 0.987  TI faster on  61/103  Wilcoxon p=0.0384
+TI warm start                                n=104 geo ratio TI/TI = 1.010  TI faster on  42/104  Wilcoxon p=0.169
+AF warm start                                n= 66 geo ratio AF/AF = 0.939  AF faster on  35/66  Wilcoxon p=0.0595
+fed_st tuning                                n= 66 geo ratio fed_st/fed_st = 1.017  fed_st faster on  35/66  Wilcoxon p=0.583
+fed_st warm start                            n= 66 geo ratio fed_st/fed_st = 0.914  fed_st faster on  38/66  Wilcoxon p=0.0084
+fed_af tuning                                n= 65 geo ratio fed_af/fed_af = 1.006  fed_af faster on  34/65  Wilcoxon p=0.331
+fed_af warm start                            n= 67 geo ratio fed_af/fed_af = 0.953  fed_af faster on  32/67  Wilcoxon p=0.313
+
+== Hard subset n=100 only, default ==
+AF -> fed_af (n=100)                         n= 41 geo ratio fed_af/AF = 0.910  fed_af faster on  25/41  Wilcoxon p=0.02
+AF -> fed_st (n=100)                         n= 42 geo ratio fed_st/AF = 0.958  fed_st faster on  18/42  Wilcoxon p=0.97
+TI -> AF (n=100)                             n= 48 geo ratio AF/TI = 0.334  AF faster on  38/48  Wilcoxon p=1.91e-07
+
+== Root behaviour, default (solved runs) ==
+TI      solved 137: closed at root 105, optimum found at root 108, mean gap LP 0.0545% -> root 0.0307%
+AF      solved 137: closed at root 106, optimum found at root 108, mean gap LP 0.0546% -> root 0.0290%
+fed_st  solved 139: closed at root 104, optimum found at root 108, mean gap LP 0.0548% -> root 0.0286%
+fed_af  solved 138: closed at root 107, optimum found at root 109, mean gap LP 0.0548% -> root 0.0282%
+warm start quality: median 0.000% max 2.823% above optimum; mean heuristic time 11.3s

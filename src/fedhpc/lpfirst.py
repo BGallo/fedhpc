@@ -405,6 +405,7 @@ def solve_lpfirst(
     indices to seed the master with; when given, it receives the support of
     the final LP and of every schedule found, for the next solve.
     """
+    inst.require_unit_demand("lpfirst")
     opts = options or LPFirstOptions()
     t0 = time.perf_counter()
     deadline = None if time_limit is None else t0 + time_limit
@@ -603,6 +604,7 @@ def make_lpfirst_lexmin_bounded(inst: Instance, time_limit: float | None = None,
     bound rows) and the schedules found so far. ``time_limit`` caps each
     phase; an unproven phase gives a ``"feasible"`` result, which the box
     search treats as inconclusive."""
+    inst.require_unit_demand("lpfirst")
     counters = {"n_solves": 0, "build_time": 0.0}
     t0 = time.perf_counter()
     ti = _TI(inst, bpc._prepare(inst))

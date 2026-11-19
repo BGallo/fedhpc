@@ -1,0 +1,13 @@
+{
+  "AF": {},
+  "TI": {
+    "Method": 1
+  },
+  "fed_af": {
+    "DegenMoves": 0,
+    "Method": 1
+  },
+  "fed_st": {
+    "Method": 1
+  }
+}
