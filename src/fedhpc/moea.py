@@ -79,7 +79,7 @@ def _prune_dominated_cloud_types(
     return [m for m in feasible if m not in dominated]
 
 
-def _job_slots(inst: Instance) -> list[list[tuple[int, int, int, float, float]]]:
+def _job_slots(inst: Instance, *, require_unit: bool = True) -> list[list[tuple[int, int, int, float, float]]]:
     """Flatten Instance into per-job slot tables for the C++ layer.
 
     Each slot is (type_id, start, p_occ, f1_contrib, cost).
@@ -89,8 +89,13 @@ def _job_slots(inst: Instance) -> list[list[tuple[int, int, int, float, float]]]
     Per-job feasible types are lightly pruned first (see
     _prune_dominated_cloud_types) — this only shrinks the heuristic search
     space, never the exact MIP's.
+
+    The slot-genome heuristics count one capacity unit per job, so
+    multi-node instances are refused unless ``require_unit`` is False (the
+    memetic GA, which only derives seed genomes from these tables).
     """
-    inst.require_unit_demand("the C++ heuristics (moea)")
+    if require_unit:
+        inst.require_unit_demand("the C++ heuristics (moea)")
     _require_no_fixed_costs(inst)
     cap_of = {m.id: m.capacity for m in inst.instance_types}
     slots: list[list[tuple[int, int, int, float, float]]] = []
@@ -106,15 +111,18 @@ def _job_slots(inst: Instance) -> list[list[tuple[int, int, int, float, float]]]
     return slots
 
 
-def _job_slots_ext(inst: Instance):
+def _job_slots_ext(inst: Instance, *, require_unit: bool = True):
     """C++ payload: public/tested five-tuples plus the decoder-only weight."""
     return [[(*slot, float(j.weight)) for slot in slots]
-            for j, slots in zip(inst.jobs, _job_slots(inst), strict=True)]
+            for j, slots in zip(inst.jobs, _job_slots(inst, require_unit=require_unit), strict=True)]
 
 
-def _type_cap(inst: Instance) -> list[int]:
-    """Capacity list indexed by type_id. -1 = unlimited."""
-    inst.require_unit_demand("the C++ heuristics (moea)")
+def _type_cap(inst: Instance, *, require_unit: bool = True) -> list[int]:
+    """Capacity list indexed by type_id. -1 = unlimited. ``require_unit``: as
+    for :func:`_job_slots` (False for the dispatch decoders, which take
+    ``Job.nodes`` through :func:`_dispatch_nodes`)."""
+    if require_unit:
+        inst.require_unit_demand("the C++ heuristics (moea)")
     max_id = max(m.id for m in inst.instance_types)
     cap = [-1] * (max_id + 1)
     for m in inst.instance_types:
@@ -721,10 +729,27 @@ def heuristic_weighted_sum_reference(
     kw = dict(pop_size=pop_size, n_gen=n_gen, seed=seed, n_threads=n_threads,
               ls_moves=ls_moves, restart_patience=restart_patience, shortlist=shortlist,
               xover_mode=2)
-    _, f1_T, _, _, _ = _weighted_raw(inst, 1.0, 0.0, 1e18, **kw)
-    _, _, f2_T, _, _ = _weighted_raw(inst, 1e6, 1.0, f1_T + 0.5, **kw)
-    _, f1_0, f2_0, _, _ = _weighted_raw(inst, 1.0, 1e6, 1e18, **kw)
+    if inst.unit_demand:
+        solve = lambda w1, w2, cap: _weighted_raw(inst, w1, w2, cap, **kw)[1:3]  # noqa: E731
+    else:   # the slot-genome GA counts one unit per job: estimate on the dispatch ILS
+        solve = lambda w1, w2, cap: _dispatch_raw(inst, w1, w2, cap, seed=seed, n_threads=n_threads)  # noqa: E731
+    f1_T, _ = solve(1.0, 0.0, 1e18)
+    _, f2_T = solve(1e6, 1.0, f1_T + 0.5)
+    f1_0, f2_0 = solve(1.0, 1e6, 1e18)
     return float(f1_T), float(f2_T), float(f1_0), float(f2_0)
+
+
+def _dispatch_raw(inst: Instance, w1: float, w2: float, f1_cap: float, *, seed: int,
+                  n_threads: int, n_kicks: int = 16) -> tuple[float, float]:
+    """``(f1, f2)`` of a light :func:`weighted_solve_dispatch` run at fixed
+    weights, for the reference points of multi-node instances."""
+    _require_ext()
+    _asgn, f1, f2, _g, _st = _ext.weighted_dispatch(
+        H=inst.horizon, jobs=_dispatch_jobs(inst), type_cap=_type_cap(inst, require_unit=False),
+        init_occ=_init_occ(inst), w1=w1, w2=w2, f1_cap=f1_cap, seed=seed, n_threads=n_threads,
+        K=64, n_kicks=n_kicks, kick_size=16, flags=64 | 4096 | 8192, mu=-1.0,
+        kick_patience=5, K_max=256, nodes=_dispatch_nodes(inst))
+    return f1, f2
 
 
 def heuristic_weighted_reference_points(
@@ -949,6 +974,11 @@ def _dispatch_jobs(inst: Instance):
     return out
 
 
+def _dispatch_nodes(inst: Instance) -> list[int]:
+    """Capacity units per job for the dispatch decoders (``Job.nodes``)."""
+    return [int(j.nodes) for j in inst.jobs]
+
+
 def weighted_solve_dispatch(
     inst: Instance,
     lam: float,
@@ -1007,11 +1037,11 @@ def weighted_solve_dispatch(
     _, (w1, w2, f1_cap) = _heuristic_weights(
         inst, lam, f1_T, f2_T, f1_0, f2_0, seed=seed, n_threads=n_threads)
     asgn, f1, f2, _g, stats = _ext.weighted_dispatch(
-        H=inst.horizon, jobs=_dispatch_jobs(inst), type_cap=_type_cap(inst),
+        H=inst.horizon, jobs=_dispatch_jobs(inst), type_cap=_type_cap(inst, require_unit=False),
         init_occ=_init_occ(inst), w1=w1, w2=w2, f1_cap=f1_cap, seed=seed,
         n_threads=n_threads, K=K, max_iters=max_iters, n_kicks=n_kicks,
         kick_size=kick_size, flags=flags, ls=int(bool(ls)), mu=mu, n_mu=n_mu,
-        kick_patience=kick_patience, K_max=K_max,
+        kick_patience=kick_patience, K_max=K_max, nodes=_dispatch_nodes(inst),
     )
     sol = _to_solutions(inst, [(asgn, f1, f2)])[0]
     return (sol, stats) if return_stats else sol
@@ -1073,6 +1103,14 @@ def weighted_solve_memetic(
     ``flags`` 4096 adds the indifference-deadline EDF priority of
     :func:`weighted_solve_dispatch` as one more evolved priority (reported
     ``mu`` -2), and 8192 decodes EDF individuals without the deadline offload.
+    ``flags`` 4194304 (``1 << 22``) adds the urgent-first WSPT priority (``mu``
+    -3, ``set_priority_urgent`` in ``_ext/weighted_dispatch.hpp``): WSPT, with
+    the jobs its all-on-prem dispatch cannot start before their latest start
+    promoted ahead, in latest-start order. It targets wide multi-node jobs
+    whose latest start the horizon forces early (Supercloud ``normal``,
+    2026-11-19: 18-28 % -> 2-7 % above the MIP f1); measured neutral on
+    one-node instances. With ``pop_size`` below the number of priorities
+    (grid + EDF + urgent) the initial spread may never sample the last ones.
     The local search decodes with the fast DEngine (``flags`` 16384: reference
     decoder; bit-identical trajectories, scores re-summed in job order). On the
     261 generated-bench cells (2026-11-04, dispatch_study README, "Memetic with
@@ -1092,11 +1130,12 @@ def weighted_solve_memetic(
     _, (w1, w2, f1_cap) = _heuristic_weights(
         inst, lam, f1_T, f2_T, f1_0, f2_0, seed=seed, n_threads=n_threads)
     asgn, f1, f2, _g, stats = _ext.weighted_memetic(
-        n_jobs=len(inst.jobs), job_slots=_job_slots_ext(inst), type_cap=_type_cap(inst), init_occ=_init_occ(inst), H=inst.horizon,
+        n_jobs=len(inst.jobs), job_slots=_job_slots_ext(inst, require_unit=False),
+        type_cap=_type_cap(inst, require_unit=False), init_occ=_init_occ(inst), H=inst.horizon,
         jobs=_dispatch_jobs(inst), w1=w1, w2=w2, f1_cap=f1_cap, pop_size=pop_size,
         n_gen=n_gen, seed=seed, n_threads=n_threads, ls_moves=ls_moves,
         restart_patience=restart_patience, shortlist=shortlist, xover_mode=xover_mode,
-        flags=flags, mu=mu, ablate=ablate, adapt=adapt,
+        flags=flags, mu=mu, ablate=ablate, adapt=adapt, nodes=_dispatch_nodes(inst),
     )
     sol = _to_solutions(inst, [(asgn, f1, f2)])[0]
     return (sol, stats) if return_stats else sol
@@ -1118,6 +1157,7 @@ def _sgs_candidates(inst: Instance) -> list[list[tuple[int, int, int, int, int, 
     cap uses -1 for unlimited capacity (matches SgsCandidate.cap's C++
     convention), unlike Instance.instance_types' capacity=None.
     """
+    inst.require_unit_demand("the SGS heuristics (moea)")
     _require_no_fixed_costs(inst)
     if any(j.weight != 1.0 for j in inst.jobs):
         # the SGS decoders compute f1 from arrivals in C++, unweighted

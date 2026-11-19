@@ -818,14 +818,13 @@ def heuristic_schedules(inst: Instance, *, ea: bool = False) -> list[dict[int, t
     NSGA-II front is added — a few seconds that the box searches of a
     Pareto mapping amortise. Partial schedules are dropped.
     """
-    inst.require_unit_demand("branch-and-price (bpc)")
     from . import baselines
 
     sols = [baselines.greedy_earliest_completion(inst),
             baselines.greedy_earliest_completion(inst, order="arrival"),
             baselines.onprem_only_spt(inst)]
     sols += [s for _th, s in baselines.threshold_bursting_sweep(inst)]
-    if ea:
+    if ea and inst.unit_demand:   # the MOEA heuristics model one unit per job
         try:
             from . import moea
             sols += moea.nsga2_frontier(inst, pop_size=100, n_gen=60, n_threads=1)

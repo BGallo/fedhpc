@@ -20,7 +20,7 @@ when no slot is over capacity. The LP and integer optima therefore match
 
 - coverage ``sum_{m,t} x_jmt = 1`` (dual ``σ_j``), each with a big-M
   artificial;
-- capacity ``sum_{j, t <= τ < t + p_jm} x_jmt <= N_m(τ)`` (dual
+- capacity ``sum_{j, t <= τ < t + p_jm} q_j x_jmt <= N_m(τ)`` (dual
   ``π_mτ <= 0``) per path type and slot. ``N_m(τ)`` counts the instances
   released by ``τ``, the idle ones plus those freed by running jobs (the
   release groups of :func:`fedhpc.bpc._prepare`). Unbounded types (cloud)
@@ -35,7 +35,8 @@ rows. Instances with fixed activation costs are not supported; use
 Pricing and the Lagrangian bound
 --------------------------------
 A placement's reduced cost is
-``(w1 - ν1) c1 + (w2 - ν2) c2 - σ_j - sum_{τ in [t, t+p)} π_mτ``. All of
+``(w1 - ν1) c1 + (w2 - ν2) c2 - σ_j - q_j sum_{τ in [t, t+p)} π_mτ``, where
+``q_j`` is the job's node count (``Job.nodes``, its capacity units). All of
 them (about 1.3 M on the 964-job trace) are priced at once with NumPy
 prefix sums. Keeping coverage as "each job picks one placement" gives the
 Lagrangian bound
@@ -157,7 +158,7 @@ class _TI:
         for m in self.types:
             for arc in prep.arcs_by_type[m]:
                 arcs_by_job.setdefault(arc.job_id, []).append((m, arc))
-        J, K, T, P, C1, C2, MID = [], [], [], [], [], [], []
+        J, K, T, P, Q, C1, C2, MID = [], [], [], [], [], [], [], []
         self.pair: dict[tuple[int, int], tuple[int, np.ndarray]] = {}
         n = 0
         for jid in self.jobs:
@@ -182,11 +183,13 @@ class _TI:
                 MID.append(np.full(len(ts), m, dtype=np.int64))
                 T.append(ts)
                 P.append(np.full(len(ts), p, dtype=np.int64))
+                Q.append(np.full(len(ts), j.nodes, dtype=float))
                 C1.append(j.weight * (ts + p - j.arrival))
                 C2.append(np.full(len(ts), c2, dtype=float))
                 n += len(ts)
         cat = np.concatenate
         self.J, self.K, self.T, self.P, self.MID = cat(J), cat(K), cat(T), cat(P), cat(MID)
+        self.Q = cat(Q)   # capacity units a placement holds per slot (Job.nodes)
         self.C1, self.C2 = cat(C1).astype(float), cat(C2)
         self.n_arcs = n
         self.first = np.searchsorted(self.J, np.arange(len(self.jobs)))   # reduceat offsets
@@ -272,9 +275,9 @@ class _Master:
             coefs, rows = [1.0], [self.cover[ti.J[a]]]
             k = ti.K[a]
             if k >= 0:
-                t = ti.T[a]
+                t, q = ti.T[a], float(ti.Q[a])
                 for tau in range(t, t + ti.P[a]):
-                    coefs.append(1.0)
+                    coefs.append(q)
                     rows.append(self.cap[int(k), int(tau)])
             if self.b1 is not None:
                 coefs.append(float(ti.C1[a]))
@@ -312,7 +315,7 @@ def _price(ti: _TI, d: _D, w1: float, w2: float) -> np.ndarray:
     rc = (w1 - d.nu1) * ti.C1 + (w2 - d.nu2) * ti.C2 - d.sigma[ti.J]
     c = ti.capped
     k, t, p = ti.K[c], ti.T[c], ti.P[c]
-    rc[c] -= pre[k, t + p] - pre[k, t]
+    rc[c] -= ti.Q[c] * (pre[k, t + p] - pre[k, t])
     return rc
 
 
@@ -405,7 +408,6 @@ def solve_lpfirst(
     indices to seed the master with; when given, it receives the support of
     the final LP and of every schedule found, for the next solve.
     """
-    inst.require_unit_demand("lpfirst")
     opts = options or LPFirstOptions()
     t0 = time.perf_counter()
     deadline = None if time_limit is None else t0 + time_limit
@@ -541,7 +543,7 @@ def _price_subset(ti: _TI, d: _D, w1: float, w2: float, idx: np.ndarray) -> np.n
     rc = (w1 - d.nu1) * ti.C1[idx] + (w2 - d.nu2) * ti.C2[idx] - d.sigma[ti.J[idx]]
     k, t, p = ti.K[idx], ti.T[idx], ti.P[idx]
     c = k >= 0
-    rc[c] -= pre[k[c], t[c] + p[c]] - pre[k[c], t[c]]
+    rc[c] -= ti.Q[idx][c] * (pre[k[c], t[c] + p[c]] - pre[k[c], t[c]])
     return rc
 
 
@@ -604,7 +606,6 @@ def make_lpfirst_lexmin_bounded(inst: Instance, time_limit: float | None = None,
     bound rows) and the schedules found so far. ``time_limit`` caps each
     phase; an unproven phase gives a ``"feasible"`` result, which the box
     search treats as inconclusive."""
-    inst.require_unit_demand("lpfirst")
     counters = {"n_solves": 0, "build_time": 0.0}
     t0 = time.perf_counter()
     ti = _TI(inst, bpc._prepare(inst))

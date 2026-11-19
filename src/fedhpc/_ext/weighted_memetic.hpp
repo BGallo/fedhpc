@@ -149,6 +149,8 @@ inline MemeticResult run_weighted_memetic(
     const Problem& prob, const DProblem& P, double w1, double w2, double f1_cap,
     int pop_size, int n_gen, int seed, int n_threads, int ls_moves, int restart_patience,
     int shortlist, int xover_mode, int flags, double mu, int ablate, int adapt) {
+    // DEngine models one unit per job: multi-node instances use the reference decoder
+    if (!P.unit) flags |= DF_REF_DECODE;
     py::gil_scoped_release release;
     set_num_threads(n_threads);
     const TimePoint t0 = Clock::now();
@@ -195,9 +197,13 @@ inline MemeticResult run_weighted_memetic(
             mu_val.push_back(mu);
         }
         if (flags & DF_EDF_ADD) { set_priority(P, S, 0.0, true); SS.push_back(S); mu_val.push_back(-2.0); }
+        if (flags & DF_URGENT_ADD) {
+            set_priority_urgent(P, S, flags, top_works[0]); SS.push_back(S); mu_val.push_back(-3.0);
+        }
     }
     const int n_mu = (int)SS.size();
-    const int edf_idx = (flags & DF_EDF_ADD) ? n_mu - 1 : -1;
+    const int urg_idx = (flags & DF_URGENT_ADD) ? n_mu - 1 : -1;
+    const int edf_idx = (flags & DF_EDF_ADD) ? n_mu - 1 - (urg_idx >= 0) : -1;
     // the priority index is per-individual when the mu grid is adaptive or EDF joins it
     if (n_mu > 1) adapt |= MA_MU;
 
@@ -269,7 +275,7 @@ inline MemeticResult run_weighted_memetic(
     std::vector<int> seed_mu;
     if (adapt & MA_SEED_AUTO) {
         if (adapt & MA_SEED_TWO) {
-            const int nm = edf_idx >= 0 ? n_mu - 1 : n_mu;
+            const int nm = n_mu - (edf_idx >= 0) - (urg_idx >= 0);
             std::vector<char> g0(P.n, 0);
             int bm = 0; double bp = 0;
             for (int i = 0; i < nm; i++) {
@@ -279,6 +285,7 @@ inline MemeticResult run_weighted_memetic(
             }
             seed_mu.push_back(bm);
             if (edf_idx >= 0) seed_mu.push_back(edf_idx);
+            if (urg_idx >= 0) seed_mu.push_back(urg_idx);
         } else for (int i = 0; i < n_mu; i++) seed_mu.push_back(i);
     }
     const int n_seed = std::min<int>((int)seed_mu.size(), std::max(0, pop_size - n_hs));

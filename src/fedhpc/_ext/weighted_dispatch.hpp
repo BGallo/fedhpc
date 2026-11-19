@@ -54,6 +54,8 @@ struct DProblem {
     std::vector<int> pmin;                   // min on-prem p (or 0)
     std::vector<std::vector<int>> opt_pool;  // [j][k] pool index of onprem[k]
     std::vector<int> rank;                   // [j] position in `order`
+    std::vector<int> nodes;                  // [j] capacity units held per slot (Job.nodes)
+    bool unit = true;                        // every job holds one unit
 };
 
 inline DProblem build_dproblem(
@@ -61,10 +63,19 @@ inline DProblem build_dproblem(
     const std::vector<std::tuple<double, double,
         std::vector<std::tuple<int, int, double, int, int>>>>& jobs_in,
     const std::vector<int>& type_cap,
-    const std::vector<std::tuple<int, int, int>>& init_occ) {
+    const std::vector<std::tuple<int, int, int>>& init_occ,
+    const std::vector<int>& nodes = {}) {
     DProblem P;
     P.n = (int)jobs_in.size();
     P.H = H;
+    if (!nodes.empty() && (int)nodes.size() != P.n)
+        throw std::invalid_argument("nodes must have one entry per job");
+    P.nodes.assign(P.n, 1);
+    for (int j = 0; j < (int)nodes.size(); j++) {
+        if (nodes[j] < 1) throw std::invalid_argument("nodes must be >= 1");
+        P.nodes[j] = nodes[j];
+        if (nodes[j] != 1) P.unit = false;
+    }
     std::vector<int> type_pool(type_cap.size(), -1);
     for (int m = 0; m < (int)type_cap.size(); m++)
         if (type_cap[m] >= 0) {
@@ -202,6 +213,7 @@ enum DFlag {
     DF_PRUNE_LATE    = 1 << 19,  // LS: DF_PRUNE only in a step's batches after the first (no improving move yet)
     DF_NO_FIT        = 1 << 20,  // DEngine: scan every waiting job in a slot with room (no fit filter)
     DF_ABS_EST       = 1 << 21,  // LS: rank candidates by |est| (closest to indifference) instead of est
+    DF_URGENT_ADD    = 1 << 22,  // priority: urgent-first WSPT as an extra start (set_priority_urgent)
 };
 
 // DSched::why codes (dispatch decoder, DF_WHY only)
@@ -288,12 +300,19 @@ inline void dispatch(const DProblem& P, const DScalar& S, const std::vector<char
         for (size_t i = 0; i < W.waiting.size(); i++) {
             const int j = W.waiting[i];
             const DJob& J = P.jobs[j];
+            const int need = P.nodes[j];
             int best_k = -1; double best_s = 0; int best_free = 0;
             if (any_room) {
                 for (int k = 0; k < (int)J.onprem.size(); k++) {
                     const DOpt& o = J.onprem[k];
                     const int q = P.opt_pool[j][k];
                     if (t < o.earliest || t > o.latest || o.p > W.maxrun[q]) continue;
+                    if (need > 1) {          // maxrun counts slots with >= 1 unit free
+                        const auto& f = W.free[q];
+                        int u = t;
+                        while (u < t + o.p && f[u] >= need) u++;
+                        if (u < t + o.p) continue;
+                    }
                     const double s = S.w1 * J.weight * (t + o.p - J.arrival) + S.w2 * o.cost;
                     const int fr = W.free[q][t];
                     bool better = best_k < 0 || s < best_s - 1e-12;
@@ -314,7 +333,7 @@ inline void dispatch(const DProblem& P, const DScalar& S, const std::vector<char
                 auto& f = W.free[q];
                 int newrun = W.maxrun[q];
                 for (int u = t; u < t + o.p; u++) {
-                    if (--f[u] == 0 && u - t < newrun) newrun = u - t;
+                    if ((f[u] -= need) == 0 && u - t < newrun) newrun = u - t;
                 }
                 W.maxrun[q] = newrun;
                 if (newrun == 0) {
@@ -379,6 +398,7 @@ inline void serial_sgs(const DProblem& P, const DScalar& S, const std::vector<ch
             if (!to_cloud(j)) out.cv++;
             continue;
         }
+        const int need = P.nodes[j];
         int best_k = -1, best_t = 0; double best_s = 0;
         for (int k = 0; k < (int)J.onprem.size(); k++) {
             const DOpt& o = J.onprem[k];
@@ -387,7 +407,7 @@ inline void serial_sgs(const DProblem& P, const DScalar& S, const std::vector<ch
             while (t <= o.latest) {          // earliest window of o.p free slots
                 int u = t;
                 const int e = t + o.p;
-                while (u < e && f[u] > 0) u++;
+                while (u < e && f[u] >= need) u++;
                 if (u == e) { found = t; break; }
                 t = u + 1;
             }
@@ -402,13 +422,56 @@ inline void serial_sgs(const DProblem& P, const DScalar& S, const std::vector<ch
         }
         const DOpt& o = J.onprem[best_k];
         auto& f = W.free[P.opt_pool[j][best_k]];
-        for (int u = best_t; u < best_t + o.p; u++) f[u]--;
+        for (int u = best_t; u < best_t + o.p; u++) f[u] -= need;
         out.type[j] = o.type; out.start[j] = best_t; out.on[j] = 1;
         out.f1 += J.weight * (best_t + o.p - J.arrival);
         out.f2 += o.cost;
     }
     out.g = S.w1 * out.f1 + S.w2 * out.f2;
     out.pen_g = pen(S, out.f1, out.f2, out.cv);
+}
+
+// Urgent-first priority (DF_URGENT_ADD, reported mu -3): WSPT, except the jobs
+// the all-on-prem WSPT dispatch cannot start before their latest on-prem start
+// (DW_HORIZON / DW_LEFTOVER). Those go ahead of every other job, in latest-start
+// order (ties by WSPT), and the promotion repeats on the new order until no
+// further job misses. The target is a job whose latest start the horizon forces
+// early, typically a wide multi-node job: WSPT starves it (the units it needs
+// are never free together before its latest start), while EDF over every job
+// (set_priority's edf) runs all the others roughly longest first. On the
+// Supercloud normal partition (2026-11-19, 7 dumped calls) this order decodes
+// 2-7 % above the MIP's f1, against 18-28 % for the GA with EDF.
+inline void set_priority_urgent(const DProblem& P, DScalar& S, int flags, DWork& W) {
+    set_priority(P, S, 0.0);
+    const std::vector<int> base = S.order;
+    std::vector<int> last(P.n, -1);
+    for (int j = 0; j < P.n; j++)
+        for (const DOpt& o : P.jobs[j].onprem) last[j] = std::max(last[j], o.latest);
+    std::vector<char> urgent(P.n, 0);
+    auto build = [&] {
+        std::vector<int> u;
+        for (int j : base) if (urgent[j]) u.push_back(j);
+        std::stable_sort(u.begin(), u.end(), [&](int a, int b) { return last[a] < last[b]; });
+        S.order = u;
+        for (int j : base) if (!urgent[j]) S.order.push_back(j);
+        for (int i = 0; i < P.n; i++) S.rank[S.order[i]] = i;
+    };
+    const std::vector<char> gen(P.n, 0);
+    const int dflags = (flags & ~(DF_SERIAL | DF_BEST_OF)) | DF_WHY | DF_NO_DEADLINE;
+    DSched out;
+    for (int round = 0; round < P.n; round++) {
+        dispatch(P, S, gen, dflags, W, out);
+        bool grew = false;
+        for (int j = 0; j < P.n; j++)
+            // missed: unplaced (no cloud option, no reason recorded) or sent to cloud for want of a start
+            if (!urgent[j] && !P.jobs[j].onprem.empty() && !out.on[j] &&
+                (out.type[j] < 0 || out.why[j] == DW_HORIZON || out.why[j] == DW_LEFTOVER)) {
+                urgent[j] = 1; grew = true;
+            }
+        if (!grew) break;
+        build();
+    }
+    S.mu = -3.0;
 }
 
 // Decoder selected by flags: dispatch (default), serial SGS, or the better of both.
@@ -425,6 +488,9 @@ inline void decode(const DProblem& P, const DScalar& S, const std::vector<char>&
 }
 
 // ── Fast dispatch engine (DF_REF_DECODE off) ─────────────────────────────────
+//
+// One capacity unit per job only: the run functions set DF_REF_DECODE when
+// DProblem::unit is false (multi-node jobs), so DEngine never sees them.
 //
 // Same decisions as dispatch(), cheaper per decode (2026-11-03,
 // results/generated_bench/dispatch_study):
@@ -1289,6 +1355,8 @@ inline DispatchResult run_weighted_dispatch(
     const DProblem& P, double w1, double w2, double f1_cap, int seed, int n_threads,
     int K, int max_iters, int n_kicks, int kick_size, int flags_in, int ls, double mu,
     int n_mu, int kick_patience = 0, int K_max = 0) {
+    // DEngine models one unit per job: multi-node instances use the reference decoder
+    if (!P.unit) flags_in |= DF_REF_DECODE;
     py::gil_scoped_release release;
     set_num_threads(n_threads);
     const TimePoint t0 = Clock::now();
@@ -1323,6 +1391,12 @@ inline DispatchResult run_weighted_dispatch(
         starts.resize(std::min<int>(std::max(n_mu, 1), (int)starts.size()));
     }
     if ((flags_in & DF_EDF_ADD) && !(flags_in & DF_EDF)) starts.push_back({0.0, -2.0});
+    if (flags_in & DF_URGENT_ADD) starts.push_back({0.0, -3.0});
+    // mu -2: EDF, -3: urgent-first WSPT, else the mu mix
+    auto apply_priority = [&](double m) {
+        if (m == -3.0) set_priority_urgent(P, S, flags_in, works[0]);
+        else set_priority(P, S, m, m == -2.0);
+    };
 
     std::vector<char> best_gen;
     DSched best;
@@ -1369,7 +1443,7 @@ inline DispatchResult run_weighted_dispatch(
     const int kicks_per = n_kicks / (int)starts.size();
     for (auto& [_, m0] : starts) {
         const double m = m0;
-        set_priority(P, S, m, m == -2.0);
+        apply_priority(m);
         const int flags = start_flags(m);
         const DFast F = build_dfast(P, S, !(flags & DF_NO_DEADLINE));
         std::vector<char> gen(P.n, 0);
@@ -1382,7 +1456,7 @@ inline DispatchResult run_weighted_dispatch(
     }
     if (!split) {
         const double m = best_mu;
-        set_priority(P, S, m, m == -2.0);
+        apply_priority(m);
         const int flags = start_flags(m);
         const DFast F = build_dfast(P, S, !(flags & DF_NO_DEADLINE));
         std::vector<char> gen = best_gen;

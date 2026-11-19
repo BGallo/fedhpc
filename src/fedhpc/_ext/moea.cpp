@@ -255,8 +255,8 @@ PYBIND11_MODULE(_moea, m) {
            const std::vector<std::tuple<int,int,int>>& init_occ,
            double w1, double w2, double f1_cap, int seed, int n_threads,
            int K, int max_iters, int n_kicks, int kick_size, int flags, int ls, double mu, int n_mu,
-           int kick_patience, int K_max) {
-            const DProblem P = build_dproblem(H, jobs, type_cap, init_occ);
+           int kick_patience, int K_max, const std::vector<int>& nodes) {
+            const DProblem P = build_dproblem(H, jobs, type_cap, init_occ, nodes);
             DispatchResult R = run_weighted_dispatch(P, w1, w2, f1_cap, seed, n_threads,
                                                      K, max_iters, n_kicks, kick_size, flags, ls, mu, n_mu,
                                                      kick_patience, K_max);
@@ -278,6 +278,7 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("n_kicks") = 0, py::arg("kick_size") = 8,
         py::arg("flags") = 0, py::arg("ls") = 1, py::arg("mu") = 0.0, py::arg("n_mu") = 1,
         py::arg("kick_patience") = 0, py::arg("K_max") = 0,
+        py::arg("nodes") = std::vector<int>{},
         "Weighted-sum solver on the time-driven dispatch decoder (see\n"
         "weighted_dispatch.hpp). jobs[j] = (arrival, weight, [(type, p_occ,\n"
         "cost, earliest_start, latest_start), ...]). flags: DFlag bitmask\n"
@@ -291,13 +292,16 @@ PYBIND11_MODULE(_moea, m) {
         "131072 all kicks to the best start after LS instead of split over them,\n"
         "262144 full re-record of the incumbent after each move, 524288 pruning\n"
         "only in a step's later batches, 1048576 no fit-filtered room scan,\n"
-        "2097152 rank LS candidates by |est|).\n"
+        "2097152 rank LS candidates by |est|, 4194304 urgent-first WSPT as an\n"
+        "extra start).\n"
         "mu: dispatch priority mix (0 = WSPT; < 0 = search from the n_mu best of a\n"
         "grid by all-auto decode; n_kicks is split across them).\n"
         "K_max: candidates per LS step, decoded in batches of K until one\n"
         "improves (<= K: one batch of K).\n"
         "kick_patience: stop a start's kicks after this many in a row without\n"
         "improvement (0 = run all).\n"
+        "nodes: capacity units per job (Job.nodes; empty = all 1). Multi-node\n"
+        "instances decode with the reference decoder (flag 16384 is forced).\n"
         "Returns (assignment, f1, f2, g, stats)."
     );
 
@@ -308,8 +312,8 @@ PYBIND11_MODULE(_moea, m) {
            const std::vector<int>& type_cap,
            const std::vector<std::tuple<int,int,int>>& init_occ,
            double w1, double w2, double f1_cap, const std::vector<int>& gen_in,
-           double mu, int flags, const std::vector<int>& order) {
-            const DProblem P = build_dproblem(H, jobs, type_cap, init_occ);
+           double mu, int flags, const std::vector<int>& order, const std::vector<int>& nodes) {
+            const DProblem P = build_dproblem(H, jobs, type_cap, init_occ, nodes);
             DScalar S = make_scalar(P, w1, w2, f1_cap);
             set_priority(P, S, mu);
             if (!order.empty()) {
@@ -331,6 +335,7 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("H"), py::arg("jobs"), py::arg("type_cap"), py::arg("init_occ"),
         py::arg("w1"), py::arg("w2"), py::arg("f1_cap"), py::arg("gen"),
         py::arg("mu") = 0.0, py::arg("flags") = 0, py::arg("order") = std::vector<int>{},
+        py::arg("nodes") = std::vector<int>{},
         "Diagnostics: one decode of a given genome (0 auto, 1 cloud, 2 on-prem)\n"
         "with priority mix mu, or an explicit priority order (all job indices).\n"
         "Returns (assignment, f1, f2, pen_g, why, cv); why per job: 0 on-prem,\n"
@@ -348,9 +353,10 @@ PYBIND11_MODULE(_moea, m) {
                std::vector<std::tuple<int, int, double, int, int>>>>& jobs,
            double w1, double w2, double f1_cap, int pop_size, int n_gen, int seed,
            int n_threads, int ls_moves, int restart_patience, int shortlist,
-           int xover_mode, int flags, double mu, int ablate, int adapt) {
+           int xover_mode, int flags, double mu, int ablate, int adapt, const std::vector<int>& nodes) {
+            // prob only seeds genomes (their on-prem / cloud split), so its unit model is harmless
             const Problem prob = build_problem(n_jobs, job_slots, type_cap, init_occ, ablate);
-            const DProblem P = build_dproblem(H, jobs, type_cap, init_occ);
+            const DProblem P = build_dproblem(H, jobs, type_cap, init_occ, nodes);
             MemeticResult R = run_weighted_memetic(prob, P, w1, w2, f1_cap, pop_size, n_gen, seed,
                                                    n_threads, ls_moves, restart_patience, shortlist,
                                                    xover_mode, flags, mu, ablate, adapt);
@@ -371,6 +377,7 @@ PYBIND11_MODULE(_moea, m) {
         py::arg("n_threads") = 0, py::arg("ls_moves") = 8, py::arg("restart_patience") = 6,
         py::arg("shortlist") = 24, py::arg("xover_mode") = 2, py::arg("flags") = 64,
         py::arg("mu") = -1.0, py::arg("ablate") = 0, py::arg("adapt") = 0,
+        py::arg("nodes") = std::vector<int>{},
         "The weighted() memetic GA on the dispatch decoder (weighted_memetic.hpp):\n"
         "auto/cloud/on-prem genome, dispatch decoder, dispatch_ls local search.\n"
         "job_slots/type_cap/... as for weighted() (heuristic seeds); H/jobs as for\n"
