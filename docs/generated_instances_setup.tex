@@ -1,0 +1,364 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs,tabularx,multirow}
+\usepackage[group-separator={,},group-minimum-digits=4]{siunitx}
+\usepackage{xcolor}
+\usepackage[font=small,labelfont=bf]{caption}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage[colorlinks=true,linkcolor=teal!70!black,citecolor=teal!70!black,urlcolor=teal!70!black]{hyperref}
+\usepackage{cleveref}
+
+\newcommand{\ioVol}{\iota_j}
+\newcommand{\tauIO}{\tau^{\mathrm{IO}}}
+\newcommand{\kapIO}{\kappa^{\mathrm{IO}}}
+\newcommand{\kapVM}{\kappa^{\mathrm{VM}}}
+% typewriter text that may break after an underscore
+\newcommand{\codeus}{\textunderscore\allowbreak}
+\newcommand{\code}[1]{{\ttfamily\let\_\codeus #1}}
+\setlength{\emergencystretch}{3em}
+
+\title{Experimental setup:\\the MOSPACE generated instances}
+\author{MOSPACE project --- methodology note}
+\date{20 November 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This note describes the generated benchmark used to evaluate the MOSPACE
+cloud-bursting scheduler: how its instances are built, what each experimental
+factor controls, and the protocol under which exact and heuristic methods are
+compared on it. The benchmark is a full factorial of 108 instances: 2 machine
+catalogues $\times$ 2 real Slurm workloads $\times$ 3 on-prem node counts
+$\times$ 3 initial cluster loads $\times$ 3 result-data levels. Jobs come
+unchanged from two snapshots of a production reservoir-simulation cluster (964 and
+\num{3340} jobs). Cloud types are priced from AWS and Azure on-demand list prices,
+and output volumes come from the model in the companion note on result data. The
+instance name determines the instance, so the generator rebuilds every instance
+bit for bit; all 108 files match their recorded sha256.
+\end{abstract}
+
+\section{Scheduling problem}\label{sec:problem}
+Each instance is an offline bi-objective scheduling problem on unrelated parallel
+machine \emph{types}. A finite number of on-prem nodes is available, together with
+an unlimited, on-demand cloud. A job $j$ has a release slot $a_j$, an execution
+time $e_j$ (slots, fractional), a core count $c_j$, a memory requirement and an
+output volume $\ioVol$ (GB). It runs on one node of a type $m$ that covers its
+cores and memory, and all jobs have unit weight. For job $j$ on type $m$, with
+relative performance $P_m$ (equal to 1 for every type here), the billed time, the
+occupied time and the cost are
+\begin{align}
+  p^{\mathrm{bill}}_{jm} &= e_j / P_m + \tauIO_m\,\ioVol, &
+  p^{\mathrm{occ}}_{jm}  &= \max\bigl(1, \lceil p^{\mathrm{bill}}_{jm}\rceil\bigr), &
+  c_{jm} &= \kapIO_m\,\ioVol + \kapVM_m\,p^{\mathrm{bill}}_{jm}.
+\end{align}
+The two objectives are
+\begin{equation}
+  f_1 = \sum_j (C_j - a_j) \quad\text{(total turnaround, slots)}, \qquad
+  f_2 = \sum_j c_{j m(j)} \quad\text{(total cost, USD)},
+\end{equation}
+where $C_j$ is the completion slot. On-prem types have
+$\kapVM_m=\kapIO_m=\tauIO_m=0$, so on-prem work costs nothing, but on-prem
+capacity is limited and partly held by jobs already running at $t=0$. Cloud
+work costs money and, through $\tauIO_m$, holds its VM while the results are
+uploaded. The slot length is \SI{600}{s} and the horizon is $H=289$
+(W1) or 288 (W2) slots, i.e.\ about two days.
+
+\section{Workloads}\label{sec:workloads}
+The jobs, release times, runtimes, resources, horizon and slot length are copied
+unchanged from two real snapshots (\cref{tab:workloads}). Runtimes are the
+observed elapsed times (the known-runtime scenario). The original cloud types
+and the original running jobs of each snapshot are replaced by the generated ones
+(\cref{sec:catalogue,sec:factors}). The end times of the original running jobs
+serve only as the empirical distribution from which the generator draws.
+
+\begin{table}[ht]
+\centering\small
+\caption{The two source workloads. Execution times are in 600-s slots;
+``ensemble'' counts jobs that share their (user, job-name stem) with at least
+10 jobs (\cref{sec:io}).}
+\label{tab:workloads}
+\begin{tabularx}{\linewidth}{lXX}
+\toprule
+ & W1 & W2 \\
+\midrule
+Snapshot & window of 2024-11-25, 21:17 UTC & congestion event of 2024-01-30, 20:00--24:00 UTC \\
+Jobs & 964 & \num{3340} \\
+Release window & slots 0--10.8 & slots 0--24.0 \\
+Cores (min / median / max) & 20 / 40 / 64 & 1 / 30 / 64 \\
+Memory, GB (min / median / max) & 150 / 300 / 480 & 7.5 / 225 / 480 \\
+Execution time, slots (min / median / max) & 0.05 / 3.7 / 68.2 & 0.003 / 5.2 / 268.4 \\
+Total work, core-hours & \num{44177} & \num{215718} \\
+Ensemble members & 945 (98\,\%) & \num{3194} (96\,\%) \\
+Horizon $H$ & 289 slots & 288 slots \\
+Running-job end-time pool & \num{1654} values, median 21 & \num{1525} values, median 23 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Machine catalogue}\label{sec:catalogue}
+Two catalogues (\emph{classes}) define the on-prem node types and their cloud
+equivalents (\cref{tab:catalogue}). Class~A models the two real node types of the
+cluster (csr1: 40 cores / 300 GB, csr3: 64 cores / 480 GB), each with one AWS
+equivalent. Class~B has four on-prem types, each with an AWS and an Azure
+equivalent, which lets the scheduler trade one provider against the other.
+
+A cloud equivalent is the smallest instance of the same Intel generation (Ice
+Lake: AWS m6i, Azure Dsv5) whose physical cores (vCPU/2, since SMT is on) and
+memory cover the on-prem node. Azure has no 128-vCPU Dsv5, so the 64-core node maps
+to D128s\_v6. Prices are Linux on-demand list prices (AWS us-east-1, Azure eastus,
+\code{data/cloud\_prices.json}), converted to a cost per slot
+$\kapVM_m = \text{USD/h}\times 600/3600$. All types run at $P_m=1$ with no
+deployment delay, and every cloud type has unlimited capacity.
+
+\begin{table}[ht]
+\centering\small
+\caption{On-prem node types and their cloud equivalents (USD per hour).}
+\label{tab:catalogue}
+\begin{tabular}{lllcc}
+\toprule
+On-prem type & AWS & Azure & Class A & Class B \\
+\midrule
+c16 (16 c / 128 GB) & m6i.8xlarge (1.536)  & D32s\_v5 (1.536)  & -- & W2 only \\
+c32 (32 c / 256 GB) & m6i.16xlarge (3.072) & D64s\_v5 (3.072)  & -- & \checkmark \\
+c40 (40 c / 300 GB) & m6i.24xlarge (4.608) & D96s\_v5 (4.608)  & \checkmark\ (AWS only) & \checkmark \\
+c64 (64 c / 480 GB) & m6i.32xlarge (6.144) & D128s\_v6 (6.451) & \checkmark\ (AWS only) & \checkmark \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Pickable types only.} A type that no job of the workload would ever
+use is dropped from that workload's instances. This covers an on-prem type that no
+job fits (no W1 job fits c16, since its smallest job has 20 cores) and
+a cloud size that fits no job or is strictly dearer, for every job it fits, than
+another size of the \emph{same} provider. Dominance is checked within each
+provider, so each provider keeps a complete offer: D128s\_v6 stays even though it
+is dearer than m6i.32xlarge. Class~A therefore always has 2 on-prem and 2 cloud
+types. Class~B has 3 on-prem and 6 cloud types for W1, and 4 and 8 for
+W2. A memory-heavy 32c/512\,GB type was considered for class~B and
+removed: it fit exactly the same jobs as c32 and only split c32's capacity.
+
+\paragraph{Data transfer.} Cloud jobs pay internet egress
+$\kapIO_m$ = \$0.09/GB (AWS) or \$0.08/GB (Azure, routing preference: internet),
+both at the first paid tier, North America. The transfer time follows the
+minimum-of-subsystems bound of \citet{liu2017explaining}: an upload is no faster
+than its slowest stage among source-disk read, network and sink write. The
+provider network caps are at least \SI{5}{Gbps} on every VM used here
+\citep{aws-bandwidth,azure-bandwidth}, an AWS egress cap that
+\citet{jain2023skyplane} also measured. The binding stage is therefore the
+throughput each provider includes in the price of its block storage: 125\,MiB/s
+($\approx$\SI{131}{MB/s}) for an EBS gp3 volume \citep{aws-ebs} and \SI{125}{MB/s}
+for an Azure Premium SSD v2 disk \citep{azure-disks}. On Azure this assumes the
+results are written to a Premium SSD v2 data disk, which cannot serve as the OS
+disk. These baselines give $\tauIO_m$ = \SI{7.63}{s/GB} on AWS (0.01272 slot/GB)
+and \SI{8.0}{s/GB} on Azure (0.01333 slot/GB).
+
+The two rates are nearly equal. Their 5\,\% difference is not a measured
+difference in transfer speed: both providers quote a baseline of 125, but AWS
+quotes it in MiB/s and Azure in MB/s. Neither rate was measured end to end; both
+are documented values. In the instances, the difference makes Azure the cheaper
+but marginally slower egress, so neither provider dominates the other on both
+objectives. This trade-off should be read as an assumption of the model rather
+than as an observed property of the providers. The derivation is in
+\code{docs/result\_data\_model.tex}.
+
+\section{Experimental factors}\label{sec:factors}
+Every factor takes one level for the whole instance (\cref{tab:factors}). The
+full factorial has $2\times3\times3\times3=54$ instances per class and 108 in all.
+An instance is named by its factors, e.g.\ \code{B\_W2\_n300\_lE\_iM} for class~B,
+the W2 workload, $N=300$, load E and io level M.
+
+\begin{table}[ht]
+\centering\small
+\caption{Factors and levels.}
+\label{tab:factors}
+\begin{tabularx}{\linewidth}{llX}
+\toprule
+Factor & Levels & Meaning \\
+\midrule
+Class & A, B & machine catalogue (\cref{sec:catalogue}) \\
+Workload & W1, W2 & job set (\cref{sec:workloads}) \\
+Node count $N$ & 100, 300, 500 & nodes of \emph{every} on-prem type (any integer in $[100,500]$ is
+  supported; the factorial uses these three) \\
+Load & F, H, E & jobs running at $t=0$ on each on-prem type: 0 (free),
+  $\lfloor N/2\rfloor$ (half) or $N$ (entirely full) \\
+io level & L, M, H & output-retention policy that sets $\ioVol$ (\cref{sec:io}) \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\paragraph{Initial load.} Each running job holds one node of its type until its
+end slot. End slots are drawn with replacement from the workload's own empirical
+distribution of running-job end times (\cref{tab:workloads}). In W2, a
+quarter of these ends fall within the first hour, while about 2\,\% lie beyond the
+horizon, so those nodes stay blocked for the whole instance. The random number
+generator is seeded by sha256(class, workload, type, $N$) and not by the load.
+The $N$ draws are made once, and load H takes the first $\lfloor N/2\rfloor$ of
+them, so the half-full set is a prefix of the full one and raising the load only
+ever removes capacity.
+
+\paragraph{Why one level per instance.} An earlier design set the count (and
+load) separately for each on-prem type. The space then grows as $3^k$ in the number
+of types $k$ (\num{1944} class~B instances, \num{36450} with per-type loads),
+yet the jobs can hardly tell those instances apart: the fit sets are nested
+(c16 $\subset$ c32 $\subset$ c40 $\subset$ c64), and only 5 W1 and 26
+W2 jobs need c64 rather than c40. A single count, load and io level per
+instance keeps the space small enough to run both classes as full factorials.
+
+\section{Result-data volume}\label{sec:io}
+The Slurm logs record no I/O, so $\ioVol$ is modelled (full derivation and
+evidence in \code{docs/result\_data\_model.tex}):
+\begin{equation}
+  \ioVol = r \cdot 40 \cdot (c_j/40)^{0.54} \cdot h_j \cdot 10^{0.5\,z_j},
+  \qquad z_j\sim\mathcal N(0,1)\text{ clipped to }\pm3,
+\end{equation}
+with $h_j$ the runtime in hours and $r$ the job's output-retention rate in GB per
+core-hour: S = 0.02 (summary vectors only), R = 0.13 (grid, init and a final
+restart) or F = 1.5 (a restart at every report step). These rates were measured
+with OPM Flow and Darshan on open reservoir decks. Each job is classified as an
+\emph{ensemble member} (history-matching or optimisation runs) or a \emph{single
+run}, and the io level assigns one policy to each class:
+\begin{center}\small
+\begin{tabular}{llll}
+\toprule
+Level & Ensemble & Single & Reading \\
+\midrule
+L & S & R & results stay in the cloud, only curves return \\
+M & R & F & production decks as shipped \\
+H & F & F & full restart history brought home \\
+\bottomrule
+\end{tabular}
+\end{center}
+Each $z_j$ is seeded per (workload, job), so every level uses the same draw (common
+random numbers) and $\ioVol$ only grows from L to H. A horizon guard caps
+$\ioVol$ at $(H-\lceil a_j\rceil-e_j)/\tau_{\max}$, with $\tau_{\max}$ the slowest
+cloud $\tauIO$ of the instance, so that every cloud type stays feasible for a job
+started at its release. The guard binds only on W2: on 3 of \num{3340}
+jobs at level M and 7 at level H. The resulting total volumes are in
+\cref{tab:instances}.
+
+\section{Resulting instances}\label{sec:instances}
+\Cref{tab:instances} summarises the 108 instances by cell. Within a
+(class, workload) pair, the jobs and types are fixed. The count and load set the
+on-prem capacity and its occupancy, and the io level sets the volumes.
+
+\begin{table}[ht]
+\centering\small
+\caption{Instance dimensions. On-prem nodes $= N\times$ (number of on-prem types);
+running jobs at $t=0$ $=$ load fraction $\times$ on-prem nodes. Total
+$\sum_j\ioVol$ in TB per io level L / M / H (the W2 M and H totals vary by
+under 0.5\,\% with the class, through $\tau_{\max}$ in the guard).}
+\label{tab:instances}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{llrcccc}
+\toprule
+Class & Workload & Jobs & Types (on-prem / cloud) & On-prem nodes & Instances & $\sum\ioVol$ (TB) \\
+\midrule
+A & W1 & 964 & 2 / 2 & 200 / 600 / \num{1000} & 27 & 2.6 / 20.9 / 142.2 \\
+A & W2    & \num{3340} & 2 / 2 & 200 / 600 / \num{1000} & 27 & 16.3 / 147 / 640 \\
+B & W1 & 964 & 3 / 6 & 300 / 900 / \num{1500} & 27 & 2.6 / 20.9 / 142.2 \\
+B & W2    & \num{3340} & 4 / 8 & 400 / \num{1200} / \num{2000} & 27 & 16.3 / 147 / 639 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Trivial instances.} When there is enough free on-prem capacity, every
+job can start on-prem at its release, so the fastest schedule is also free and the
+Pareto front is a single point ($f_2^T=0$; see \cref{sec:protocol}). This happens
+in 21 of the 108 instances: all W1 instances with $N=300$ at load F or
+$N=500$ at load F or H, in both classes (18), and \code{B\_W2\_n500\_lF} at all
+three io levels (3). They are reported separately and excluded from quality
+statistics.
+
+\paragraph{Monotonicity.} Since the running-job sets are nested across loads and
+volumes across io levels, the optimal $f_1$ and $f_2$ can only grow along a load
+chain F$\to$H$\to$E or an io chain L$\to$M$\to$H. The test suite checks these
+properties with exact solves.
+
+\paragraph{Reproducibility.} The generator (modules \code{instance\_gen} and
+\code{io\_model}) is deterministic: its inputs are the instance name,
+\code{data/cloud\_prices.json}, the two workload files and
+\code{data/job\_classes\_<workload>.json}. The instance files are written by
+\begin{center}
+\code{uv run python scripts/build\_generated\_instances.py}
+\end{center}
+into \code{data/generated/}, and \code{manifest.json} there records each file's
+sha256. All 108 files were rebuilt on 2026-11-03 and again on 2026-11-20, and every
+hash matched.
+
+\section{Evaluation protocol}\label{sec:protocol}
+Per instance, the reference benchmark (\code{scripts/\allowbreak bench\_generated.py}, results
+in \code{results/\allowbreak generated\_bench/\allowbreak bench\_io\_noreduc.jsonl}) runs the following
+methods in order.
+
+\begin{enumerate}
+\item \textbf{Lexicographic anchors (Gurobi).} lex-$(f_1,f_2)$ minimises $f_1$, then
+  $f_2$ with $f_1$ fixed, giving the ideal-turnaround point $(f_1^T, f_2^T)$.
+  lex-$(f_2,f_1)$ minimises $f_2$, then $f_1$, giving $(f_1^0, f_2^0)$; here
+  $f_2^0=0$ in every instance, because the on-prem-only schedule is feasible.
+\item \textbf{Baselines.} Greedy earliest completion (completion first, then
+  cost, least slack first); on-prem only (SPT, never bursts; it completes all
+  jobs in all 108 instances); and threshold bursting, where a job runs on-prem if
+  its earliest on-prem wait is at most $\theta$ slots and otherwise on the cheapest
+  cloud type, for $\theta\in\{0,1,2,3,6,12,24,48,96\}$.
+\item \textbf{Weighted sums,} for $\lambda\in\{0.25,0.5,0.75\}$, of the
+  normalised scalar
+  \begin{equation}
+    g_\lambda = \lambda\,\frac{f_1-f_1^T}{f_1^0-f_1^T} + (1-\lambda)\,\frac{f_2}{f_2^T},
+    \qquad\text{subject to } f_1\le f_1^0,\ f_2\le f_2^T,
+  \end{equation}
+  solved exactly by Gurobi and heuristically by the dispatch metaheuristic
+  (\code{weighted\_solve\_dispatch}). For threshold bursting, the reported $\theta$
+  is the one with the lowest $g_\lambda$ at that $\lambda$, chosen after the fact,
+  which is an oracle choice in the baseline's favour. On a degenerate instance
+  ($f_2^T=0$), the scalar reduces to minimising $f_2$ subject to $f_1\le f_1^0$.
+\end{enumerate}
+Every schedule is verified with \code{Instance.check\_schedule}. The quality of a
+method is its gap $100\,(g_\lambda^{\text{method}}-g_\lambda^*)/g_\lambda^*$ to the
+Gurobi value. Because the three io levels of a cell share their jobs, capacity and
+$z_j$, io effects are compared as paired ratios within a cell.
+
+\paragraph{Formulation and solver settings.} Gurobi solves the space-time network
+formulation (\code{SpaceTimeFormulation}) without its dominance reductions, so the
+times are an upper bound on the production configuration. Parameters:
+\code{Threads}=4, \code{TimeLimit}=\SI{600}{s} per \code{optimize()} call,
+\code{MIPGap}=0. The lex phases also set \code{MIPGapAbs} to 0.999 of one objective
+step (1 slot for $f_1$, $\delta=10^{-4}$ USD for $f_2$). Phase~2 of lex-$f_1$ runs
+with \code{Presolve}=0, because single-threaded presolve on the dense $f_1$-fixing
+row otherwise stalls past the time limit. A lex result counts as optimal only when
+both phases are certified. Wall time is measured with \code{time.perf\_counter()}
+around each call and includes model build. In this setting, 530 of 540 Gurobi
+solves are proven optimal. The 10 exceptions are 8 lex-$f_2$ solves on
+W2 instances with $N=100$ at loads H/E, and 2 weighted sums at
+$\lambda=0.25$ (\code{B\_W2\_n100\_lE\_iM} and \code{A\_W2\_n100\_lE\_iL}).
+
+\paragraph{Hardware and software.} Intel Core i9-13900 (8 P- and 16 E-cores, 32
+threads, up to 5.6\,GHz), 62\,GB RAM, CachyOS Linux (kernel 7.3), CPython 3.14,
+gurobipy 13.0.1 (academic licence), numpy 2.4.4. Three instances run in parallel
+with 4 threads each, and threads are not pinned to cores. Timings are therefore
+compared between methods only through medians.
+
+\section{Limitations}\label{sec:limits}
+The jobs are real but come from two snapshots of one cluster, and the factorial
+varies the platform around them rather than the jobs. Output volumes are modelled
+rather than observed, and the io level expresses that uncertainty. All types run
+at $P_m=1$, so on-prem and cloud differ only in cost, capacity and transfer time,
+not in speed. Cloud capacity is unlimited, with no quotas, spot pricing or volume
+discounts. Uploads are assumed not to contend on the site's WAN link.
+
+\begin{thebibliography}{9}\small
+\bibitem[Liu et~al.(2017)]{liu2017explaining} Z.~Liu, P.~Balaprakash, R.~Kettimuthu, and I.~Foster. Explaining wide area data transfer performance. In \emph{Proc. HPDC}, pages 167--178, 2017.
+\bibitem[Jain et~al.(2023)]{jain2023skyplane} P.~Jain, S.~Kumar, S.~Wooders, S.~G. Patil, J.~E. Gonzalez, and I.~Stoica. Skyplane: optimizing transfer cost and throughput using cloud-aware overlays. In \emph{Proc. NSDI}, 2023.
+\bibitem[AWS(2026a)]{aws-ebs} Amazon Web Services. Amazon EBS General Purpose SSD volumes. \url{https://docs.aws.amazon.com/ebs/latest/userguide/general-purpose.html}.
+\bibitem[AWS(2026b)]{aws-bandwidth} Amazon Web Services. Amazon EC2 instance network bandwidth. \url{https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-network-bandwidth.html}.
+\bibitem[Microsoft(2026a)]{azure-disks} Microsoft. Azure managed disk types. \url{https://learn.microsoft.com/en-us/azure/virtual-machines/disks-types}.
+\bibitem[Microsoft(2026b)]{azure-bandwidth} Microsoft. Virtual machine network bandwidth. \url{https://learn.microsoft.com/en-us/azure/virtual-network/virtual-machine-network-throughput}.
+\end{thebibliography}
+
+\end{document}

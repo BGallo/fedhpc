@@ -1,0 +1,2202 @@
+diff --git a/MOFE_FEDHPC_CCGRID/IEEE-conference-template-062824.tex b/MOFE_FEDHPC_CCGRID/IEEE-conference-template-062824.tex
+index aa010ad..c41448e 100644
+--- a/MOFE_FEDHPC_CCGRID/IEEE-conference-template-062824.tex
++++ b/MOFE_FEDHPC_CCGRID/IEEE-conference-template-062824.tex
+@@ -24,6 +24,7 @@
+ \usepackage{graphicx}
+ \usepackage{textcomp}
+ \usepackage{xcolor}
++\usepackage{tabularx}
+ \def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+     T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+ \begin{document}
+@@ -71,46 +72,72 @@ Federated HPC, heterogeneous scheduling, multi-objective optimization, mixed-int
+ \section{Introduction}
+ 
+ High-performance computing  (HPC) systems support computationally intensive applications in areas such as energy, climate modeling, aerospace engineering, drug discovery, and machine learning. These applications frequently require more processors, memory, accelerators, or storage than conventional computing infrastructures can provide. HPC clusters address this demand through large collections of interconnected computational resources managed as an integrated system.
+-Despite their computational capacity, on-premises HPC systems remain finite. Their acquisition and expansion require substantial capital investment, while their operation involves energy, maintenance, cooling, and administrative costs. Since permanently provisioning enough hardware for occasional demand peaks is economically inefficient, HPC centers are commonly designed around an expected workload rather than the maximum workload they may receive. Periods of high demand can therefore produce long queues, increased job turnaround times, and delayed access to computational resources. To provide access to a greater variety and quantity of hardware as well as improve utilization of the computing resources are all reasons to integrate geographically distributed HPC infrastructure\cite{Magugliani2025}. Federated HPC seeks to coordinate geographically distributed and independently operated infrastructures through common services for access, resource allocation, data management, and workflow execution.  Federation does not imply that geographically separate machines form a single tightly coupled supercomputer or that their local schedulers are replaced by one global scheduler. The individual facilities retain different capacities, architectures, availability constraints, and operational policies. At the federation level, a user or broker can instead select an execution platform for a submitted job and coordinate access to resources that remain locally managed. Consequently, the scheduling problem includes a placement decision across heterogeneous resource pools in addition to the execution-time decisions encountered within a single HPC cluster.
++Despite their computational capacity, on-premises HPC systems remain finite. Their acquisition and expansion require substantial capital investment, while their operation involves energy, maintenance, cooling, and administrative costs. Since permanently provisioning enough hardware for occasional demand peaks is economically inefficient, HPC centers are commonly designed around an expected workload rather than the maximum workload they may receive. Periods of high demand can therefore produce long queues, increased job turnaround times, and delayed access to computational resources. To provide access to a greater variety and quantity of hardware as well as improve utilization of the computing resources\cite{Magugliani2025} Federated HPC seeks to coordinate geographically distributed and independently operated infrastructures through common services for access, resource allocation, data management, and workflow execution.  Federation does not imply that geographically separate machines form a single tightly coupled supercomputer or that their local schedulers are replaced by one global scheduler. The individual facilities retain different capacities, architectures, availability constraints, and operational policies. At the federation level, a user or broker can instead select an execution platform for a submitted job and coordinate access to resources that remain locally managed. Consequently, the scheduling problem includes a placement decision across heterogeneous resource pools.
+ 
++In that scenario, cloud computing has also  provided an alternative source of computational capacity. Its on-demand provisioning model allows resources to be allocated temporarily without the permanent acquisition of additional hardware. An HPC organization can therefore retain its on-premises infrastructure as its primary computational platform while using cloud resources during periods of congestion. This strategy is commonly referred to as cloud bursting.\cite{BUYYA2009599,mell2011nist}. The use of several cloud providers extends this scenario to a multi-cloud environment. Different providers and instance types offer distinct combinations of processing performance, memory, storage, accelerator availability, provisioning delay, and monetary cost. When these resources are combined with an on-premises HPC cluster, the resulting environment is heterogeneous in both technical and economic terms. Hybrid HPC--cloud infrastructures are an important configuration of this broader setting. A fixed-capacity HPC centre can augment its resources with virtual machines acquired from external cloud providers. Such resources have different performance characteristics, provisioning delays, transfer overheads, and usage prices. 
+ 
+-In that scenario, cloud computing has also  provided an alternative source of computational capacity. Its on-demand provisioning model allows resources to be allocated temporarily without the permanent acquisition of additional hardware. An HPC organization can therefore retain its on-premises infrastructure as its primary computational platform while using cloud resources during periods of congestion. This strategy is commonly referred to as cloud bursting.\cite{BUYYA2009599,mell2011nist}. The use of several cloud providers extends this scenario to a multi-cloud environment. Different providers and instance types offer distinct combinations of processing performance, memory, storage, accelerator availability, provisioning delay, and monetary cost. When these resources are combined with an on-premises HPC cluster, the resulting environment is heterogeneous in both technical and economic terms. Hybrid HPC--cloud infrastructures are an important configuration of this broader setting. A fixed-capacity HPC centre can augment its resources with virtual machines acquired from external cloud providers. Such resources have different performance characteristics, provisioning delays, transfer overheads, and usage prices. The hybrid-computing architecture of Mateescu et al. explicitly connects traditional HPC, resource sharing across sites, and elastic cloud provisioning~\cite{Mateescu2011}. In this work we refer to an environment as a federated multi-platform HPC environment, namely a computational environment composed of capacity-constrained geographically distributed on-premises resources and elastically provisioned resources from one or more cloud providers.%\cite{Grozev14}
+-
+-In this work we propose an arc-flow formulation of the problem of scheduling parallel jobs across a heterogeneous infrastructure that when solved using Gurobi is capable of solving instances with 3340 jobs to schedule across 1200 on-premises nodes and two cloud providers with 5 VM types each in under 5 minutes. The formulation takes into account data movement between on-premises and the cloud while factoring egress fees into the monetary cost. With two objective functions, one being turnaround time and the other being monetary cost the problem constitute a multi-objective optimization problem that we solve via a weighted-sum of the scalarized objectives. We also propose a genetic algorithm with local search that is able to find solutions with a mean gap of 5.66\% in under 6 seconds on average.
++In this work we deal with  a federated HPC environment, that being a computational environment composed of capacity-constrained geographically distributed on-premises resources and elastically provisioned resources from one or more cloud providers. The problem then lies in scheduling jobs between heterogeneous capacity both in terms of performance and monetary cost.
+ 
++Existing research addresses complementary aspects of scheduling across heterogeneous computing infrastructures, but differs in workload assumptions, resource models, and optimization objectives. Brotcorne et al.~\cite{Brotcorne2023} formulate a bi-objective optimization problem that minimizes monetary cost and makespan for bags of identical tasks in capacity-constrained multi-cloud environments. From the mathematical scheduling literature, Kramer et al.~\cite{Kramer2020} investigate weighted completion-time minimization with submission times on identical parallel machines using arc-flow formulations and decomposition methods, whereas Chen et al.~\cite{Chen2024} address unrelated parallel machines with weighted completion-time and machine-usage costs, assuming jobs are initially available. Although these studies address important components of the problem, none considers their combination within a single scheduling model. In contrast, MOSPACE jointly optimizes resource placement and scheduling for independently submitted, priority-weighted parallel jobs across finite-capacity on-premises and pay as you go cloud resources, accounting for heterogeneous execution characteristics, provisioning delays, data-transfer overheads, and associated monetary charges. This integrated formulation enables the explicit optimization of the trade-off between job turnaround and external-resource expenditure.
+ 
++We propose MOSPACE, a multi-objective scheduler for this Federated HPC use case. We consider independent, non-preemptive parallel jobs, each assigned to one compatible execution instance, with job-specific submission times, priorities, resource requirements, and input/output volumes. Candidate instance types have bounded availability and may differ in execution duration, provisioning time, and cost. The model assumes centralized visibility and coordination at the federation level; interoperability among autonomous local schedulers and simultaneous execution of one job across multiple sites are outside its scope.
++The main contributions are as follows:
++\begin{itemize}
++    \item A strong arc-flow formulation where homogeneous capacity are modeled as a single graph that takes into account turnaround time, costs and data movement.
++    \item A genetic algorithm that takes advantage of the nature of the problems for strong results both in terms of quality and speed.
++    \item An online simulation of the proposed solution using real data from a production cluster.
++\end{itemize}
+ 
++The remainder of this work is organized as follows: The section \ref{sec:related_work} goes over the most relevant works that most closely matches the problem this paper solves, in the section \ref{sec:model} we go into detail over the arc-flow formulation that allows for a optimal solution at reasonable solve times, section \ref{sec:solutions} describes the proposed GA while section \ref{sec:experimental_setup}
++describes the offline instances used to benchmark our solutions and the trace-driven simulation experiments and finally the results and conclusions are at \ref{sec:results}.
++\section{Related Work}
++\label{sec:related_work}
+ 
++In this section we review the previous works on Federated HPC, Mathematical Optimization of scheduling problems and Cloud Computing. As MOSPACE addresses centralized scheduling at the federation level, we focus on approaches that coordinate resource allocation across distinct computing infrastructures, as well as optimization methods for scheduling jobs under heterogeneous resource constraints. We first examine existing mechanisms for multi-cluster and federated scheduling, followed by  mathematical formulations for scheduling on heterogeneous machines. Particular attention is given to the extent to which these approaches jointly account for job turnaround, monetary expenditure, resource availability, and data-transfer overheads.
+ 
+ 
+ 
++\begin{table*}[]
++\centering
++\begin{tabular}{|l|l|l|l|l|l|}
++\hline
++                 & Objective                                                 & Submission Time & Data Movement & Method              & Enviroment      \\ \hline
++Brotcorne et al. & Makespan and Cost                                         & No           & No            & Exact               & Cloud           \\ \hline
++Luo et al.       & Total Completion Time and Cost                            & No           & No            & Waiting Policy      & Hybrid          \\ \hline
++Kramer et al.    & Total Weighted Completion Time                            & Yes          & No            & Exact               & On-prem         \\ \hline
++Chen et al.      & Total Weighted Completion Time and Cost                   & No           & No            & Exact               & Cloud           \\ \hline
++Wang et al.      & Affinity, resource availability, latency and load balance & No           & Yes           & Greedy              & Federated       \\ \hline
++This Work        & Total Weighted Turnround Time and Cost                    & Yes          & Yes           & Exact and heuristic & Federated+Cloud \\ \hline
++\end{tabular}
++\end{table*}
+ 
+ 
++Slurm is a widely adopted workload manager for HPC systems~\cite{Yoo2003} and provides two distinct mechanisms for operating across multiple clusters. In multi-cluster mode, jobs can be submitted to a specified set of clusters, with Slurm selecting the cluster expected to provide the earliest start time based on current scheduling estimates. In federated mode\cite{Jette2023}, jobs are replicated across eligible member clusters, whose local schedulers independently attempt to allocate resources while coordinating to ensure that each job executes only once. Although these mechanisms enable resource sharing across independently managed clusters, they do not jointly optimize global scheduling decisions against a common monetary cost and turnaround objective. MOSPACE instead formulates federation-level resource selection and scheduling of jobs as a centralized multi-objective optimization problem, explicitly accounting for heterogeneous processing characteristics, finite resource capacity, and external execution costs.
+ 
++A recent survey by Wu et al.~\cite{Wu2025} organizes geo-distributed scheduling research across cloud, edge, and supercomputing settings. Each environment is organized by objective (performance, fairness, fault tolerance) and by technique (heuristic, AI-based, mathematical, hybrid). Performance is divided into compute utilization and data management, the latter covering network routing, data placement and replication. The authors include HPC because its focus on extreme performance and large-scale utilization sets it apart from the other paradigms, and they position the survey as the first to span all four. Our work proposes both a heuristic and a mathematical solution where our focus is on optimizing system performance metrics ( Turnaround Time and Monetary Cost).
+ 
++Wang et al.~\cite{Wang2025Efficient} address job placement across geographically distributed, heterogeneous clusters with a two-level architecture in which a global coordination layer sits above autonomous clusters and makes placement decisions from a global resource view. That view combines static data (hardware specifications, capacities, topology) with dynamic data (utilization, queue lengths, network state). To make heterogeneous hardware comparable, the authors propose a standardized resource capability model. It maps CPU, memory and GPU attributes into dimensionless performance factors, each a weighted linear combination of normalized quantities: clock frequency, effective cache size, ISA and microarchitecture coefficients for CPUs; bandwidth, channel count and memory type for memory; architecture generation and peak FLOPS for GPUs.
++Placement then works as a filter-and-score heuristic. Clusters that fail hard affinity constraints (GPU type, CPU architecture, software frameworks) or lack enough normalized capacity are discarded. Each remaining cluster gets a composite score that rewards remaining compute capacity and attribute similarity and penalizes an estimated latency (startup overhead plus the time to transfer input data at the available bandwidth). Task replicas are split among clusters in proportion to the normalized scores, using a largest-remainder rounding scheme. The strategy was implemented as a Karmada scheduling plugin and evaluated on a testbed of heterogeneous clusters spread over three regions, as well as in CloudSim Plus simulations with up to twenty clusters and 800{,}000 tasks. Against Round-Robin and Karmada's default resource-aware strategy, it achieved higher and better-balanced utilization, slower growth of scheduling latency, and lower scheduling and execution failure rates.
+ 
++Although they share our concern with heterogeneity across federated resource pools, their approach differs from ours in several ways. Firstly they propose a online placement rule without any quality guarantee or optimization method like ours. They also fail to address  monetary cost.  Finally, the evaluation is limited to simple heuristic baselines and to operational metrics such as utilization, latency and failure rates. It does not report solution quality relative to an optimum or a bound. 
+ 
+-\section{Related Work}
++Brotcorne et al.~\cite{Brotcorne2023} proposed mathematical programming models for multi-cloud VM provisioning that jointly consider makespan and cost, with both global and time-dependent limits on instance availability. Their workloads consist of bags of identical tasks, and their time objective differs from per-job turnaround. Their work differ from ours in their lack of submission time from the jobs and the focus on BoT applications instead of parallel jobs.
+ 
+-A recent survey by Wu et al.~\cite{Wu2025} organizes geo-distributed scheduling research across cloud, edge, and supercomputing settings. Each environment is organized by objective (performance, fairness, fault tolerance) and by technique (heuristic, AI-based, mathematical, hybrid). Performance is divided into compute utilization and data management, the latter covering network routing, data placement and replication. The authors include HPC because its focus on extreme performance and large-scale utilization sets it apart from the other paradigms, and they position the survey as the first to span all four.
++In hybrid fixed/elastic clusters, Ambati et al.~\cite{ambati2021good} analyzed policies that trade waiting time against public-cloud expenditure. Starburst, by Luo et al.~\cite{Luo24}, implements a higher-level scheduler over private and elastic cloud clusters and adjusts waiting budgets to improve the trade-off between cloud expenditure and job turnaround time.  MOSPACE improves on their work by both providing an exact solution to the problem of cloud bursting and incorporating multiple heterogeneous infrastructure  
+ 
+-Brotcorne et al.~\cite{Brotcorne2023} proposed mathematical programming models for multi-cloud VM provisioning that jointly consider makespan and cost, with both global and time-dependent limits on instance availability. Their workloads consist of bags of identical tasks, and their
+-time objective differs from per-job turnaround. In hybrid fixed/elastic clusters, Ambati et al.~\cite{ambati2021good} analyzed policies that
+-trade waiting time against public-cloud expenditure. Starburst, by Luo et al.~\cite{Luo24}, implements a higher-level scheduler over private and elastic cloud clusters and adjusts waiting budgets to improve the trade-off
+-between cloud expenditure and job turnaround time. 
++Kramer et al.~\cite{Kramer2020} studied minimizing total weighted completion time with submission times on identical parallel machines, using mixed-integer formulations and arc-flow-based branch-and-price. They are the main contribution in the literature that uses submission times and they also use a arc-flow formulation to solve the scheduling problem of parallel identical machines, ours formulation solve the unrelated parallel machines problem while also taking into account monetary cost.
+ 
+-Kramer et al.~\cite{Kramer2020} studied minimizing total weighted completion time with release dates on identical parallel machines, using
+-mixed-integer formulations and arc-flow-based branch-and-price.
+ Chen et al.~\cite{Chen2024} developed exact models and branch-and-price
+ for unrelated parallel machines with weighted completion-time and
+-machine-usage costs. These advances motivate strong exact methods, but most of the literature consider jobs without release time, available at time 0 , and none models the same combination of release times, resource-type-specific monetary costs, and bounded hybrid on-premises/cloud instance pools. Our work studies that combination under a centralized federation-level scheduling abstraction, without claiming a multi-supercomputer deployment or decentralized scheduler interoperability.
++machine-usage costs. Although they are a recent advancement and they take into account costs their methods relying heavily on jobs not having submission times since this reduces the scheduling inside any given machine to a polynomial problem.
+ 
+-Tabela com artigos, contribuicoes, igual ao paper que tem seu nome...
++As is evident most of the literature consider jobs without submission time, meaning all jobs are available at time 0 , and none models the same combination of submission times, resource-type-specific monetary costs, and bounded hybrid on-premises/cloud instance pools. Our work studies that combination under a centralized federation-level scheduling abstraction, without claiming a multi-supercomputer deployment or decentralized scheduler interoperability.
++       
+ 
+ \section{Mathematical model}
+ \label{sec:model}
+ 
+-We formulate the joint selection of an instance type and a start time for each job as a bi-objective arc-flow MILP. Each instance type has a time-expanded network in which processing arcs occupy an instance for a job's full duration and waiting arcs allow idle capacity. The model minimizes priority-weighted turnaround and monetary expenditure, subject to release times and bounded instance availability.
++The scheduling of jobs in a federated environment presents a hard problem in terms of scheduling. The problem we are trying to solve is one where there are N numbers of on-premises clusters with access to M different clouds, with O jobs with different execution times and resources requirements and we aim to schedule the O jobs across the different resources so that we minimize both the cost and the total turnaround time of jobs.  We formulate the joint selection of a computing node and a start time for each job as a arc-flow MILP. Each instance type, which is any number of homogeneous non geographically distributed infrastructure, has it's own Directed Acyclic Graph (DAG) in which processing arcs occupy an instance for a job's full duration and waiting arcs allow idle capacity. The model minimizes priority-weighted turnaround and monetary expenditure, subject to release times and bounded instance availability.
+ 
+ \subsection{Setting and notation}
+ 
+@@ -153,7 +180,7 @@ Feasible occupation starts respect arrivals and completion within the horizon:
+ \end{equation}
+ The horizon must admit a feasible schedule for all jobs jointly, not merely a nonempty start set for each job. A constructive schedule respecting type compatibility and instance limits can provide such a horizon.
+ 
+-\subsection{Network and constraints}
++\subsection{Flow Conservation and constraints}
+ 
+ For each type $m$, let $G_m=(T,A_m)$ be a directed acyclic graph with waiting and job-indexed processing arcs:
+ \begin{align}
+@@ -216,16 +243,16 @@ Increasing $\lambda$ favors turnaround. These reference values scale the objecti
+ Under zero-cost feasibility, $f_1^0=f_1^{\mathrm{lex}}$ if and only if $f_2^{\mathrm{lex}}=0$. In this degenerate case, a zero-cost minimum-turnaround schedule optimizes both objectives and normalization is unnecessary. Otherwise, strictly positive scalarization weights yield supported Pareto-optimal solutions; endpoint weights require tie-breaking by the other objective to exclude dominated ties. Unsupported Pareto points are not recovered by weighted sums and can instead be sought with an $\epsilon$-constraint method.
+ 
+ \section{Proposed Solutions}
+-
++\label{sec:solutions}
+ Mixed-integer linear programming (MILP) is the class of optimization problems in which a linear objective is minimized or maximized over a polyhedron, subject to the requirement that some or all decision variables take integer values.\cite{Nemhauser88} Integer variables, binary ones in particular, let a model express discrete decisions such as whether a resource is used, which machine a task goes to, or the order in which two activities run. Continuous variables can still capture quantities such as start times, costs, or loads. This expressiveness comes at a price. MILP is NP-hard in general\cite{Karp1972}, so no polynomial-time algorithm for the whole class is expected to exist. Even so, decades of algorithmic work have made MILP one of the most dependable exact approaches to combinatorial optimization in practice. Modern solvers rest on the LP-based branch-and-bound framework\cite{Land1960} , strengthened by cutting planes descended from Gomory’s work\cite{bams/1183522679}. Around this core, they add presolve reductions , primal heuristics, sophisticated branching rules, and parallel tree search.
+ Scheduling is among the most natural and longest-standing application areas of MILP. Integer programming formulations of machine scheduling appeared as early as Wagner\cite{Wagner1959}. Since then, several families of formulations have been studied in depth, notably disjunctive (big-M) models and time-indexed models. Each family offers a different balance between the size of the model and the strength of its LP relaxation\cite{Ku2016}.
+ 
+ \subsection{Genetic Algorithm}
+ 
+ Although the arc-flow formulation implemented in Gurobi did exceed expectations in terms of time to solution we designed and implemented a GA for several reasons: one is the necessity of having a commercial license to run Gurobi in production scenarios and the other being that while metaheuristics can not guaranteed optimality they can approach it while taking significantly less time.
+-
+ The proposed method is a memetic algorithm~\cite{Moscato1989}, i.e., a GA in which every offspring is improved by local search before it enters the population. It solves the scalarized problem of Section~\ref{sec:model} for one value of $\lambda$ per run. The GA does not search start times directly. Each chromosome fixes the platform decision of every job, and a constructive decoder derives the complete schedule from it. This choice follows from the structure of the problem: on-premises execution is free, so $f_2$ depends only on which jobs are sent to the cloud, and once that set is fixed, minimizing $f_1$ reduces to list scheduling on the bounded on-premises pools. Algorithm~\ref{alg:memetic-search} summarizes the method, and the following paragraphs describe each of its components.
+ 
++
+ \subsubsection{Fitness function}
+ The fitness of an individual is computed on the schedule $S$ obtained by decoding its chromosome $\chi$; lower is better. It is the sum of three terms,
+ \begin{equation}
+@@ -352,57 +379,51 @@ Offspring are generated independently, so the body of a generation is parallel.
+   \hline
+  \end{tabular}
+ \end{table}
+-
+ \begin{algorithm}[t]
+-  \caption{Memetic Genetic Algorithm}
++  \caption{Genetic Algortihm}
+   \label{alg:memetic-search}
+   \small
+   \begin{algorithmic}[1]
+-    \Require Fitness $\Phi$, population size $N$, generation limit
++    \Require Objective $G$, population size $N$, generation limit
+              $g_{\max}$, restart patience $p$, search budget $B$
+-    \Ensure Best chromosome found $\chi^\star$
++    \Ensure Best solution found $x^\star$
+ 
+     \State $P \gets
+       \Call{HeuristicSeeds}{} \cup \Call{WeightedRandomSeeds}{}$
+-    \ForAll{$\chi \in P$}
+-      \State \Call{LocalSearch}{$\chi, B$}
++    \ForAll{$x \in P$}
++      \State \Call{WeightedLocalSearch}{$x, B$}
+     \EndFor
+-    \State $P \gets P \cup \Call{ConvergedSeeds}{}$
+-           \Comment{LS to local optimum}
+-    \State $\chi^\star \gets \arg\min_{\chi \in P} \Phi(\chi)$;
++    \State $x^\star \gets \arg\min_{x \in P} G(x)$;
+            \quad $s \gets 0$
+ 
+     \Statex
+     \For{$g = 1,\ldots,g_{\max}$}
+-      \State $E \gets \{\chi^\star\} \cup \Call{NicheBest}{P}$
+-             \Comment{Elitism}
+-      \State $Q[1..|E|] \gets E$
+-      \ParFor{$k = |E|+1,\ldots,N$}
++      \State $Q[0] \gets x^\star$ \Comment{Elitism}
++      \ParFor{$k = 1,\ldots,N-1$}
+         \State $a \gets \Call{Tournament}{P}$;
+                \quad $b \gets \Call{Tournament}{P}$
+-        \State $c \gets \Call{MSXF}{b \rightarrow a,\Phi}$
++        \State $c \gets \Call{MSXF}{a,b,G}$
+         \State \Call{Mutate}{$c$}
+-        \State \Call{LocalSearch}{$c,\lceil B/2\rceil$}
++        \State \Call{WeightedLocalSearch}{$c,B$}
+         \State $Q[k] \gets c$
+       \EndParFor
+       \State $P \gets Q$
+ 
+       \Statex
+-      \State $\widehat{\chi} \gets \arg\min_{\chi \in P} \Phi(\chi)$
+-      \If{$\Phi(\widehat{\chi}) < \Phi(\chi^\star)$}
+-        \State $\chi^\star \gets \widehat{\chi}$;
++      \State $\widehat{x} \gets \arg\min_{x \in P} G(x)$
++      \If{$G(\widehat{x}) < G(x^\star)$}
++        \State $x^\star \gets \widehat{x}$;
+                \quad $s \gets 0$
+       \Else
+         \State $s \gets s+1$
+       \EndIf
+       \If{$s \ge p$}
+-        \State \Call{ILSKick}{$\chi^\star, B$};
+-               \quad $s \gets 0$
++        \State \Call{ILSKick}{}
+       \EndIf
+     \EndFor
+ 
+     \Statex
+-    \State \Return \Call{LocalSearch}{$\chi^\star,3B$}
++    \State \Return \Call{WeightedLocalSearch}{$x^\star,3B$}
+            \Comment{Final refinement}
+   \end{algorithmic}
+ \end{algorithm}
+@@ -410,6 +431,7 @@ Offspring are generated independently, so the body of a generation is parallel.
+ 
+ 
+ \section{Experimental Setup}
++\label{sec:experimental_setup}
+ 
+ To evaluate both solutions we employ both a trace-driven simulation of a realistic HPC cluster with access to a commercial public cloud and offline benchmark instances generated from the same trace job characteristics and varying state of cluster size, load and data moving characteristics.
+ All online experiments are simulated with Batsim~5~\cite{batsim_jsspp16}, a SimGrid-based simulator of resource and job management systems. Batsim owns the simulation: the clock, job submissions, job execution on the simulated platform and the output traces. Scheduling decisions are not taken by Batsim
+@@ -419,9 +441,59 @@ The on-premises side is a production cluster dedicated to reservoir simulation.
+ $1{,}654$ nodes and $76{,}912$ cores. The cloud side is one partition with 12 AWS EC2 on-demand instance types, priced at their us-east-1 Linux list prices. Each on-premises node type has a curated list of compatible cloud types, chosen to have at least its physical core count and clock frequency and a CPU generation that is not older. An offloaded job may use only types compatible with the node type it requests. We assume that all types run jobs at the same
+ speed as the on-premises nodes. 
+ Both workloads come from the cluster's Slurm accounting log. Each is cut at a time $t_0$, which splits it into two populations. The \emph{initial-state jobs} were submitted before $t_0$: some are already running at $t_0$, the rest are pending. The \emph{window jobs} are submitted during a submission window that starts at $t_0$. The simulation starts at $t_0$ and ends when the last job completes. Every strategy may offload window jobs only. Initial-state jobs
+-always run on-premises: they are part of the load each strategy faces, not part of the decisions it makes.
++always run on-premises: they are part of the load each strategy faces, not part of the decisions it makes.Table~\ref{tab:workloads} summarises the two
++instances.
++
++\begin{itemize}
++  \item \textbf{W1.} The first is a submission burst of 1\,h\,48\,min starting on 25~November~2024 at 21:17:54~UTC. All of its window jobs are single-node and shorter than 12\,h.
++  \item \textbf{W2} The second is a four-hour congestion episode on 30~January~2024  20:00--24:00~UTC), when the queue of the cluster's backed up. It is larger, has a heavier runtime tail (174 window jobs exceed 12\,h; the  longest runs 496\,h) and mixes jobs of 4 to 64 cores.
++\end{itemize}
++
++
++\begin{table}[t]
++  \centering
++  \caption{Workload instances. Runtime and core statistics are over window jobs.}
++  \label{tab:workloads}
++  \begin{tabular}{lrr}
++    \toprule
++                                        & W1 (Nov.~2024) & W2 (Jan.~2024) \\
++    \midrule
++    Submission window                   & 1\,h\,48\,min & 4\,h \\
++    Window jobs                         & 964        & 3{,}349 \\
++    Initial-state jobs (running / pending at $t_0$) & 2{,}325 (1{,}932 / 393) & 3{,}215 (2{,}706 / 509) \\
++    Window CPU-hours                    & 44{,}177   & 261{,}945 \\
++    Runtime: median / mean              & 37\,min / 1.76\,h & 52\,min / 2.39\,h \\
++    Runtime: 95th percentile / max      & 8.6\,h / 11.4\,h  & 12.3\,h / 495.6\,h \\
++    Jobs longer than 12\,h              & 0          & 174 (5.2\%) \\
++    Cores per job                       & 20, 40 or 64 & 4--64 (mean 24.5) \\
++    Multi-node jobs                     & 0          & 0 \\
++    Mean waiting time in the trace      & 36.8\,min  & 30.8\,min \\
++    \bottomrule
++  \end{tabular}
++\end{table}
++
++\begin{table}[t]
++  \centering
++  \caption{Cloud instance types (on-demand, AWS us-east-1).}
++  \label{tab:cloud}
++  \begin{tabular}{lrr@{\qquad}lrr}
++    \toprule
++    Type & Phys.\ cores & \$/h & Type & Phys.\ cores & \$/h \\
++    \midrule
++    c6a.24xlarge & 48 & 3.67 & c6i.32xlarge & 64 & 5.44 \\
++    c5a.24xlarge & 48 & 3.70 & m6i.32xlarge & 64 & 6.14 \\
++    c5.24xlarge  & 48 & 4.08 & c7a.32xlarge & 64 & 6.57 \\
++    c6i.24xlarge & 48 & 4.08 & r6i.32xlarge & 64 & 8.06 \\
++    m5a.24xlarge & 48 & 4.13 & c7i.48xlarge & 96 & 8.57 \\
++    m5.24xlarge  & 48 & 4.61 & c7a.48xlarge & 96 & 9.85 \\
++    \bottomrule
++  \end{tabular}
++\end{table}
++
++
+ 
+ \section{Results}
++\label{sec:results}
+ 
+ \begin{figure}[H]
+     \centering
+@@ -432,40 +504,48 @@ always run on-premises: they are part of the load each strategy faces, not part
+ The graphs in the figure \ref{fig:quality_time}
+ shows the weighted-sum objective value at three different weights (0.25, 0.5 and 0.75) versus time of each solve, there is a clear trend of Gurobi taking the longest but always encountering the best solution, with the GA having a mean gap of 5.66\% to the Gurobi solution while being on average 17 times faster.  While threshold bursting is the fastest it is also the worse in terms of quality having a mean gap of 257\% to the best solution.  In terms of absolute time to solution Gurobi solves on average on 71 seconds, the GA  5.5 seconds and threshold 8.5 miliseconds.  
+ 
+-\begin{table}[H]
+-\caption{Simulation results of the 964 instance}
+-\centering
+-\begin{tabular}{l|l|l|l|}
+-\cline{2-4}
+-                                   & Turnaround(min) & Cost(\$) & Time(s) \\ \hline
+-\multicolumn{1}{|l|}{FedHPC(0.25)} & 106.15          & 1186.61  & 12.60   \\ \hline
+-\multicolumn{1}{|l|}{FedHPC(0.5)}  & 105.94          & 1669.52  & 11.21   \\ \hline
+-\multicolumn{1}{|l|}{FedHPC(0.75)} & 105.85          & 1688.11  & 7.54    \\ \hline
+-\multicolumn{1}{|l|}{No-Burst}     & 183.25          & 1615.66  & 12.80   \\ \hline
+-\multicolumn{1}{|l|}{Full-Burst}   & 105.85          & 6714.20  & 13.04   \\ \hline
+-\multicolumn{1}{|l|}{No-Wait}      & 105.86          & 1939.08  & 12.76   \\ \hline
+-\multicolumn{1}{|l|}{Compute-Wait} & 111.93          & 1610.27  & 90.97   \\ \hline
+-\multicolumn{1}{|l|}{Wise-Burst}   & 106.24          & 1556.56  & 74.08   \\ \hline
+-\multicolumn{1}{|l|}{Supervised}   & 129.06          & 1220.66  & 13.49   \\ \hline
+-\end{tabular}
+-\end{table}
+ 
+-\begin{table}[]
++
++% Sources: experiments/fedhpc_summary/no_cloud_comparison.csv (Workload 1 = TCC, Workload 2 = pos)
++% and experiments/fedhpc_summary/supercloud_20210824_metrics.md (MIT Supercloud 20210824).
++% Window jobs, partitions respected, no cloud, known runtimes. Bold = best per workload and column.
++\begin{table*}[htbp]
+ \centering
+-\begin{tabular}{l|l|l|l|}
+-\cline{2-4}
+-                                   & Turnaround(min) & Cost(\$) & Time(s) \\ \hline
+-\multicolumn{1}{|l|}{FedHPC(0.25)} & 144.18          & 6471.17  & 441.98  \\ \hline
+-\multicolumn{1}{|l|}{FedHPC(0.5)}  & 143.16          & 12347.90 & 34.71   \\ \hline
+-\multicolumn{1}{|l|}{FedHPC(0.75)} & 143.14          & 11254.55 & 24.88   \\ \hline
+-\multicolumn{1}{|l|}{No-Burst}     & 231.11          & 0        & 2.03    \\ \hline
+-\multicolumn{1}{|l|}{Full-Burst}   & 143.14          & 30367.84 & 0.9     \\ \hline
+-\multicolumn{1}{|l|}{No-Wait}      & 143.14          & 4166.52  & 1       \\ \hline
+-\multicolumn{1}{|l|}{Compute-Wait} & 150.21          & 1610.27  & 377.90  \\ \hline
+-\multicolumn{1}{|l|}{Wise-Burst}   & 152.46          & 9401.66  & 310.28  \\ \hline
+-\multicolumn{1}{|l|}{Supervised}   & 164.05          & 8859.02  & 2.13    \\ \hline
+-\end{tabular}
+-\end{table}
++\small
++\caption{Scheduling metrics of the window jobs without cloud offloading (partitions respected, known runtimes). Turnaround and wait totals are summed over jobs. BSLD: mean bounded slowdown, $\max(1, (w + r)/\max(r, 600\,\mathrm{s}))$. Best value per workload in bold.}
++\label{tab:no-cloud-slurm-baselines}
++\resizebox{\textwidth}{!}{%
++\begin{tabular}{lrrrrrrrrr}
++\hline
++Policy & \multicolumn{2}{c}{Turnaround} & \multicolumn{5}{c}{Wait} & BSLD & Sched. time \\
++ & Total (h) & Mean (min) & Total (h) & Mean (min) & Median (min) & P95 (min) & Max (h) & & (s) \\
++\hline
++\multicolumn{10}{l}{\textit{Workload 1 (964 jobs)}} \\
++FCFS            & 2944.3 & 183.3 & 1243.6 & 77.4 & 84.5 & 100.9 & 1.70 & 6.08 & 0.8 \\
++EASY            & 2789.6 & 173.6 & 1089.0 & 67.8 & 76.0 & \textbf{94.5} & \textbf{1.60} & 5.53 & 13.3 \\
++Multi-cluster Slurm  & 2944.8 & 183.3 & 1244.1 & 77.4 & 86.7 & 134.8 & 2.32 & 6.26 & 30.0 \\
++Federated Slurm & 2789.6 & 173.6 & 1089.0 & 67.8 & 76.0 & \textbf{94.5} & \textbf{1.60} & 5.53 & 18.7 \\
++MOSPACE (Gurobi) & \textbf{2566.8} & \textbf{159.8} & \textbf{866.1} & \textbf{53.9} & \textbf{43.3} & 128.1 & 2.44 & \textbf{3.14} & 222.3 \\
++\hline
++\multicolumn{10}{l}{\textit{Workload 2 (3349 jobs)}} \\
++FCFS            & 18976.2 & 340.0 & 10986.5 & 196.8 & 192.6 & 265.3 & 4.49 & 22.86 & 3.5 \\
++EASY            & 12447.3 & 223.0 & 4457.7 & 79.9 & 52.8 & \textbf{227.4} & \textbf{4.39} & 6.89 & 52.6 \\
++Multi-cluster Slurm  & 14815.4 & 265.4 & 6825.8 & 122.3 & 33.9 & 366.2 & 6.37 & 9.67 & 103.0 \\
++Federated Slurm & 12447.8 & 223.0 & 4458.1 & 79.9 & 52.7 & 227.5 & \textbf{4.39} & 6.90 & 74.8 \\
++MOSPACE (Gurobi) & \textbf{11476.5} & \textbf{205.6} & \textbf{3486.8} & \textbf{62.5} & \textbf{24.0} & 277.9 & 6.15 & \textbf{2.30} & 21378.6 \\
++\hline
++\multicolumn{10}{l}{\textit{MIT Supercloud (917 jobs)}} \\
++FCFS            & 18511.7 & 1211.2 & 7592.7 & 496.8 & 482.0 & 827.5 & \textbf{14.2} & 30.6 & 0.2 \\
++EASY            & 17823.7 & 1166.2 & 6904.8 & 451.8 & 464.0 & 822.6 & \textbf{14.2} & 28.5 & 1.2 \\
++Multi-cluster Slurm  & 17851.3 & 1168.0 & 6932.3 & 453.6 & 463.7 & 824.2 & \textbf{14.2} & 28.6 & 6.8 \\
++Federated Slurm & 17851.3 & 1168.0 & 6932.3 & 453.6 & 463.7 & 824.2 & \textbf{14.2} & 28.6 & 7.3 \\
++MOSPACE (Gurobi) & \textbf{14515.8} & \textbf{949.8} & \textbf{3596.8} & \textbf{235.3} & \textbf{147.8} & \textbf{596.4} & 17.1 & \textbf{12.5} & 1164.9 \\
++\hline
++\end{tabular}%
++}
++\end{table*}
++
++
+ 
+ \bibliographystyle{IEEEtran}
+ \bibliography{bibliography.bib}
+diff --git a/MOFE_FEDHPC_CCGRID/bibliography.bib b/MOFE_FEDHPC_CCGRID/bibliography.bib
+index f3af3e2..75cdbb9 100644
+--- a/MOFE_FEDHPC_CCGRID/bibliography.bib
++++ b/MOFE_FEDHPC_CCGRID/bibliography.bib
+@@ -583,38 +583,111 @@ url={https://doi.org/10.1007/BF01585872}
+   year    = {1996},
+   doi     = {10.1016/0377-2217(95)00357-6}
+ }
++@InProceedings{Yamada1996,
++author="Yamada, Takeshi
++and Nakano, Ryohei",
++editor="Voigt, Hans-Michael
++and Ebeling, Werner
++and Rechenberg, Ingo
++and Schwefel, Hans-Paul",
++title="Scheduling by genetic local search with multi-step crossover",
++booktitle="Parallel Problem Solving from Nature --- PPSN IV",
++year="1996",
++publisher="Springer Berlin Heidelberg",
++address="Berlin, Heidelberg",
++pages="960--969",
++abstract="In this paper, multi-step crossover (MSX) and a local search method are unified as a single operator called MSXF. MSX and MSXF utilize a neighborhood structure and a distance measure in the search space. In MSXF, a solution, initially set to be one of the parents, is stochastically replaced by a relatively good solution in the neighborhood, where the replacement is biased toward the other parent. After a certain number of iterations of this process, the best solution from those generated is selected as an offspring. Using job-shop scheduling problem benchmarks, MSXF was evaluated in a GA framework as a high-level crossover working on the critical path of a schedule. Experiments showed promising performance for the proposed method.",
++isbn="978-3-540-70668-7"
++}
++
++
++
++@ARTICLE{Eiben1999,
++  author={Eiben, A.E. and Hinterding, R. and Michalewicz, Z.},
++  journal={IEEE Transactions on Evolutionary Computation}, 
++  title={Parameter control in evolutionary algorithms}, 
++  year={1999},
++  volume={3},
++  number={2},
++  pages={124-141},
++  keywords={Evolutionary computation;Computer science;Terminology;Genetic mutations;Bridges;Problem-solving;Information technology;Real time systems;Power control},
++  doi={10.1109/4235.771166}}
++
++@Inbook{Lourenco2003,
++author="Louren{\c{c}}o, Helena R.
++and Martin, Olivier C.
++and St{\"u}tzle, Thomas",
++editor="Glover, Fred
++and Kochenberger, Gary A.",
++title="Iterated Local Search",
++bookTitle="Handbook of Metaheuristics",
++year="2003",
++publisher="Springer US",
++address="Boston, MA",
++pages="320--353",
++isbn="978-0-306-48056-0",
++doi="10.1007/0-306-48056-5_11",
++url="https://doi.org/10.1007/0-306-48056-5_11"
++}
+ 
+-@inproceedings{Yamada1996,
+-  author    = {Yamada, Takeshi and Nakano, Ryohei},
+-  title     = {Scheduling by Genetic Local Search with Multi-Step Crossover},
+-  booktitle = {Parallel Problem Solving from Nature -- PPSN IV},
+-  series    = {Lecture Notes in Computer Science},
+-  volume    = {1141},
+-  pages     = {960--969},
+-  publisher = {Springer},
+-  year      = {1996},
+-  doi       = {10.1007/3-540-61723-X_1059}
+-}
+-
+-@article{Eiben1999,
+-  author  = {Eiben, {\'A}goston E. and Hinterding, Robert and Michalewicz, Zbigniew},
+-  title   = {Parameter control in evolutionary algorithms},
+-  journal = {IEEE Transactions on Evolutionary Computation},
+-  volume  = {3},
+-  number  = {2},
+-  pages   = {124--141},
+-  year    = {1999},
+-  doi     = {10.1109/4235.771166}
+-}
+-
+-@incollection{Lourenco2003,
+-  author    = {Louren{\c{c}}o, Helena R. and Martin, Olivier C. and St{\"u}tzle, Thomas},
+-  title     = {Iterated Local Search},
+-  booktitle = {Handbook of Metaheuristics},
+-  editor    = {Glover, Fred and Kochenberger, Gary A.},
+-  pages     = {320--353},
+-  publisher = {Springer},
+-  address   = {Boston, MA},
+-  year      = {2003},
+-  doi       = {10.1007/0-306-48056-5_11}
++@ARTICLE{Wang2025Efficient,
++  author={Wang, Xuemin and Li, Xinchi and Xia, Xiaoqing and Yang, Mingchuan},
++  journal={IEEE Access}, 
++  title={Efficient Multi-Cluster Scheduling for Heterogeneous Workloads}, 
++  year={2025},
++  volume={13},
++  number={},
++  pages={186856-186871},
++  keywords={Computer architecture;Computational modeling;Optimal scheduling;Hardware;Adaptation models;Dynamic scheduling;Scheduling algorithms;Resource management;Measurement;Scalability;Multi-cluster scheduling;heterogeneous resources;resource normalization;affinity scoring;latency-aware scheduling;multi-cluster orchestration;GPU/CPU utilization;load balancing},
++  doi={10.1109/ACCESS.2025.3626730}}
++
++@Article{Malti2024,
++author={Malti, Arslan Nedhir
++and Hakem, Mourad
++and Benmammar, Badr},
++title={A new hybrid multi-objective optimization algorithm for task scheduling in cloud systems},
++journal={Cluster Computing},
++year={2024},
++month={Jun},
++day={01},
++volume={27},
++number={3},
++pages={2525-2548},
++abstract={Nowadays, cloud computing is widely used in various fields and is booming day by day with different services offered to users according to their needs and contracts. However, this has brought many challenges and constraints that organizations must to be aware of and address to fully harness its power. In practice, the most important issue that has gained significant influence in improving system performances is task scheduling. Unfortunately, it is commonly known that this problem is NP-hard and the use of both heuristics and metaheuristics is required to obtain near optimal solutions but in a reasonable amount of computation time. Despite the fact that several studies have been published in the literature, there are still interesting and relevant questions to be addressed. For instance, when it comes to the stagnation phenomenon of local solutions and the premature convergence of the search process, it is crucial to execute the exploration and exploitation stages carefully as improperly performed stages may result in inefficient task mapping solutions. Consequently, to overcome the limitations of existing techniques in terms of local optimality trap and immature convergence, a novel hybrid optimization algorithm is proposed to deal with multi-objective task scheduling in heterogeneous IaaS cloud environments. It is based on the combination of the pollination behavior of flowers with the search exploration capability of the grey wolf optimizer strategy. In addition, it makes use of the evolutionary algorithms crossover operators to strike a good balance between exploring new solutions and exploiting the already discovered ones. Based on the CloudSim framework, different test-bed scenarios and both synthetic and standard workload traces were considered to assess the performance of the proposed algorithm by evaluating its objective function in terms of four optimization criteria, namely time makespan, resource utilization, degree of imbalance and throughput. Our proposal was compared to the well-known optimization-based scheduling techniques in the literature, like TSMGWO, GGWO, LPGWO and FPA approach. The obtained results corroborate the merits of the new designed hybrid algorithm.},
++issn={1573-7543},
++doi={10.1007/s10586-023-04099-3},
++url={https://doi.org/10.1007/s10586-023-04099-3}
++}
++
++@InProceedings{Yoo2003,
++author="Yoo, Andy B.
++and Jette, Morris A.
++and Grondona, Mark",
++editor="Feitelson, Dror
++and Rudolph, Larry
++and Schwiegelshohn, Uwe",
++title="SLURM: Simple Linux Utility for Resource Management",
++booktitle="Job Scheduling Strategies for Parallel Processing",
++year="2003",
++publisher="Springer Berlin Heidelberg",
++address="Berlin, Heidelberg",
++pages="44--60",
++abstract="A new cluster resource management system called Simple Linux Utility Resource Management (SLURM) is described in this paper. SLURM, initially developed for large Linux clusters at the Lawrence Livermore National Laboratory (LLNL), is a simple cluster manager that can scale to thousands of processors. SLURM is designed to be flexible and fault-tolerant and can be ported to other clusters of different size and architecture with minimal effort. We are certain that SLURM will benefit both users and system architects by providing them with a simple, robust, and highly scalable parallel job execution environment for their cluster system.",
++isbn="978-3-540-39727-4"
++}
++@InProceedings{Jette2023,
++author="Jette, Morris A.
++and Wickberg, Tim",
++editor="Klus{\'a}{\v{c}}ek, Dalibor
++and Corbal{\'a}n, Julita
++and Rodrigo, Gonzalo P.",
++title="Architecture of the Slurm Workload Manager",
++booktitle="Job Scheduling Strategies for Parallel Processing",
++year="2023",
++publisher="Springer Nature Switzerland",
++address="Cham",
++pages="3--23",
++abstract="Slurm is an open source, fault-tolerant, and highly scalable workload manager used on many of the world's supercomputers and computer clusters. As a cluster workload manager, Slurm has three key functions. First, it allocates exclusive and/or non-exclusive access to resources for some duration of time. Second, it provides a framework for starting, executing, and monitoring work on the allocated resources. Finally, it arbitrates contention for resources by managing queues of pending work and enforcing administrative policies. This paper describes the current design and capabilities of Slurm.",
++isbn="978-3-031-43943-8"
+ }
++
+diff --git a/README.md b/README.md
+index e3f659e..11a359b 100644
+--- a/README.md
++++ b/README.md
+@@ -149,7 +149,7 @@ It runs on every MIP extraction (`model._extract`, which also rejects a job star
+ 
+ #### Exact Pareto front
+ 
+-`pareto.true_pareto_frontier` enumerates the complete front by box splitting: about 2 solves per Pareto point. Each solve is a lexicographic minimum under a bound on the other objective. `pareto.map_pareto_frontier` bisects the objective range instead, giving broad coverage under a solve or time budget. Both rely on f1 being integer-spaced (assumption 8). `pareto.hybrid_frontier` runs NSGA-II and MOEA/D, then solves a certified lexicographic minimum under each surviving candidate's cost. Every `"optimal"` point it returns is proven Pareto-optimal, but its front is incomplete: only trade-offs near the EA candidates are visited. Each box solve runs on one of three engines. `engine="gurobi"` is the compact Gurobi model. `engine="bpc"` is the branch-and-price engine in `bpc.py`, with C++ ng-route pricing, time-window branching and reduced-cost fixing. It proves 40-50-job Rm instances and the trap instances' Pareto fronts in seconds. `engine="lpfirst"` (`lpfirst.py`) is for large instances whose LP is nearly integral, such as the 964- and 3340-job traces. It runs column generation on the time-indexed LP and proves optimality from the Lagrangian bound and a MIP over the placements that fit in the remaining gap, with no branching. It does not support fixed activation costs. `per_solve_time_limit` caps each solve phase on every engine. A phase that runs out of time leaves its box unresolved, and the search reports a partial front.
++`pareto.true_pareto_frontier` enumerates the complete front by box splitting: about 2 solves per Pareto point. Each solve is a lexicographic minimum under a bound on the other objective. `pareto.map_pareto_frontier` bisects the objective range instead, giving broad coverage under a solve or time budget. Both rely on f1 being integer-spaced (assumption 8). `pareto.hybrid_frontier` runs NSGA-II and MOEA/D, then solves a certified lexicographic minimum under each surviving candidate's cost. Every `"optimal"` point it returns is proven Pareto-optimal, but its front is incomplete: only trade-offs near the EA candidates are visited. Each box solve runs on one of three engines. `engine="gurobi"` is the compact Gurobi model. `engine="bpc"` is the branch-and-price engine in `bpc.py`, with C++ ng-route pricing, time-window branching and reduced-cost fixing. It proves 40-50-job Rm instances and the trap instances' Pareto fronts in seconds. `engine="lpfirst"` (`lpfirst.py`) is for large instances whose LP is nearly integral, such as the 964- and 3340-job traces. It runs column generation on the time-indexed LP and proves optimality from the Lagrangian bound and a MIP over the placements that fit in the remaining gap. LP-driven heuristics supply the incumbent: α-point rounding, fix-and-solve over the fractional jobs, and time-window LNS. Identical jobs are merged in every MIP. When the eligible set is too large, a placement-level branch-and-price tree takes over. `LPFirstOptions(backend="highs")` runs every LP and MIP on HiGHS instead of Gurobi (`uv sync --extra highs`). It does not support fixed activation costs. `per_solve_time_limit` caps each solve phase on every engine. A phase that runs out of time leaves its box unresolved, and the search reports a partial front.
+ 
+ ## Project Structure
+ 
+@@ -163,6 +163,7 @@ fedhpc/
+ │   ├── pareto.py             # Reference points, exact box-splitting / bisection fronts, hybrid
+ │   ├── bpc.py                # Branch-price-and-cut exact engine
+ │   ├── lpfirst.py            # LP-first exact engine for large near-integral instances
++│   ├── lp_backend.py         # Gurobi / HiGHS LP-MIP backends for lpfirst
+ │   ├── moea.py               # NSGA-II / NSGA-III / MOEA/D and weighted-sum heuristics
+ │   ├── baselines.py          # List-scheduling baselines (greedy, threshold bursting)
+ │   ├── instance_gen.py       # Permutative generated instance classes A / B
+diff --git a/pyproject.toml b/pyproject.toml
+index 8ea1eec..86eab63 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -14,6 +14,10 @@ dependencies = [
+     "numpy>=2.4.4",
+ ]
+ 
++[project.optional-dependencies]
++# Licence-free LP/MIP backend for fedhpc.lpfirst (LPFirstOptions(backend="highs")).
++highs = ["highspy>=1.16"]
++
+ [project.scripts]
+ fedhpc          = "fedhpc:main"
+ fedhpc-ablation = "fedhpc.ablation:main"
+@@ -37,6 +41,7 @@ cache-keys = [
+ 
+ [dependency-groups]
+ dev = [
++    "highspy>=1.16",
+     "pytest>=9.0.2",
+ ]
+ 
+diff --git a/src/fedhpc/lpfirst.py b/src/fedhpc/lpfirst.py
+index 4df2ced..82fd0a2 100644
+--- a/src/fedhpc/lpfirst.py
++++ b/src/fedhpc/lpfirst.py
+@@ -85,6 +85,73 @@ pos_congestion (3340 jobs)    16.7 s      421 s
+ ``true_pareto_frontier(engine="lpfirst")`` proves 461 points of the
+ 964-job front in 30 min, about 4 s per point, with no inconclusive box.
+ That front is dense, about one point per f1 unit.
++
++Objective scaling
++-----------------
++Every solve works in units where one step of the objective's coarser term
++is 1 (:func:`fedhpc.model.weighted_sum_scale`). The normalised weighted
++sums have weights near 1e-5; unscaled, cost differences sat below Gurobi's
++OptimalityTol and the eligible MIP "proved" schedules 1.7e-5 worse than the
++optimum (B_pos_n100_lE_* at λ = 0.75). The artificials' big-M starts at
++1e3 times the largest objective coefficient and grows 100-fold while
++artificials stay in a converged LP (HiGHS fails on a fixed 1e6 factor).
++
++Primal heuristics (Phase 7, ``LPFirstOptions.heuristics``)
++-----------------------------------------------------------
++Between column generation and step 2, from the converged LP:
++
++- α-point list scheduling (α = 0.5, 0.25, 0.75, 0): jobs in α-point
++  order, each at the earliest start with room on its LP type (or a
++  no-dearer capacitated type that completes it sooner);
++- fix-and-solve (RINS-like): fix every job the LP places integrally (about
++  95 % of them on the generated pos instances) and solve the MIP over the
++  rest, widening the free set to overlapping fixed jobs if it fails;
++- LNS: sub-MIPs over sliding time windows of the incumbent (about
++  ``lns_jobs`` jobs each), at most ``lns_sweeps`` sweeps.
++
++The sub-MIPs use only the freed jobs' master columns plus their
++``cand_per_job`` placements of least reduced-cost gap. On B_pos_n100_lE_iM
++(f1^0, 3340 jobs) they reach 108211.67 in 26 s; the optimum is 108210.67,
++the seed was 267085.67.
++
++Job aggregation (Phase 8)
++-------------------------
++Every MIP (:func:`_mip`) merges identical free jobs (:meth:`_TI.classes`:
++same weight, release slot, units and per-type start sets, durations and
++costs) into one coverage row ``sum x = n_k`` with integer ``x <= n_k``, and
++spreads the solution back over the members. Exact, since such jobs are
++interchangeable. With cloud costs every job is distinct (I/O volumes
++differ), but once f2 is capped at 0 the cloud placements leave the
++eligible set and 3340 jobs collapse into about 730 classes (up to 156
++members). On B_pos_n100_lE_iM the eligible MIP fell from > 780 s
++(unproven) to 407 s.
++
++Placement tree (Phase 9, ``LPFirstOptions.tree``)
++-------------------------------------------------
++When more than ``max_eligible`` placements are eligible, or there is no
++incumbent, step 3 becomes a best-first branch and price over placements
++(:class:`_Tree`): nodes restrict the allowed placements, :func:`_cg`
++prices only those, reduced-cost fixing shrinks each node's set, a node
++small enough is solved by its MIP, and branching splits the most
++fractional job by type or at the half-mass start (Kramer et al. 2020).
++
++It is a fallback, not the default proof. On B_pos_n100_lE_iM, starting
++from the full 250 k eligible set, 175 nodes in 800 s left the bound at the
++LP value (108206.97), where the aggregated eligible MIP proves 108210.67
++in about 400 s. Branching one job of a class lets an identical twin take
++over its LP mass, so the bound does not move. A useful tree there would
++branch on class counts. Each node also rebuilds its LP from scratch
++(614 s of LP time over 214 iterations).
++
++Backends
++--------
++``LPFirstOptions.backend`` picks Gurobi or HiGHS (:mod:`fedhpc.lp_backend`)
++for every LP and MIP. Columns go in as CSC batches. HiGHS's duals give the
++same Lagrangian bound (``tests/test_lp_backend.py``). Measured on the
++B_pos_n100_lE_iM master (4.5 k rows, 141 k columns, 4 threads): the LP from
++scratch takes 15.5 s with HiGHS and 6.5 s with Gurobi. At 180 s the MIP has
++the same dual bound (108210.67) but a worse incumbent (108221.67 vs
++108213.67).
+ """
+ from __future__ import annotations
+ 
+@@ -96,9 +163,11 @@ import gurobipy as gp
+ import numpy as np
+ from gurobipy import GRB
+ 
+-from . import bpc, formulations
++INF = math.inf
++
++from . import bpc, formulations, lp_backend
+ from .data import Instance
+-from .model import Solution, grid_floor
++from .model import Solution, grid_floor, weighted_sum_scale
+ 
+ __all__ = ["LPFirstOptions", "LPFirstResult", "solve_lpfirst", "solve_weighted_sum_lpfirst",
+            "solve_f1_lpfirst", "solve_f2_lpfirst", "make_lpfirst_lexmin_bounded"]
+@@ -113,6 +182,24 @@ class LPFirstOptions:
+     restricted-master MIP (step 2). ``max_eligible`` — the most placements
+     the exact MIP (step 3) may have; past it the result is not certified.
+     ``mip_threads`` — Gurobi threads for both MIPs (0: Gurobi's default).
++    ``lp_threads`` — Gurobi threads for the master LP (0: Gurobi's default).
++
++    Primal heuristics (step 1b, Phase 7): ``heuristics`` turns them on;
++    ``heuristic_time`` caps them in all. ``cand_per_job`` — placements of
++    least reduced-cost gap a freed job may take in a sub-MIP. ``fix_time`` —
++    seconds per fix-and-solve MIP. ``lns_jobs`` — jobs starting in one LNS
++    window; ``lns_time_per`` — seconds per LNS sub-MIP; ``lns_sweeps`` —
++    full passes over the horizon.
++
++    Search tree (step 3', Phase 9): with ``tree``, an eligible set larger
++    than ``max_eligible`` (where step 3 would give up), or a solve without
++    an incumbent, is branched on instead; a node whose eligible set has at
++    most ``node_eligible`` placements gets its MIP, for ``node_mip_time``
++    seconds at most. Below ``max_eligible`` the aggregated eligible MIP is
++    faster (see the module docstring).
++
++    ``backend`` — LP/MIP solver for every master and MIP: ``"gurobi"`` or
++    ``"highs"`` (:mod:`fedhpc.lp_backend`).
+     """
+     smoothing: float = 0.5
+     per_job: int = 3
+@@ -121,6 +208,18 @@ class LPFirstOptions:
+     rmp_mip_time: float = 30.0
+     max_eligible: int = 400_000
+     mip_threads: int = 0
++    lp_threads: int = 0
++    heuristics: bool = True
++    heuristic_time: float = 120.0
++    cand_per_job: int = 30
++    fix_time: float = 30.0
++    lns_jobs: int = 400
++    lns_time_per: float = 10.0
++    lns_sweeps: int = 2
++    tree: bool = True
++    backend: str = "gurobi"
++    node_eligible: int = 60_000
++    node_mip_time: float = 60.0
+ 
+ 
+ @dataclass
+@@ -208,6 +307,42 @@ class _TI:
+         np.add.at(used, (kc, tc + pc), -1)
+         self.row_needed = np.cumsum(used, axis=1)[:, :H] > 0
+ 
++    def classes(self) -> tuple[np.ndarray, np.ndarray]:
++        """``(cls, canon)``: each job position's class and each placement's
++        counterpart on its class representative (Phase 8).
++
++        Two jobs are in one class when they have the same weight, release
++        slot, capacity units and, type by type, the same start set, duration
++        and cost. Such jobs are interchangeable: swapping them changes f1 by
++        nothing (their ``C1`` differ by the constant ``w (a_rep - a_j)`` at
++        every start) and f2 not at all, and the start-set reductions treat
++        them alike because their start sets are compared directly."""
++        if getattr(self, "_classes", None) is None:
++            job_of = {j.id: j for j in self.inst.jobs}
++            ends = np.append(self.first[1:], self.n_arcs)
++            key_cls: dict[tuple, int] = {}
++            cls = np.empty(len(self.jobs), dtype=np.int64)
++            rep: list[int] = []
++            for i, jid in enumerate(self.jobs):
++                lo, hi = int(self.first[i]), int(ends[i])
++                j = job_of[jid]
++                key = (j.weight, max(0, math.ceil(j.arrival)), float(self.Q[lo]),
++                       self.MID[lo:hi].tobytes(), self.T[lo:hi].tobytes(),
++                       self.P[lo:hi].tobytes(), self.C2[lo:hi].tobytes())
++                c = key_cls.setdefault(key, len(rep))
++                if c == len(rep):
++                    rep.append(i)
++                cls[i] = c
++            rep_arr = np.array(rep, dtype=np.int64)
++            canon = np.arange(self.n_arcs) - self.first[self.J] + self.first[rep_arr[cls[self.J]]]
++            # C1_j = C1_rep + offset_j at every start: offset_j = w (a_rep - a_j)
++            arr = np.array([job_of[jid].arrival for jid in self.jobs], dtype=float)
++            wt = np.array([job_of[jid].weight for jid in self.jobs], dtype=float)
++            self.class_rep = rep_arr
++            self.class_offset = wt * (arr[rep_arr[cls]] - arr)
++            self._classes = (cls, canon)
++        return self._classes
++
+     def index(self, jid: int, mid: int, t: int) -> int | None:
+         hit = self.pair.get((jid, mid))
+         if hit is None:
+@@ -241,69 +376,147 @@ class _D:
+ 
+ 
+ class _Master:
+-    """The restricted master LP (or, with ``vtype=BINARY`` and no
+-    artificials, a MIP over a fixed set of placements)."""
++    """The restricted master LP (or, with ``integer=True`` and no
++    artificials, a MIP over a fixed set of placements), on an
++    :mod:`fedhpc.lp_backend` backend (``"gurobi"`` or ``"highs"``)."""
+ 
+     def __init__(self, ti: _TI, w1: float, w2: float, b1: float | None, b2: float | None,
+-                 big_m: float | None, vtype=GRB.CONTINUOUS):
+-        formulations.configure_env()
+-        self.ti, self.w1, self.w2, self.vtype = ti, w1, w2, vtype
+-        mdl = self.mdl = gp.Model("lpfirst", env=formulations._shared_env)
+-        mdl.setParam("OutputFlag", 0)
+-        self.cover = [mdl.addConstr(gp.LinExpr() == 1.0, name=f"cover[{jid}]") for jid in ti.jobs]
+-        self.cap: dict[tuple[int, int], gp.Constr] = {}
+-        for k, tau in zip(*np.nonzero(ti.row_needed)):
+-            self.cap[int(k), int(tau)] = mdl.addConstr(gp.LinExpr() <= float(ti.N[k, tau]),
+-                                                       name=f"cap[{k},{tau}]")
+-        self.b1 = mdl.addConstr(gp.LinExpr() <= b1, name="bound1") if b1 is not None else None
+-        self.b2 = mdl.addConstr(gp.LinExpr() <= b2, name="bound2") if b2 is not None else None
++                 big_m: float | None, integer: bool = False, *,
++                 free: np.ndarray | None = None, occupy: np.ndarray | None = None,
++                 cover_rhs: np.ndarray | None = None, backend: str = "gurobi",
++                 threads: int = 0):
++        """``free`` (bool per job position) — only these jobs get a coverage
++        row; the others are fixed elsewhere. ``occupy`` (types × H) —
++        capacity those fixed jobs already hold. Callers shift the bound
++        rows themselves. ``cover_rhs`` (per job position) — coverage
++        right-hand sides, and the placements' upper bounds, for an
++        aggregated model (Phase 8); default 1."""
++        self.ti, self.w1, self.w2, self.integer = ti, w1, w2, integer
++        self.be = lp_backend.make(backend, threads)
++        nj = len(ti.jobs)
++        self.rhs = np.ones(nj) if cover_rhs is None else np.asarray(cover_rhs, float)
++        self.free = np.ones(nj, dtype=bool) if free is None else np.asarray(free, dtype=bool)
++        fj = np.nonzero(self.free)[0]
++        self.cover_row = np.full(nj, -1, dtype=np.int64)
++        self.cover_row[fj] = self.be.add_rows(self.rhs[fj], self.rhs[fj])
++        cap_rhs = ti.N if occupy is None else ti.N - occupy
++        kk, tt = np.nonzero(ti.row_needed)
++        self.cap_row = np.full((len(ti.types), ti.H), -1, dtype=np.int64)
++        self.cap_row[kk, tt] = self.be.add_rows(np.full(len(kk), -INF), cap_rhs[kk, tt].astype(float))
++        self.b1_row = int(self.be.add_rows(np.array([-INF]), np.array([float(b1)]))[0]) \
++            if b1 is not None else -1
++        self.b2_row = int(self.be.add_rows(np.array([-INF]), np.array([float(b2)]))[0]) \
++            if b2 is not None else -1
+         self.B1, self.B2 = b1, b2
+-        mdl.update()
+-        self.art = ([mdl.addVar(obj=big_m, column=gp.Column([1.0], [c])) for c in self.cover]
+-                    if big_m is not None else [])
++        self.n_art = 0
++        self.big_m = big_m
++        self.big_m_cap = (big_m or 0.0) * 1e6
++        if big_m is not None:
++            rows = self.cover_row[fj]
++            self.be.add_cols(np.full(len(fj), float(big_m)), np.full(len(fj), INF),
++                             np.zeros(len(fj), dtype=bool), np.arange(len(fj) + 1),
++                             rows, np.ones(len(fj)))
++            self.n_art = len(fj)
+         self.arcs: list[int] = []
+-        self.vars: list[gp.Var] = []
+         self.has = np.zeros(ti.n_arcs, dtype=bool)
++        self._x = None
+ 
+     def add(self, arcs) -> None:
+-        ti, mdl = self.ti, self.mdl
+-        for a in arcs:
+-            a = int(a)
+-            if self.has[a]:
+-                continue
+-            self.has[a] = True
+-            coefs, rows = [1.0], [self.cover[ti.J[a]]]
+-            k = ti.K[a]
+-            if k >= 0:
+-                t, q = ti.T[a], float(ti.Q[a])
+-                for tau in range(t, t + ti.P[a]):
+-                    coefs.append(q)
+-                    rows.append(self.cap[int(k), int(tau)])
+-            if self.b1 is not None:
+-                coefs.append(float(ti.C1[a]))
+-                rows.append(self.b1)
+-            if self.b2 is not None:
+-                coefs.append(float(ti.C2[a]))
+-                rows.append(self.b2)
+-            self.arcs.append(a)
+-            self.vars.append(mdl.addVar(obj=self.w1 * ti.C1[a] + self.w2 * ti.C2[a],
+-                                        ub=1.0, vtype=self.vtype,
+-                                        column=gp.Column(coefs, rows)))
++        ti = self.ti
++        arcs = np.unique(np.asarray(arcs, dtype=np.int64))
++        arcs = arcs[~self.has[arcs]]
++        if not len(arcs):
++            return
++        self.has[arcs] = True
++        n = len(arcs)
++        K, T, P, J = ti.K[arcs], ti.T[arcs], ti.P[arcs], ti.J[arcs]
++        p_eff = np.where(K >= 0, P, 0)
++        nb = (self.b1_row >= 0) + (self.b2_row >= 0)
++        per = 1 + p_eff + nb
++        starts = np.r_[0, np.cumsum(per)]
++        index = np.empty(int(starts[-1]), dtype=np.int64)
++        value = np.empty(int(starts[-1]))
++        index[starts[:-1]] = self.cover_row[J]
++        value[starts[:-1]] = 1.0
++        rep = np.repeat(np.arange(n), p_eff)
++        off = np.arange(len(rep)) - np.repeat(np.cumsum(p_eff) - p_eff, p_eff)
++        pos = starts[:-1][rep] + 1 + off
++        index[pos] = self.cap_row[K[rep], T[rep] + off]
++        value[pos] = ti.Q[arcs][rep]
++        nxt = starts[:-1] + 1 + p_eff
++        if self.b1_row >= 0:
++            index[nxt] = self.b1_row
++            value[nxt] = ti.C1[arcs]
++            nxt = nxt + 1
++        if self.b2_row >= 0:
++            index[nxt] = self.b2_row
++            value[nxt] = ti.C2[arcs]
++        if np.any(index < 0):
++            raise ValueError("a placement of a fixed job, or outside the capacity rows")
++        cost = self.w1 * ti.C1[arcs] + self.w2 * ti.C2[arcs]
++        self.be.add_cols(cost, self.rhs[J], np.full(n, self.integer), starts, index, value)
++        self.arcs.extend(arcs.tolist())
++        self._x = None
++
++    def raise_big_m(self, factor: float = 100.0) -> None:
++        """Make the coverage artificials ``factor`` times dearer (adaptive
++        big-M: start moderate, which HiGHS needs, and grow only while
++        artificials stay in the LP)."""
++        self.big_m *= factor
++        self.be.change_costs(np.arange(self.n_art), np.full(self.n_art, float(self.big_m)))
++        self._x = None
++
++    def col_of(self) -> dict[int, int]:
++        return {a: self.n_art + i for i, a in enumerate(self.arcs)}
++
++    def solve_lp(self) -> str:
++        self._x = None
++        return self.be.solve_lp()
++
++    def solve_mip(self, **kw) -> str:
++        self._x = None
++        return self.be.solve_mip(**kw)
++
++    def objective(self) -> float:
++        return self.be.objective()
+ 
+     def duals(self) -> _D:
+         ti = self.ti
++        rd = self.be.row_duals()
++        sigma = np.zeros(len(ti.jobs))
++        fj = np.nonzero(self.free)[0]
++        sigma[fj] = rd[self.cover_row[fj]]
+         pi = np.zeros((len(ti.types), ti.H))
+-        for (k, tau), c in self.cap.items():
+-            pi[k, tau] = min(0.0, c.Pi)
+-        return _D(np.array([c.Pi for c in self.cover]), pi,
+-                  min(0.0, self.b1.Pi) if self.b1 is not None else 0.0,
+-                  min(0.0, self.b2.Pi) if self.b2 is not None else 0.0)
++        m = self.cap_row >= 0
++        pi[m] = np.minimum(0.0, rd[self.cap_row[m]])
++        return _D(sigma, pi,
++                  min(0.0, float(rd[self.b1_row])) if self.b1_row >= 0 else 0.0,
++                  min(0.0, float(rd[self.b2_row])) if self.b2_row >= 0 else 0.0)
++
++    def _vals(self) -> np.ndarray:
++        if self._x is None:
++            self._x = self.be.col_values()
++        return self._x
+ 
+     def artificial(self) -> float:
+-        return sum(v.X for v in self.art)
++        return float(self._vals()[:self.n_art].sum())
++
++    def arc_values(self) -> np.ndarray:
++        """Values of the placement columns, in ``self.arcs`` order."""
++        return self._vals()[self.n_art:]
++
++    def x(self) -> np.ndarray:
++        """The current solution as a dense vector over all placements."""
++        out = np.zeros(self.ti.n_arcs)
++        if self.arcs:
++            out[np.asarray(self.arcs)] = self.arc_values()
++        return out
++
++    def chosen(self) -> list[int]:
++        return [a for a, v in zip(self.arcs, self.arc_values().tolist()) if v > 0.5]
+ 
+     def assignment(self) -> dict[int, tuple[int, int]] | None:
+-        chosen = [a for a, v in zip(self.arcs, self.vars) if v.X > 0.5]
++        chosen = self.chosen()
+         out = self.ti.assignment_of(chosen)
+         return out if len(out) == len(self.ti.jobs) == len(chosen) else None
+ 
+@@ -362,35 +575,490 @@ def _within(inst: Instance, a: dict[int, tuple[int, int]], b1, b2) -> bool:
+ 
+ 
+ def _mip(ti: _TI, arcs, w1, w2, b1, b2, cutoff: float, time_limit: float, step: float,
+-         threads: int, start: dict | None = None):
++         threads: int, start: dict | None = None, *, fixed=None, focus: int = 0,
++         aggregate: bool = True, backend: str = "gurobi"):
+     """Solve the placement MIP over ``arcs`` for a schedule below ``cutoff``.
+     Returns ``(status, objective, assignment)``: ``"optimal"`` (proven on the
+-    grid), ``"none"`` (proven: nothing below the cutoff) or ``"limit"``."""
+-    m = _Master(ti, w1, w2, b1, b2, None, vtype=GRB.BINARY)
++    grid), ``"none"`` (proven: nothing below the cutoff) or ``"limit"``.
++
++    ``fixed`` — placements held fixed (one per job, none of them in
++    ``arcs``): only the other jobs get coverage rows, the fixed ones' capacity
++    and bound-row use is taken off the right-hand sides, and the result is a
++    sub-MIP of the full one (a large-neighbourhood step). ``"none"`` then only
++    means nothing below the cutoff *with those jobs fixed*.
++
++    ``aggregate`` (Phase 8) — identical free jobs (:meth:`_TI.classes`) share
++    one coverage row ``sum x = n_k`` over their representative's placements,
++    with integer ``x <= n_k``; the solution is spread back over the members.
++    Exact, since members are interchangeable; it removes the symmetry that
++    makes these MIPs slow on the zero-cost (all on-prem) phase."""
++    fixed = np.asarray(fixed if fixed is not None else [], dtype=np.int64)
++    free = occ = None
++    const = 0.0
++    if len(fixed):
++        free = np.ones(len(ti.jobs), dtype=bool)
++        free[ti.J[fixed]] = False
++        occ = _occupancy(ti, fixed)
++        const = float(w1 * ti.C1[fixed].sum() + w2 * ti.C2[fixed].sum())
++        if b1 is not None:
++            b1 = b1 - float(ti.C1[fixed].sum())
++        if b2 is not None:
++            b2 = b2 - float(ti.C2[fixed].sum())
++        arcs = [a for a in arcs if free[ti.J[a]]]
++    arcs = np.asarray(arcs, dtype=np.int64)
++    members = None
++    rhs = None
++    if aggregate and len(arcs):
++        cls, canon = ti.classes()
++        fmask = np.ones(len(ti.jobs), dtype=bool) if free is None else free
++        fj = np.nonzero(fmask)[0]
++        counts = np.bincount(cls[fj], minlength=len(ti.class_rep))
++        if counts.max() > 1:
++            rhs = np.zeros(len(ti.jobs))
++            rhs[ti.class_rep] = counts
++            free = rhs > 0
++            arcs = np.unique(canon[arcs])
++            off = float(ti.class_offset[fj].sum())   # Σ C1_j - C1_rep over the free jobs
++            const += w1 * off
++            if b1 is not None:
++                b1 = b1 - off
++            members = {}
++            for i in fj:
++                members.setdefault(int(cls[i]), []).append(int(i))
++    m = _Master(ti, w1, w2, b1, b2, None, integer=True, free=free, occupy=occ,
++                cover_rhs=rhs, backend=backend, threads=threads)
+     m.add(arcs)
+-    mdl = m.mdl
+-    mdl.setParam("TimeLimit", max(0.0, time_limit))
+-    mdl.setParam("Cutoff", cutoff)
+-    mdl.setParam("MIPGap", 0.0)
+-    mdl.setParam("MIPGapAbs", 0.999 * step if step > 0 else 1e-9)
+-    mdl.setParam("IntFeasTol", 1e-9)
+-    if threads:
+-        mdl.setParam("Threads", threads)
++    start_vals: dict[int, float] = {}
+     if start:
+-        idx = {a: v for a, v in zip(m.arcs, m.vars)}
++        col = m.col_of()
++        canon = ti.classes()[1] if members is not None else None
+         for a in ti.arcs_of(start):
+-            if a in idx:
+-                idx[a].Start = 1.0
+-    mdl.optimize()
+-    if mdl.Status in (GRB.CUTOFF, GRB.INFEASIBLE) or (mdl.Status == GRB.OPTIMAL and mdl.SolCount == 0):
++            if canon is not None:
++                a = int(canon[a])
++            if a in col:
++                start_vals[col[a]] = start_vals.get(col[a], 0.0) + 1.0
++    status = m.solve_mip(time_limit=time_limit,
++                         cutoff=cutoff - const if math.isfinite(cutoff) else cutoff,
++                         gap_abs=0.999 * step if step > 0 else 1e-9, focus=focus,
++                         start=start_vals)
++    if status == "infeasible":
+         return "none", math.inf, None
+-    a = m.assignment() if mdl.SolCount else None
++    a = None
++    if m.be.has_solution():
++        if members is None:
++            chosen = m.chosen()
++        else:
++            cls, _canon = ti.classes()
++            chosen = []
++            left = {c: list(v) for c, v in members.items()}
++            for a, v in zip(m.arcs, m.arc_values().tolist()):
++                n = int(round(v))
++                if n <= 0:
++                    continue
++                c = int(cls[ti.J[a]])
++                shift = a - int(ti.first[ti.J[a]])
++                for _ in range(n):
++                    if not left[c]:
++                        break
++                    i = left[c].pop()
++                    chosen.append(int(ti.first[i]) + shift)
++        chosen = chosen + fixed.tolist()
++        a = ti.assignment_of(chosen)
++        if not len(a) == len(ti.jobs) == len(chosen) or ti.inst.schedule_violations(a):
++            a = None
+     obj = _objective_of(ti.inst, a, w1, w2) if a else math.inf
+-    if mdl.Status == GRB.OPTIMAL and a is not None:
++    if status == "optimal" and a is not None:
+         return "optimal", obj, a
+     return "limit", obj, a
+ 
+ 
++def _occupancy(ti: _TI, arcs) -> np.ndarray:
++    """Capacity (types × H) the placements ``arcs`` hold."""
++    arcs = np.asarray(arcs, dtype=np.int64)
++    arcs = arcs[ti.K[arcs] >= 0]
++    d = np.zeros((len(ti.types), ti.H + 1))
++    np.add.at(d, (ti.K[arcs], ti.T[arcs]), ti.Q[arcs])
++    np.add.at(d, (ti.K[arcs], ti.T[arcs] + ti.P[arcs]), -ti.Q[arcs])
++    return np.cumsum(d, axis=1)[:, :ti.H]
++
++
++# ---------------------------------------------------------------------------
++# Primal heuristics (BPC plan, Phase 7)
++# ---------------------------------------------------------------------------
++
++def _per_job_argmax(ti: _TI, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
++    """``(arc, value)``: each job's largest placement in ``x``."""
++    mx = np.maximum.reduceat(x, ti.first)
++    hit = np.nonzero(x >= mx[ti.J] - 1e-12)[0]
++    _, first = np.unique(ti.J[hit], return_index=True)
++    return hit[first], mx
++
++
++def _alpha_schedule(ti: _TI, x: np.ndarray, alpha: float) -> dict[int, tuple[int, int]] | None:
++    """α-point list scheduling from a fractional placement vector (Hall,
++    Schulz, Shmoys & Wein 1997; Savelsbergh, Uma & Wein 2005).
++
++    A job's α-point is the first start by which an ``alpha`` share of its LP
++    mass has begun; jobs are placed in α-point order, each on the type its
++    α-point uses, at the earliest start where the type has room. A
++    capacitated job may move to another capacitated type that costs no more
++    when that completes it sooner, so bound rows on f2 stay safe."""
++    sup = np.nonzero(x > 1e-9)[0]
++    if not len(sup):
++        return None
++    order = np.lexsort((ti.T[sup], ti.J[sup]))
++    sup = sup[order]
++    jobs = ti.J[sup]
++    cum = np.cumsum(x[sup])
++    seg = np.r_[0, np.nonzero(np.diff(jobs))[0] + 1]
++    base = np.repeat(np.r_[0.0, cum[seg[1:] - 1]], np.diff(np.r_[seg, len(sup)]))
++    reached = (cum - base) >= alpha - 1e-9
++    reached_idx = np.nonzero(reached)[0]
++    _, first = np.unique(jobs[reached_idx], return_index=True)
++    pick = sup[reached_idx[first]]
++    if len(pick) != len(ti.jobs):
++        return None
++    inst = ti.inst
++    used = np.zeros_like(ti.N)
++    out: dict[int, tuple[int, int]] = {}
++    for a in pick[np.lexsort((ti.P[pick], ti.T[pick]))]:
++        i = int(ti.J[a])
++        jid = ti.jobs[i]
++        k0, c0 = int(ti.K[a]), float(ti.C2[a])
++        lo, hi = ti.first[i], (ti.first[i + 1] if i + 1 < len(ti.first) else ti.n_arcs)
++        best = None
++        for m in {int(v) for v in ti.MID[lo:hi]}:
++            n0, ts = ti.pair[jid, m]
++            k = int(ti.K[n0])
++            if k0 < 0 and m != int(ti.MID[a]):
++                continue                     # a cloud job keeps its LP type
++            if k0 >= 0 and (k < 0 or ti.C2[n0] > c0 + 1e-9):
++                continue                     # only capacitated types, no dearer
++            p, q = int(ti.P[n0]), float(ti.Q[n0])
++            if k < 0:
++                t = int(ts[0])
++            else:
++                bad = (ti.N[k] - used[k]) < q - 1e-9
++                pre = np.r_[0, np.cumsum(bad)]
++                ok = np.nonzero(pre[ts + p] - pre[ts] == 0)[0]
++                if not len(ok):
++                    continue
++                t = int(ts[ok[0]])
++            if best is None or t + p < best[0]:
++                best = (t + p, m, k, t, p, q)
++        if best is None:
++            return None
++        _, m, k, t, p, q = best
++        if k >= 0:
++            used[k, t:t + p] += q
++        out[jid] = (m, t)
++    return out
++
++
++def _fix_and_solve(ti: _TI, x: np.ndarray, gap_rc: np.ndarray, has: np.ndarray, w1, w2, b1, b2,
++                   cutoff: float, deadline: float, step: float, opts: "LPFirstOptions",
++                   start: dict | None):
++    """RINS-style dive: fix every job the LP places integrally, solve the
++    MIP over the fractional ones (their master columns plus their
++    ``cand_per_job`` placements of least ``gap_rc``), and widen the free set
++    to the fixed jobs overlapping them when that has no solution."""
++    arg, mx = _per_job_argmax(ti, x)
++    free = mx < 1 - 1e-6
++    for _round in range(3):
++        if not free.any() or time.perf_counter() >= deadline:
++            return None
++        cand = _candidates(ti, free, gap_rc, has, opts.cand_per_job, start)
++        fixed = arg[~free]
++        status, obj, a = _mip(ti, cand, w1, w2, b1, b2, cutoff,
++                              min(opts.fix_time, deadline - time.perf_counter()), step,
++                              opts.mip_threads, start, fixed=fixed, backend=opts.backend)
++        if a is not None:
++            return a
++        # widen: free the fixed jobs whose placement overlaps a free job's window
++        span = np.zeros((len(ti.types), ti.H + 1))
++        c = cand[ti.K[cand] >= 0]
++        np.add.at(span, (ti.K[c], ti.T[c]), 1)
++        np.add.at(span, (ti.K[c], ti.T[c] + ti.P[c]), -1)
++        busy = np.cumsum(span, axis=1)[:, :ti.H] > 0
++        f = fixed[ti.K[fixed] >= 0]
++        pre = np.c_[np.zeros(len(ti.types)), np.cumsum(busy, axis=1)]
++        hit = pre[ti.K[f], ti.T[f] + ti.P[f]] - pre[ti.K[f], ti.T[f]] > 0
++        if not hit.any():
++            return None
++        free[ti.J[f[hit]]] = True
++    return None
++
++
++def _candidates(ti: _TI, free: np.ndarray, gap_rc: np.ndarray, has: np.ndarray, per_job: int,
++                start: dict | None) -> np.ndarray:
++    """The free jobs' placements: master columns, the incumbent's and the
++    ``per_job`` of least ``gap_rc`` each."""
++    idx = np.nonzero(free[ti.J])[0]
++    order = np.lexsort((gap_rc[idx], ti.J[idx]))
++    idx = idx[order]
++    jobs = ti.J[idx]
++    seg = np.r_[0, np.nonzero(np.diff(jobs))[0] + 1]
++    rank = np.arange(len(idx)) - np.repeat(seg, np.diff(np.r_[seg, len(idx)]))
++    keep = (rank < per_job) | has[idx]
++    out = set(idx[keep].tolist())
++    if start:
++        out.update(a for a in ti.arcs_of(start) if free[ti.J[a]])
++    return np.array(sorted(out), dtype=np.int64)
++
++
++def _lns(ti: _TI, best: dict, ub: float, gap_rc: np.ndarray, has: np.ndarray, w1, w2, b1, b2,
++         step: float, deadline: float, opts: "LPFirstOptions", certified, st: dict):
++    """Large-neighbourhood search over time windows: free the jobs that the
++    incumbent runs during a window (on any capacitated type, plus the cloud
++    jobs released in it), re-solve that sub-MIP below the incumbent, slide on.
++    Stops after a sweep without improvement, at the deadline, or once the
++    incumbent is certified. Returns ``(ub, best)``."""
++    arcs = np.array(ti.arcs_of(best), dtype=np.int64)
++    if len(arcs) != len(ti.jobs):
++        return ub, best
++    rel = np.array([max(0, math.ceil(j.arrival)) for j in ti.inst.jobs])
++    pos = np.array([ti.jpos[j.id] for j in ti.inst.jobs])
++    release = np.empty(len(ti.jobs), dtype=np.int64)
++    release[pos] = rel
++    n_target = opts.lns_jobs
++    improved_any = True
++    sweeps = 0
++    while improved_any and time.perf_counter() < deadline and sweeps < opts.lns_sweeps:
++        improved_any = False
++        sweeps += 1
++        # windows holding about n_target job starts each
++        starts = np.sort(ti.T[arcs])
++        edges = np.unique(starts[::max(1, n_target // 2)])
++        for lo_i in range(len(edges)):
++            if time.perf_counter() >= deadline or certified(ub):
++                return ub, best
++            t_lo = int(edges[lo_i])
++            t_hi = int(edges[min(lo_i + 2, len(edges) - 1)]) if lo_i + 2 < len(edges) else ti.H
++            a_t, a_e = ti.T[arcs], ti.T[arcs] + ti.P[arcs]
++            in_win = (a_t < t_hi) & (a_e > t_lo)
++            in_win |= (ti.K[arcs] < 0) & (release[ti.J[arcs]] < t_hi) & (release[ti.J[arcs]] >= t_lo)
++            free = np.zeros(len(ti.jobs), dtype=bool)
++            free[ti.J[arcs[in_win]]] = True
++            if free.sum() < 2:
++                continue
++            cand = _candidates(ti, free, gap_rc, has, opts.cand_per_job, best)
++            fixed = arcs[~free[ti.J[arcs]]]
++            cut = ub - step + 1e-7 * max(1.0, abs(ub)) if step > 0 else ub - 1e-7 * max(1.0, abs(ub))
++            status, obj, a = _mip(ti, cand, w1, w2, b1, b2, cut,
++                                  min(opts.lns_time_per, deadline - time.perf_counter()), step,
++                                  opts.mip_threads, best, fixed=fixed, backend=opts.backend)
++            st["lns_mips"] = st.get("lns_mips", 0) + 1
++            if a is not None and obj < ub - 1e-9 and _within(ti.inst, a, b1, b2):
++                ub, best = obj, a
++                arcs = np.array(ti.arcs_of(best), dtype=np.int64)
++                improved_any = True
++                st["lns_improvements"] = st.get("lns_improvements", 0) + 1
++    return ub, best
++
++
++@dataclass
++class _CGOut:
++    status: str               # "converged", "certified" (stop(L) held) or "time"
++    L: float                  # best Lagrangian bound
++    center: "_D | None"       # its duals
++    center_rc: np.ndarray | None
++    rmp: float                # last restricted-master LP value
++
++
++def _cg(ti: _TI, master: "_Master", w1, w2, b1, b2, opts: LPFirstOptions,
++        deadline: float | None, allowed: np.ndarray | None, stop, st: dict) -> _CGOut:
++    """Column generation on ``master`` until it converges, ``stop(L)`` holds
++    or the deadline passes. ``allowed`` (bool per placement) restricts
++    pricing, for a node of the search tree: a forbidden placement gets an
++    infinite reduced cost, so it is never added and the Lagrangian bound is
++    the bound of the restricted problem (infinite when some job has no
++    allowed placement)."""
++    best_L, center, center_rc = -math.inf, None, None
++    rmp = math.inf
++    it = 0
++
++    def price(d):
++        rc = _price(ti, d, w1, w2)
++        if allowed is not None:
++            rc[~allowed] = np.inf
++        return rc
++
++    while True:
++        if deadline is not None and time.perf_counter() >= deadline:
++            return _CGOut("time", best_L, center, center_rc, rmp)
++        it += 1
++        tl = time.perf_counter()
++        status = master.solve_lp()
++        st["lp_s"] = st.get("lp_s", 0.0) + time.perf_counter() - tl
++        if status != "optimal":
++            raise RuntimeError(f"lpfirst master LP status {status} ({master.be.name}: "
++                               f"{getattr(master.be, 'last_status', '')})")
++        rmp = master.objective()
++        d = master.duals()
++        tp = time.perf_counter()
++        pick = np.array([], dtype=np.int64)
++        if center is not None and opts.smoothing > 0:
++            sd = center.mix(d, opts.smoothing)
++            rc_s = price(sd)
++            L, _m = _lagrangian(ti, sd, rc_s, b1, b2)
++            if L > best_L:
++                best_L, center, center_rc = L, sd, rc_s
++            pick = _select(ti, rc_s, master.has, opts.tol, opts.per_job, opts.max_cols)
++            if len(pick):
++                rc_d = _price_subset(ti, d, w1, w2, pick)
++                pick = pick[rc_d < -opts.tol]
++        if not len(pick):
++            rc = price(d)
++            L, _m = _lagrangian(ti, d, rc, b1, b2)
++            if L > best_L:
++                best_L, center, center_rc = L, d, rc
++            pick = _select(ti, rc, master.has, opts.tol, opts.per_job, opts.max_cols)
++        st["pricing_s"] = st.get("pricing_s", 0.0) + time.perf_counter() - tp
++        st["cg_iters"] = st.get("cg_iters", 0) + 1
++        if stop(best_L):
++            return _CGOut("certified", best_L, center, center_rc, rmp)
++        if not len(pick) or best_L >= rmp - max(opts.tol, 1e-9 * abs(rmp)):
++            if master.n_art and master.artificial() > 1e-6 and master.big_m < master.big_m_cap:
++                master.raise_big_m()          # artificials left: maybe M is too small
++                best_L, center, center_rc = -math.inf, None, None
++                continue
++            return _CGOut("converged", best_L, center, center_rc, rmp)
++        master.add(pick)
++
++
++class _Tree:
++    """Branch and price over placements (BPC plan, Phase 9).
++
++    A node is a set of allowed placements. Its relaxation is the
++    time-indexed master restricted to them, solved by :func:`_cg`; its
++    Lagrangian bound prunes it against the incumbent. After the bound:
++
++    - **reduced-cost fixing**: every placement whose gap exceeds
++      ``UB - L`` leaves the node's allowed set (the eligibility argument of
++      step 3, applied per node), so children inherit only eligible ones;
++    - **node MIP**: once at most ``node_eligible`` remain, the aggregated
++      MIP over them (cutoff ``UB - step``) solves the node outright; if it
++      hits ``node_mip_time`` the node branches instead;
++    - **branching** (Kramer et al. 2020): the most fractional job is split
++      by type when its LP mass spans types (its heaviest type against the
++      rest), else by start time at the point where its mass first reaches
++      one half, so both children cut off the node's LP solution;
++    - an α-point rounding of each node's LP tries to improve the incumbent.
++
++    Best-first; on a timeout the smallest open bound is a valid bound.
++    """
++
++    def __init__(self, ti, inst, w1, w2, b1, b2, big_m, opts, step, proves, st):
++        self.ti, self.inst, self.w = ti, inst, (w1, w2)
++        self.b1, self.b2, self.big_m, self.opts = b1, b2, big_m, opts
++        self.step, self.proves, self.st = step, proves, st
++
++    def _cut(self, ub):
++        m = 1e-7 * max(1.0, abs(ub))
++        return ub - self.step + m if self.step > 0 else ub - m
++
++    def _branch(self, x: np.ndarray, allowed: np.ndarray):
++        ti = self.ti
++        arg, mx = _per_job_argmax(ti, x)
++        frac = np.nonzero(mx < 1 - 1e-6)[0]
++        if not len(frac):
++            return None
++        i = int(frac[np.argmin(mx[frac])])
++        lo = int(ti.first[i])
++        hi = int(ti.first[i + 1]) if i + 1 < len(ti.first) else ti.n_arcs
++        seg = np.arange(lo, hi)
++        sup = seg[x[seg] > 1e-9]
++        types = ti.MID[sup]
++        side = np.zeros(ti.n_arcs, dtype=bool)
++        if len(set(types.tolist())) > 1:
++            mass = {m: float(x[sup[types == m]].sum()) for m in set(types.tolist())}
++            m_star = max(mass, key=mass.get)
++            side[seg[ti.MID[seg] == m_star]] = True
++            self.st["tree_type_branches"] = self.st.get("tree_type_branches", 0) + 1
++        else:
++            order = sup[np.argsort(ti.T[sup], kind="stable")]
++            cum = np.cumsum(x[order])
++            k = int(np.searchsorted(cum, 0.5 * cum[-1] - 1e-12))
++            k = min(k, len(order) - 2)
++            t_cut = int(ti.T[order[k]])
++            side[seg[ti.T[seg] <= t_cut]] = True
++        left, right = allowed.copy(), allowed.copy()
++        left[seg[~side[seg]]] = False
++        right[seg[side[seg]]] = False
++        return left, right
++
++    def run(self, ub, best, allowed, root_master, root_cg, deadline):
++        """Returns ``(ub, best, open_bound, proven)``."""
++        import heapq
++        ti, opts, st = self.ti, self.opts, self.st
++        w1, w2 = self.w
++        heap = [(root_cg.L, 0, allowed, np.asarray(root_master.arcs, dtype=np.int64), root_master,
++                 root_cg)]
++        counter = 1
++        st["tree_nodes"] = 0
++        while heap:
++            if deadline is not None and time.perf_counter() >= deadline:
++                return ub, best, heap[0][0], False
++            L0, _, allow, cols, master, cg = heapq.heappop(heap)
++            if self.proves(L0, ub):
++                continue
++            st["tree_nodes"] += 1
++            if master is None:
++                master = _Master(ti, w1, w2, self.b1, self.b2, self.big_m,
++                                 backend=opts.backend, threads=opts.lp_threads)
++                seed = set(cols[allow[cols]].tolist())
++                if best is not None:
++                    seed.update(a for a in ti.arcs_of(best) if allow[a])
++                seed.update(np.nonzero(~ti.capped & allow)[0].tolist())
++                master.add(sorted(seed))
++                cg = _cg(ti, master, w1, w2, self.b1, self.b2, opts, deadline, allow,
++                         lambda L: self.proves(L, ub), st)
++                if cg.status == "time":
++                    return ub, best, min(L0, heap[0][0]) if heap else L0, False
++                if cg.status == "certified" or not math.isfinite(cg.L):
++                    continue
++                if master.artificial() > 1e-6:
++                    continue          # the node's LP is infeasible
++            L = max(L0, cg.L)
++            if self.proves(L, ub):
++                continue
++            x = master.x()
++            # incumbent from the node: integral LP, or its α-point rounding
++            for cand in ([master.assignment()] if master.assignment() else []) + \
++                    [_alpha_schedule(ti, x, 0.5)]:
++                if cand is not None and _within(self.inst, cand, self.b1, self.b2):
++                    obj = _objective_of(self.inst, cand, w1, w2)
++                    if obj < ub - 1e-9:
++                        ub, best = obj, cand
++                        st["tree_improvements"] = st.get("tree_improvements", 0) + 1
++            if self.proves(L, ub):
++                continue
++            # reduced-cost fixing at the node
++            _L, mins = _lagrangian(ti, cg.center, cg.center_rc, self.b1, self.b2)
++            gap_rc = cg.center_rc + cg.center.sigma[ti.J] - mins[ti.J]
++            keep = allow & (gap_rc < (ub - cg.L) + 1e-7 * max(1.0, abs(ub)))
++            n_keep = int(keep.sum())
++            if n_keep <= opts.node_eligible:
++                status, obj, a = _mip(ti, np.nonzero(keep)[0], w1, w2, self.b1, self.b2,
++                                      self._cut(ub), min(opts.node_mip_time,
++                                                         (deadline - time.perf_counter())
++                                                         if deadline else opts.node_mip_time),
++                                      self.step, opts.mip_threads, best, backend=opts.backend)
++                st["tree_node_mips"] = st.get("tree_node_mips", 0) + 1
++                if a is not None and obj < ub - 1e-9 and _within(self.inst, a, self.b1, self.b2):
++                    ub, best = obj, a
++                if status in ("optimal", "none"):
++                    continue
++            kids = self._branch(x, keep)
++            if kids is None:      # integral LP but not better than ub: done
++                continue
++            cols = np.asarray(master.arcs, dtype=np.int64)
++            for kid in kids:
++                heapq.heappush(heap, (L, counter, kid, cols, None, None))
++                counter += 1
++        return ub, best, math.inf, True
++
++
+ def solve_lpfirst(
+     inst: Instance, weight1: float, weight2: float,
+     bound1_value: float | None = None, bound2_value: float | None = None,
+@@ -414,7 +1082,14 @@ def solve_lpfirst(
+     st = stats if stats is not None else {}
+     if ti is None:
+         ti = _TI(inst, bpc._prepare(inst))
+-    w1, w2, b1, b2 = weight1, weight2, bound1_value, bound2_value
++    # Scale the objective so one step of its coarser term is 1 (as
++    # model.weighted_sum_scale does for the compact model): normalised
++    # weights (~1e-5) put cost differences below Gurobi's OptimalityTol and
++    # its MIPs then prune the optimum. Everything below works in scaled
++    # units; result() reports unscaled ones.
++    scale = weighted_sum_scale(inst, weight1, weight2) if (weight1 or weight2) else 1.0
++    w1, w2, b1, b2 = weight1 * scale, weight2 * scale, bound1_value, bound2_value
++    st["scale"] = scale
+     step = bpc._objective_step(inst, w1, w2)
+     if seed_schedules is None:
+         seed_schedules = bpc.heuristic_schedules(inst)
+@@ -425,30 +1100,37 @@ def solve_lpfirst(
+             obj = _objective_of(inst, a, w1, w2)
+             if obj < ub:
+                 ub, best = obj, dict(a)
+-    st["seed_obj"] = ub
++    st["seed_obj"] = ub / scale
+ 
+-    def certified(L: float) -> bool:
+-        if not math.isfinite(ub):
++    def proves(L: float, u: float) -> bool:
++        if not math.isfinite(u):
+             return False
+-        margin = 1e-7 * max(1.0, abs(ub))
+-        return L > ub - step + margin if step > 0 else L >= ub - margin
++        margin = 1e-7 * max(1.0, abs(u))
++        return L > u - step + margin if step > 0 else L >= u - margin
++
++    def certified(L: float) -> bool:
++        return proves(L, ub)
+ 
+     def left() -> float:
+         return math.inf if deadline is None else deadline - time.perf_counter()
+ 
+     def result(status, how, L):
+         st["time_s"] = time.perf_counter() - t0
+-        st["bound"] = L
++        st["bound"] = L / scale
+         if column_pool is not None:
+             try:
+-                column_pool.update(int(a) for a, v in zip(master.arcs, master.vars) if v.X > 1e-9)
+-            except (gp.GurobiError, AttributeError):   # no LP solution yet
++                column_pool.update(int(a) for a, v in zip(master.arcs, master.arc_values().tolist())
++                                   if v > 1e-9)
++            except Exception:   # no LP solution yet
+                 pass
+             if best is not None:
+                 column_pool.update(ti.arcs_of(best))
+-        return LPFirstResult(status, ub if best is not None else math.inf, best, L, how, st)
++        return LPFirstResult(status, ub / scale if best is not None else math.inf, best,
++                             L / scale, how, st)
+ 
+-    master = _Master(ti, w1, w2, b1, b2, bpc._big_m_for(inst))
++    # in scaled units; _cg raises it (up to 1e6 more) while artificials stay
++    big_m = 1e3 * max(1.0, float(np.max(w1 * ti.C1 + w2 * ti.C2)))
++    master = _Master(ti, w1, w2, b1, b2, big_m, backend=opts.backend, threads=opts.lp_threads)
+     seed = set(column_pool or ())
+     for a in seed_schedules:
+         seed.update(ti.arcs_of(a))
+@@ -456,65 +1138,74 @@ def solve_lpfirst(
+     master.add(sorted(seed))
+ 
+     # --- column generation, stopped by the certificate when possible
+-    best_L, center, center_rc = -math.inf, None, None
+-    rmp = math.inf
+-    it = 0
+-    while True:
+-        if left() <= 0:
+-            return result("feasible", "", best_L)
+-        it += 1
+-        tl = time.perf_counter()
+-        master.mdl.optimize()
+-        st["lp_s"] = st.get("lp_s", 0.0) + time.perf_counter() - tl
+-        if master.mdl.Status != GRB.OPTIMAL:
+-            raise RuntimeError(f"lpfirst master LP status {master.mdl.Status}")
+-        rmp = master.mdl.ObjVal
+-        d = master.duals()
+-        tp = time.perf_counter()
+-        pick = np.array([], dtype=np.int64)
+-        if center is not None and opts.smoothing > 0:
+-            sd = center.mix(d, opts.smoothing)
+-            rc_s = _price(ti, sd, w1, w2)
+-            L, _m = _lagrangian(ti, sd, rc_s, b1, b2)
+-            if L > best_L:
+-                best_L, center, center_rc = L, sd, rc_s
+-            pick = _select(ti, rc_s, master.has, opts.tol, opts.per_job, opts.max_cols)
+-            if len(pick):
+-                rc_d = _price_subset(ti, d, w1, w2, pick)
+-                pick = pick[rc_d < -opts.tol]
+-        if not len(pick):
+-            rc = _price(ti, d, w1, w2)
+-            L, _m = _lagrangian(ti, d, rc, b1, b2)
+-            if L > best_L:
+-                best_L, center, center_rc = L, d, rc
+-            pick = _select(ti, rc, master.has, opts.tol, opts.per_job, opts.max_cols)
+-        st["pricing_s"] = st.get("pricing_s", 0.0) + time.perf_counter() - tp
+-        st["cg_iters"] = it
+-        if certified(best_L):
+-            st["columns"] = len(master.arcs)
+-            return result("optimal", "bound", best_L)
+-        if not len(pick) or best_L >= rmp - max(opts.tol, 1e-9 * abs(rmp)):
+-            break
+-        master.add(pick)
++    cg = _cg(ti, master, w1, w2, b1, b2, opts, deadline, None, certified, st)
++    best_L, center, center_rc, rmp = cg.L, cg.center, cg.center_rc, cg.rmp
++    if cg.status == "time":
++        return result("feasible", "", best_L)
++    if cg.status == "certified":
++        st["columns"] = len(master.arcs)
++        return result("optimal", "bound", best_L)
+     st["columns"] = len(master.arcs)
+-    st["lp"] = rmp
++    st["lp"] = rmp / scale
+     if master.artificial() > 1e-6:   # the LP optimum needs artificials: no schedule
+         best = None
+         return result("infeasible", "lp", best_L)
+ 
++    # --- step 1b: primal heuristics from the LP (α-points, fix-and-solve, LNS)
++    if opts.heuristics and math.isfinite(rmp) and not certified(best_L):
++        th = time.perf_counter()
++        stop = th + opts.heuristic_time if deadline is None else min(deadline, th + opts.heuristic_time)
++        x = master.x()
++        _L, mins = _lagrangian(ti, center, center_rc, b1, b2)
++        gap_rc = center_rc + center.sigma[ti.J] - mins[ti.J]
++        for alpha in (0.5, 0.25, 0.75, 0.0):
++            a = _alpha_schedule(ti, x, alpha)
++            if a is not None and _within(inst, a, b1, b2):
++                obj = _objective_of(inst, a, w1, w2)
++                if obj < ub:
++                    ub, best = obj, a
++        st["alpha_obj"] = ub / scale
++        if not certified(best_L):
++            cut = ub - step + 1e-7 * max(1.0, abs(ub)) if math.isfinite(ub) else INF
++            a = _fix_and_solve(ti, x, gap_rc, master.has, w1, w2, b1, b2, cut, stop, step,
++                               opts, best)
++            if a is not None and _within(inst, a, b1, b2):
++                obj = _objective_of(inst, a, w1, w2)
++                if obj < ub:
++                    ub, best = obj, a
++        st["fix_obj"] = ub / scale
++        if best is not None and not certified(best_L):
++            ub, best = _lns(ti, best, ub, gap_rc, master.has, w1, w2, b1, b2, step, stop, opts,
++                            lambda u: proves(best_L, u), st)
++        st["lns_obj"] = ub / scale
++        st["heuristic_s"] = time.perf_counter() - th
++        if certified(best_L):
++            return result("optimal", "heuristic", best_L)
++
+     # --- step 2: the restricted master as a MIP
+     if math.isfinite(rmp) and opts.rmp_mip_time > 0:
+-        cut = ub - step + 1e-7 * max(1.0, abs(ub)) if math.isfinite(ub) else GRB.INFINITY
++        cut = ub - step + 1e-7 * max(1.0, abs(ub)) if math.isfinite(ub) else INF
+         tm = time.perf_counter()
+         status, obj, a = _mip(ti, master.arcs, w1, w2, b1, b2, cut,
+-                              min(opts.rmp_mip_time, left()), step, opts.mip_threads, best)
++                              min(opts.rmp_mip_time, left()), step, opts.mip_threads, best,
++                              backend=opts.backend)
+         st["rmp_mip_s"] = time.perf_counter() - tm
+         if a is not None and obj < ub and _within(inst, a, b1, b2):
+             ub, best = obj, a
+         if certified(best_L):
+             return result("optimal", "rmp_mip", best_L)
+     if not math.isfinite(ub):
+-        return result("feasible", "", best_L)
++        if not opts.tree or left() <= 0:
++            return result("feasible", "", best_L)
++        # no incumbent: every placement is eligible, so search the tree
++        tr = _Tree(ti, inst, w1, w2, b1, b2, big_m, opts, step, proves, st)
++        ub, best, L_open, done = tr.run(ub, best, np.ones(ti.n_arcs, dtype=bool), master, cg,
++                                        deadline)
++        if done:
++            if best is None:
++                return result("infeasible", "tree", math.inf)
++            return result("optimal", "tree", best_L)
++        return result("feasible", "", max(best_L, L_open))
+ 
+     # --- step 3: the exact MIP over the eligible placements
+     _L, mins = _lagrangian(ti, center, center_rc, b1, b2)
+@@ -522,11 +1213,21 @@ def solve_lpfirst(
+     eligible = np.nonzero(center_rc + center.sigma[ti.J] - mins[ti.J]
+                           < gap + 1e-7 * max(1.0, abs(ub)))[0]
+     st["eligible"] = int(len(eligible))
++    if opts.tree and len(eligible) > opts.max_eligible and left() > 0:
++        # --- step 3': branch and price over placements (Phase 9)
++        allowed = np.zeros(ti.n_arcs, dtype=bool)
++        allowed[eligible] = True
++        tr = _Tree(ti, inst, w1, w2, b1, b2, big_m, opts, step, proves, st)
++        ub, best, L_open, done = tr.run(ub, best, allowed, master, cg, deadline)
++        if done:
++            return result("optimal", "tree", best_L)
++        return result("feasible", "", max(best_L, L_open))
+     if len(eligible) > opts.max_eligible or left() <= 0:
+         return result("feasible", "", best_L)
+     cut = ub - step + 1e-7 * max(1.0, abs(ub)) if step > 0 else ub - 1e-7 * max(1.0, abs(ub))
+     tm = time.perf_counter()
+-    status, obj, a = _mip(ti, eligible, w1, w2, b1, b2, cut, left(), step, opts.mip_threads)
++    status, obj, a = _mip(ti, eligible, w1, w2, b1, b2, cut, left(), step, opts.mip_threads,
++                          backend=opts.backend)
+     st["eligible_mip_s"] = time.perf_counter() - tm
+     if status == "limit":
+         if a is not None and obj < ub and _within(inst, a, b1, b2):
+diff --git a/tests/test_lpfirst.py b/tests/test_lpfirst.py
+index a7ec95f..33af49f 100644
+--- a/tests/test_lpfirst.py
++++ b/tests/test_lpfirst.py
+@@ -23,7 +23,7 @@ from fedhpc.pareto import map_pareto_frontier, true_pareto_frontier
+ configure_env()
+ 
+ _W = [(1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (0.3, 0.7)]
+-NO_MIP = lpfirst.LPFirstOptions(rmp_mip_time=0.0)
++NO_MIP = lpfirst.LPFirstOptions(rmp_mip_time=0.0, heuristics=False)   # each proof step alone
+ 
+ 
+ def _cases(known_pareto_inst):
+@@ -189,11 +189,11 @@ def test_excess_inequality_behind_the_eligible_mip(case):
+     if case.startswith("gap"):
+         m = lpfirst._Master(ti, *w, None, None, bpc._big_m_for(inst))
+         m.add(range(ti.n_arcs))
+-        m.mdl.optimize()
++        assert m.solve_lp() == "optimal"
+         d = m.duals()
+         rc = lpfirst._price(ti, d, *w)
+         L, mins = lpfirst._lagrangian(ti, d, rc, None, None)
+-        assert L == pytest.approx(m.mdl.ObjVal, abs=1e-6) and L < opt - 0.25
++        assert L == pytest.approx(m.objective(), abs=1e-6) and L < opt - 0.25
+         ex = excess(d, rc, mins, a_opt)
+         assert 0.25 < ex <= opt - L + 1e-6
+ 
+diff --git a/uv.lock b/uv.lock
+index 937d3da..b6149c0 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -1,5 +1,5 @@
+ version = 1
+-revision = 3
++revision = 5
+ requires-python = ">=3.14"
+ 
+ [[package]]
+@@ -64,8 +64,14 @@ dependencies = [
+     { name = "numpy" },
+ ]
+ 
++[package.optional-dependencies]
++highs = [
++    { name = "highspy" },
++]
++
+ [package.dev-dependencies]
+ dev = [
++    { name = "highspy" },
+     { name = "pytest" },
+ ]
+ 
+@@ -73,12 +79,17 @@ dev = [
+ requires-dist = [
+     { name = "graphviz", specifier = ">=0.21" },
+     { name = "gurobipy", specifier = ">=13.0.1" },
++    { name = "highspy", marker = "extra == 'highs'", specifier = ">=1.16" },
+     { name = "matplotlib", specifier = ">=3.10.9" },
+     { name = "numpy", specifier = ">=2.4.4" },
+ ]
++provides-extras = ["highs"]
+ 
+ [package.metadata.requires-dev]
+-dev = [{ name = "pytest", specifier = ">=9.0.2" }]
++dev = [
++    { name = "highspy", specifier = ">=1.16" },
++    { name = "pytest", specifier = ">=9.0.2" },
++]
+ 
+ [[package]]
+ name = "fonttools"
+@@ -129,6 +140,56 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/9d/6b/b5a10633dc2bf62c8e15c0f114e064b68a7cc0b147f800d630d02830b09d/gurobipy-13.0.1-cp314-cp314t-win_amd64.whl", hash = "sha256:70348777693ed8b7348fe43db4444151d49ab7dec7d46b959fb98c2c1e557028", size = 11879457, upload-time = "2026-01-21T10:43:48.059Z" },
+ ]
+ 
++[[package]]
++name = "highspy"
++version = "1.16.0"
++source = { registry = "https://pypi.org/simple" }
++dependencies = [
++    { name = "numpy" },
++]
++sdist = { url = "https://files.pythonhosted.org/packages/39/2a/900b9bd6663ffbc6be7c6f9adedda691734f7a392d4ed0d4b9c0d13beab3/highspy-1.16.0.tar.gz", hash = "sha256:83519368321b1ac0ed508b8562b335928b6fd249e2ab42ff0218491e1486d985", size = 1821908, upload-time = "2026-11-11T15:14:43.649Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/a7/0e/177c53f75781b893bf6a02b47169dc0e688cca4c54182433c977052a31ed/highspy-1.16.0-cp314-cp314-macosx_10_15_x86_64.whl", hash = "sha256:92af0aee510c3777f35126c50bc4f7124bc49d70aee3b12221e8471dbb2be5b6", size = 2713508, upload-time = "2026-11-11T15:13:25.402Z" },
++    { url = "https://files.pythonhosted.org/packages/e1/cd/b81ef703336c2d39b5deab9b19ba6129e3d3c936b252cc5f53b063a42436/highspy-1.16.0-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:7c5d23112612372fd13024ab76b5189b5274c4297bea52432531635960072331", size = 2383002, upload-time = "2026-11-11T15:13:26.774Z" },
++    { url = "https://files.pythonhosted.org/packages/fa/1e/a0a7d26c14c9bccc4479d588d6433bde6affe6ef09ff866c0590d61029a2/highspy-1.16.0-cp314-cp314-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:931ab72a7285a63caeab753757770faae70e8a6e5bffe72acfe0976b94aafb93", size = 2984719, upload-time = "2026-11-11T15:13:28.419Z" },
++    { url = "https://files.pythonhosted.org/packages/ff/7c/d012ceab3e89448d2310e4cc949cd8b0e31fb8aa0ac71fa1c6a7fa56e790/highspy-1.16.0-cp314-cp314-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:016ceaba8c1d442e01b40e22fb310e3c0aa9eb4dddfd9f033f3e0dc29ec20cb5", size = 3239289, upload-time = "2026-11-11T15:13:29.898Z" },
++    { url = "https://files.pythonhosted.org/packages/3d/41/8499e99482ae890423eb57dd4ab21e245abe29e389233eb30f409d61d714/highspy-1.16.0-cp314-cp314-manylinux_2_26_i686.manylinux_2_28_i686.whl", hash = "sha256:0fd5a0c81ebbec2dc6ca91b1aca92ad9d891573aa4928142ad976748fc5a4ac7", size = 3458789, upload-time = "2026-11-11T15:13:31.835Z" },
++    { url = "https://files.pythonhosted.org/packages/44/22/969685b789dbf1a6beaf99122861c3fb3a1845c20d7ef83fc72ac9ccaa4d/highspy-1.16.0-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:e41f1055c95ffe391c1ed7d0b820367145f66660698cc44fb94b5e57f521161c", size = 4068178, upload-time = "2026-11-11T15:13:33.3Z" },
++    { url = "https://files.pythonhosted.org/packages/f1/3b/785a065437df9761e1a9c496b655bcbb6c1c1f0e36fb63546618c97fae56/highspy-1.16.0-cp314-cp314-musllinux_1_2_i686.whl", hash = "sha256:88a2cb82f9d7edcc3d59b0a4561e2da205a1c7872b496e5d976d195c3ceef96e", size = 4740698, upload-time = "2026-11-11T15:13:36.004Z" },
++    { url = "https://files.pythonhosted.org/packages/38/54/1cd364fb06dd8f2537c95a7f47bd62ca20533d60ca5fc8c0546b401e2743/highspy-1.16.0-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:0a2d71029886f2d24ce9fa1da95dc2421d3e57b10a52105db34f3408372db766", size = 4332799, upload-time = "2026-11-11T15:13:37.895Z" },
++    { url = "https://files.pythonhosted.org/packages/22/7b/d3a898b058da51f6f393153a7103e79a13ae0a340a5c083578d42422b793/highspy-1.16.0-cp314-cp314-win32.whl", hash = "sha256:84f2bf574061dfebfa92f4f66f1bbca953772d8905a088838d6969ffbfc30dca", size = 2725286, upload-time = "2026-11-11T15:13:39.38Z" },
++    { url = "https://files.pythonhosted.org/packages/94/69/cc6a4307b9bdff4d63131c07dd794167b42a5566ca447d5197d5c507f9ea/highspy-1.16.0-cp314-cp314-win_amd64.whl", hash = "sha256:9de6ffea02ca6dafedbec85f13a3aa365bb29365133d627fe1281713b187938b", size = 3242799, upload-time = "2026-11-11T15:13:40.734Z" },
++    { url = "https://files.pythonhosted.org/packages/0b/9f/2c12e331a1dfe0a9d96d7a59435c510f91ff74ae621ae237a5f136aa1ab6/highspy-1.16.0-cp314-cp314-win_arm64.whl", hash = "sha256:66c8fdba1e9055f2054a3d9dd725c096d6b3f437da11a67bd85ed81e309784c2", size = 4820039, upload-time = "2026-11-11T15:13:42.328Z" },
++    { url = "https://files.pythonhosted.org/packages/70/2c/85e8dfddcd01cb87b80cbbf8ddfbf4a4e360ff01230d8330bcd4b7419fff/highspy-1.16.0-cp314-cp314t-macosx_10_15_x86_64.whl", hash = "sha256:62adcf919df522bf742b4a4871053b9f8791ad5acd8f50c90a5da2feb0a385e5", size = 2734669, upload-time = "2026-11-11T15:13:43.837Z" },
++    { url = "https://files.pythonhosted.org/packages/f0/92/b331a2d738b5307544b735e5513782e5f2647723e818500b0312aa802bca/highspy-1.16.0-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:cb0285482cc94e476b16622a47a350c843b973aa2d178b4b50ebbfe7044fb585", size = 2412470, upload-time = "2026-11-11T15:13:45.237Z" },
++    { url = "https://files.pythonhosted.org/packages/df/ca/49890eb4ba6e541d73a7de6cf0c94853c0886c2ecc0d0dabb060b4a842ce/highspy-1.16.0-cp314-cp314t-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:d7e896e042b6914e2ff1fba29165d52adad3b8bdc1da18bdf17a40a3a55bbf6f", size = 2984238, upload-time = "2026-11-11T15:13:46.63Z" },
++    { url = "https://files.pythonhosted.org/packages/f3/4a/7d494d61c12302ebd08d6e6c12eeae5eae805a406b330027c571b8b646f9/highspy-1.16.0-cp314-cp314t-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:84302868102ea0ab061dcd719687ade8d895942e08cff36b217d0e6d0bb5ba21", size = 3244074, upload-time = "2026-11-11T15:13:48.019Z" },
++    { url = "https://files.pythonhosted.org/packages/5e/87/0ae50de573026f132f4cb6e5ed536df57423daf83856ad5ba7b005dc5740/highspy-1.16.0-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:76a514046a0495980ad9421c4114f6f260d8e704925df95b0e3596a8a87aabb3", size = 4069384, upload-time = "2026-11-11T15:13:49.575Z" },
++    { url = "https://files.pythonhosted.org/packages/af/40/1cbf5f03555c3b44b2a9c2aa9ba886c05b02938be0a8bdda34a92e7802fa/highspy-1.16.0-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:09f2242b81bf4c0567fcf9e318e5e91e1d37989c3adbfa089b8c620ec5f2e494", size = 4335369, upload-time = "2026-11-11T15:13:51.015Z" },
++    { url = "https://files.pythonhosted.org/packages/f2/96/291a97ed32adbee3e20849a94f30157f072cda64e66846e275120dc46153/highspy-1.16.0-cp314-cp314t-win32.whl", hash = "sha256:43d29a816722775c32797cd8dbd87bd3148ea7d5ce0c91a3307d82833883630e", size = 2760015, upload-time = "2026-11-11T15:13:52.521Z" },
++    { url = "https://files.pythonhosted.org/packages/52/93/b7c3c1b5863d888a7a4c9ba1a54f7865599a31e5659ea86848fb31c6b99b/highspy-1.16.0-cp314-cp314t-win_amd64.whl", hash = "sha256:d6810378d07ade74e5b2b24065266285000e99eb69197c3e50eace52316b54b1", size = 3311393, upload-time = "2026-11-11T15:13:54.252Z" },
++    { url = "https://files.pythonhosted.org/packages/95/31/cb2ba0bb15090e5c8069caf47aac62228ca2785b63b17b7de43ce48f733e/highspy-1.16.0-cp314-cp314t-win_arm64.whl", hash = "sha256:267b9f642b558aa7e3bc2f48e48bd241aa68fe1cd6dfac80c264d8667d7f0cbb", size = 4910840, upload-time = "2026-11-11T15:13:55.865Z" },
++    { url = "https://files.pythonhosted.org/packages/8d/8e/9ea76940d8d3aa38f6611128b279a1ef4c03535bd988f72d44821b4861be/highspy-1.16.0-cp315-cp315-macosx_10_15_x86_64.whl", hash = "sha256:b1af52054409fcd46970ed3261670540659dfa0ff500a27ecf30d72ff8d2544b", size = 2713506, upload-time = "2026-11-11T15:13:57.992Z" },
++    { url = "https://files.pythonhosted.org/packages/a9/39/c69cd81f509b30df96eac35c7d71b7d3b8b00d6b8b1f36b805d3a0ac91fc/highspy-1.16.0-cp315-cp315-macosx_11_0_arm64.whl", hash = "sha256:5e1b6411fc651dc797e9fead88274f517099ef43d9fa69b1a6478deafa03d30b", size = 2383005, upload-time = "2026-11-11T15:13:59.617Z" },
++    { url = "https://files.pythonhosted.org/packages/c7/61/b5dac9664d89ed77070b70f30a6ab20b43c8114a5899bfee639aa8aaa14b/highspy-1.16.0-cp315-cp315-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:67d28125c62543792a2b5dccd92c670aa8fe15ee5feedc9869a533aa58237539", size = 2984723, upload-time = "2026-11-11T15:14:01.075Z" },
++    { url = "https://files.pythonhosted.org/packages/8a/06/dfc857b2a294be8461913e1f9ad4e0f3120471d84237dbf48f3eed32dc67/highspy-1.16.0-cp315-cp315-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:b2fbef19c0a3b07503d9c7fad8b931934b3b0eae467020aa8a080551bfdb687f", size = 3239293, upload-time = "2026-11-11T15:14:02.689Z" },
++    { url = "https://files.pythonhosted.org/packages/79/1e/dffd0573d33da43a568fba318a014c5f4f535e29a45415d9ed928d815870/highspy-1.16.0-cp315-cp315-manylinux_2_26_i686.manylinux_2_28_i686.whl", hash = "sha256:3809f8a85117d33c2d7f68c7ab779639a62da50178fdb31408c6ca1e74422b50", size = 3458778, upload-time = "2026-11-11T15:14:04.124Z" },
++    { url = "https://files.pythonhosted.org/packages/52/78/41411e1154d68929dbd95ec2062ad689f2d3e5bfa3cae2099ad6eddf34f4/highspy-1.16.0-cp315-cp315-musllinux_1_2_aarch64.whl", hash = "sha256:0192cbc44743c821993f0d8bc057cbc6c417daa64b3c4003000168e9302445b5", size = 4068175, upload-time = "2026-11-11T15:14:05.617Z" },
++    { url = "https://files.pythonhosted.org/packages/ab/01/123e88987c0ea2ab737a7f2eed4a9ae49d3a5754bba0be9bc1a87569aba7/highspy-1.16.0-cp315-cp315-musllinux_1_2_i686.whl", hash = "sha256:5dad6234875714f79f28a51d54508be64198320ea144585168628e5b663d19cf", size = 4740697, upload-time = "2026-11-11T15:14:07.104Z" },
++    { url = "https://files.pythonhosted.org/packages/2c/49/f88b8e67f8f37a746d93e329f8b7a27c493512275d048f897f5086cfe71a/highspy-1.16.0-cp315-cp315-musllinux_1_2_x86_64.whl", hash = "sha256:3393d58c2ebc6ea51aae3a36c956b5cf02fadb736b89e11397f69d234968d846", size = 4332807, upload-time = "2026-11-11T15:14:08.955Z" },
++    { url = "https://files.pythonhosted.org/packages/cd/4a/1a932a6473518969d3b6b418aef3d5f6a057f53b4518132d5e0bfeedd15b/highspy-1.16.0-cp315-cp315-win32.whl", hash = "sha256:d42e690c4f4e730ada15088eb544cdb305f614366344c8a15dfff8e10be1530f", size = 2725268, upload-time = "2026-11-11T15:14:10.468Z" },
++    { url = "https://files.pythonhosted.org/packages/13/c4/8b64db703a9d125ec79d5ee4c5d39378f95140ca2455418bc97e2943e27a/highspy-1.16.0-cp315-cp315-win_amd64.whl", hash = "sha256:456ca799957ed79075fcbc0f417251f2b0492053e7de18cd6fdee9555eb67798", size = 3242795, upload-time = "2026-11-11T15:14:11.863Z" },
++    { url = "https://files.pythonhosted.org/packages/1f/af/d791c972ea39d276f7ad795a149212c367cea12d33a839898d8a1fb7b89f/highspy-1.16.0-cp315-cp315-win_arm64.whl", hash = "sha256:6874559f575960898aea855aaff36352f76ab2bca159537c05a5afa61e96115c", size = 4820290, upload-time = "2026-11-11T15:14:13.684Z" },
++    { url = "https://files.pythonhosted.org/packages/14/1d/16cec7062f2127536083a98ede3b6734fef2a99b526ad59ac63465a858f2/highspy-1.16.0-cp315-cp315t-macosx_10_15_x86_64.whl", hash = "sha256:f6a7e5b53041c626ec5c24b22f79f662550bee5d8df1a223e3ad7ee97187723f", size = 2734439, upload-time = "2026-11-11T15:14:15.816Z" },
++    { url = "https://files.pythonhosted.org/packages/55/56/4fcb5c4c488f8a1d403a9e68f0da1d09c8998f3b83c2c45e1fd01a189f23/highspy-1.16.0-cp315-cp315t-macosx_11_0_arm64.whl", hash = "sha256:09db5449213838c471c0d664da77551a7a7e2732f4c0a23efefd966cc05e3152", size = 2412422, upload-time = "2026-11-11T15:14:17.428Z" },
++    { url = "https://files.pythonhosted.org/packages/81/9c/5e348c971efdd9207046982b2efe30d8257972d237c6aa46c9e4d28068f3/highspy-1.16.0-cp315-cp315t-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:9e57e957e0df58e0fa2b57a0f86f158719564fb5fb4793688b112c8f876b211a", size = 2985289, upload-time = "2026-11-11T15:14:18.89Z" },
++    { url = "https://files.pythonhosted.org/packages/26/50/e9760147db72fc38bb2fc6fc6de9df5d21cee25089ef105e6b41700df16e/highspy-1.16.0-cp315-cp315t-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:cc9c918ef86aaa3f2e75109adddb27434c43af838675caa311b6cb6f738fa4ac", size = 3245295, upload-time = "2026-11-11T15:14:20.279Z" },
++    { url = "https://files.pythonhosted.org/packages/fc/37/6f4f70051f52818f683a539d32d4bf848d6f87087a20808871a1f3fb8af1/highspy-1.16.0-cp315-cp315t-musllinux_1_2_aarch64.whl", hash = "sha256:0f2acac64c1f5a5cf40d6a8dde89b1df66d93f956bd2cdf026d5db47f4348be3", size = 4070766, upload-time = "2026-11-11T15:14:21.65Z" },
++    { url = "https://files.pythonhosted.org/packages/c5/df/77c261c6f376c4b84c5486c932f9da5de2837ce6406ca8208a91fde8f275/highspy-1.16.0-cp315-cp315t-musllinux_1_2_x86_64.whl", hash = "sha256:64ea5305af789782b459035535ddef032256f3245fed92d7963ec3d08dc9d58b", size = 4335314, upload-time = "2026-11-11T15:14:23.092Z" },
++    { url = "https://files.pythonhosted.org/packages/ed/28/39ae1561af713e8b35ecc8064c4c88562bcbc0eea6ffa5b4f83cda1362d4/highspy-1.16.0-cp315-cp315t-win_amd64.whl", hash = "sha256:3031686396af9ed127c640bf07001a137ee536f58dec965b4047104c39d6d7cd", size = 3311309, upload-time = "2026-11-11T15:14:24.815Z" },
++    { url = "https://files.pythonhosted.org/packages/db/f5/4596f303f9dd35feb7031de47df534860745f6c14ceb7aee1714c8f29664/highspy-1.16.0-cp315-cp315t-win_arm64.whl", hash = "sha256:2830c044b48cadfc2c4c8d98e5b3f4e2d07c7804501c84c50cf00f6332d19fd8", size = 4910471, upload-time = "2026-11-11T15:14:26.458Z" },
++]
++
+ [[package]]
+ name = "iniconfig"
+ version = "2.3.0"
+diff --git a/src/fedhpc/lp_backend.py b/src/fedhpc/lp_backend.py
+new file mode 100644
+index 0000000..a7a8f82
+--- /dev/null
++++ b/src/fedhpc/lp_backend.py
+@@ -0,0 +1,228 @@
++"""LP/MIP backends for :mod:`fedhpc.lpfirst`'s restricted masters and
++placement MIPs: Gurobi (default) and HiGHS (``highspy``, licence-free).
++
++The interface is the little column generation needs: rows with bounds,
++columns added in batches as CSC slices, an LP solve with row duals, and a
++MIP solve with a time limit, an objective cutoff, an absolute gap and a
++(partial) start. Statuses are normalised to ``"optimal"``, ``"infeasible"``
++(also: nothing below the cutoff), ``"limit"`` and ``"other"``.
++
++Sign convention: row duals are those of ``min c x``: a binding ``<=`` row has
++a dual ``<= 0``, as Gurobi's ``Pi`` (HiGHS's ``row_dual`` agrees; checked in
++``tests/test_lp_backend.py``).
++"""
++from __future__ import annotations
++
++import math
++
++import numpy as np
++
++INF = math.inf
++
++
++def make(name: str, threads: int = 0):
++    if name == "gurobi":
++        return GurobiBackend(threads)
++    if name == "highs":
++        return HighsBackend(threads)
++    raise ValueError(f"unknown LP backend {name!r} (gurobi, highs)")
++
++
++def available(name: str) -> bool:
++    try:
++        if name == "gurobi":
++            import gurobipy  # noqa: F401
++        elif name == "highs":
++            import highspy  # noqa: F401
++        else:
++            return False
++    except ImportError:
++        return False
++    return True
++
++
++class GurobiBackend:
++    name = "gurobi"
++
++    def __init__(self, threads: int = 0):
++        import gurobipy as gp
++        from . import formulations
++        self.gp = gp
++        from gurobipy import GRB
++        self.GRB = GRB
++        formulations.configure_env()
++        self.m = gp.Model("lpfirst", env=formulations._shared_env)
++        self.m.setParam("OutputFlag", 0)
++        if threads:
++            self.m.setParam("Threads", threads)
++        self.rows: list = []
++        self.cols: list = []
++
++    def add_rows(self, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
++        gp, m = self.gp, self.m
++        start = len(self.rows)
++        for a, b in zip(lo.tolist(), hi.tolist()):
++            if a == b:
++                self.rows.append(m.addConstr(gp.LinExpr() == a))
++            elif a == -INF:
++                self.rows.append(m.addConstr(gp.LinExpr() <= b))
++            else:
++                self.rows.append(m.addConstr(gp.LinExpr() >= a))
++        m.update()
++        return np.arange(start, len(self.rows))
++
++    def add_cols(self, cost, ub, integer, starts, index, value) -> None:
++        gp, GRB, m, rows = self.gp, self.GRB, self.m, self.rows
++        cost, ub, integer = cost.tolist(), ub.tolist(), np.asarray(integer).tolist()
++        starts, index, value = starts.tolist(), index.tolist(), value.tolist()
++        for c in range(len(cost)):
++            lo, hi = starts[c], starts[c + 1]
++            col = gp.Column(value[lo:hi], [rows[r] for r in index[lo:hi]])
++            self.cols.append(m.addVar(obj=cost[c], ub=ub[c],
++                                      vtype=GRB.INTEGER if integer[c] else GRB.CONTINUOUS,
++                                      column=col))
++
++    def change_costs(self, idx: np.ndarray, cost: np.ndarray) -> None:
++        for i, c in zip(idx.tolist(), cost.tolist()):
++            self.cols[i].Obj = c
++
++    def solve_lp(self) -> str:
++        self.m.optimize()
++        return "optimal" if self.m.Status == self.GRB.OPTIMAL else "other"
++
++    def solve_mip(self, *, time_limit, cutoff, gap_abs, int_tol=1e-9, focus=0,
++                  start: dict[int, float] | None = None) -> str:
++        m, GRB = self.m, self.GRB
++        m.setParam("TimeLimit", max(0.0, time_limit))
++        if math.isfinite(cutoff):
++            m.setParam("Cutoff", cutoff)
++        m.setParam("MIPGap", 0.0)
++        m.setParam("MIPGapAbs", gap_abs)
++        m.setParam("IntFeasTol", int_tol)
++        if focus:
++            m.setParam("MIPFocus", focus)
++        for c, v in (start or {}).items():
++            self.cols[c].Start = v
++        m.optimize()
++        if m.Status in (GRB.CUTOFF, GRB.INFEASIBLE) or (m.Status == GRB.OPTIMAL and m.SolCount == 0):
++            return "infeasible"
++        if m.Status == GRB.OPTIMAL:
++            return "optimal"
++        return "limit"
++
++    def has_solution(self) -> bool:
++        return self.m.SolCount > 0
++
++    def objective(self) -> float:
++        return self.m.ObjVal
++
++    def col_values(self) -> np.ndarray:
++        return np.array(self.m.getAttr("X", self.cols)) if self.cols else np.zeros(0)
++
++    def row_duals(self) -> np.ndarray:
++        return np.array(self.m.getAttr("Pi", self.rows)) if self.rows else np.zeros(0)
++
++    def write(self, path: str) -> None:
++        self.m.write(path)
++
++
++class HighsBackend:
++    name = "highs"
++
++    def __init__(self, threads: int = 0):
++        import highspy
++        self.hs = highspy
++        h = self.h = highspy.Highs()
++        h.setOptionValue("output_flag", False)
++        if threads:
++            h.setOptionValue("threads", int(threads))
++        self.n_rows = 0
++        self.n_cols = 0
++        self.integer = False
++
++    def add_rows(self, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
++        n = len(lo)
++        lo = np.where(np.isfinite(lo), lo, -self.hs.kHighsInf).astype(float)
++        hi = np.where(np.isfinite(hi), hi, self.hs.kHighsInf).astype(float)
++        self.h.addRows(n, lo, hi, 0, np.zeros(n, dtype=np.int32), np.zeros(0, dtype=np.int32),
++                       np.zeros(0))
++        start = self.n_rows
++        self.n_rows += n
++        return np.arange(start, self.n_rows)
++
++    def add_cols(self, cost, ub, integer, starts, index, value) -> None:
++        n = len(cost)
++        if not n:
++            return
++        self.h.addCols(n, np.asarray(cost, float), np.zeros(n), np.asarray(ub, float),
++                       int(starts[-1]), np.asarray(starts[:-1], dtype=np.int32),
++                       np.asarray(index, dtype=np.int32), np.asarray(value, float))
++        integer = np.asarray(integer, dtype=bool)
++        if integer.any():
++            idx = (self.n_cols + np.nonzero(integer)[0]).astype(np.int32)
++            kinds = np.array([self.hs.HighsVarType.kInteger] * len(idx))
++            self.h.changeColsIntegrality(len(idx), idx, kinds)
++            self.integer = True
++        self.n_cols += n
++
++    def change_costs(self, idx: np.ndarray, cost: np.ndarray) -> None:
++        self.h.changeColsCost(len(idx), np.asarray(idx, dtype=np.int32), np.asarray(cost, float))
++
++    def _status(self) -> str:
++        S = self.hs.HighsModelStatus
++        st = self.h.getModelStatus()
++        if st == S.kOptimal:
++            return "optimal"
++        if st in (S.kInfeasible, S.kObjectiveBound, S.kObjectiveTarget):
++            return "infeasible"
++        if st in (S.kTimeLimit, S.kIterationLimit, S.kSolutionLimit, S.kInterrupt):
++            return "limit"
++        return "other"
++
++    def solve_lp(self) -> str:
++        self.h.setOptionValue("solver", "simplex")
++        self.h.run()
++        st = self._status()
++        self.last_status = self.h.modelStatusToString(self.h.getModelStatus())
++        return "optimal" if st == "optimal" else "other"
++
++    def solve_mip(self, *, time_limit, cutoff, gap_abs, int_tol=1e-9, focus=0,
++                  start: dict[int, float] | None = None) -> str:
++        h = self.h
++        h.setOptionValue("time_limit", float(max(0.0, time_limit)))
++        h.setOptionValue("mip_rel_gap", 0.0)
++        h.setOptionValue("mip_abs_gap", float(gap_abs))
++        # HiGHS's integrality tolerance floor is looser than Gurobi's; the
++        # caller re-checks every schedule it extracts.
++        h.setOptionValue("mip_feasibility_tolerance", float(max(int_tol, 1e-7)))
++        if math.isfinite(cutoff):
++            h.setOptionValue("objective_bound", float(cutoff))
++        if start:
++            idx = np.array(sorted(start), dtype=np.int32)
++            val = np.array([start[i] for i in idx.tolist()], dtype=float)
++            try:
++                h.setSolution(len(idx), idx, val)      # sparse start (HiGHS >= 1.8)
++            except TypeError:
++                pass
++        h.run()
++        st = self._status()
++        if st == "optimal" and not self.has_solution():
++            return "infeasible"
++        return st
++
++    def has_solution(self) -> bool:
++        info = self.h.getInfo()
++        return bool(info.primal_solution_status == 2) or (
++            self.integer and info.mip_node_count >= 0 and info.primal_solution_status != 0)
++
++    def objective(self) -> float:
++        return self.h.getInfo().objective_function_value
++
++    def col_values(self) -> np.ndarray:
++        return np.asarray(self.h.getSolution().col_value, dtype=float)
++
++    def row_duals(self) -> np.ndarray:
++        return np.asarray(self.h.getSolution().row_dual, dtype=float)
++
++    def write(self, path: str) -> None:
++        self.h.writeModel(path)
+diff --git a/scripts/lpfirst_generated.py b/scripts/lpfirst_generated.py
+new file mode 100644
+index 0000000..813c04f
+--- /dev/null
++++ b/scripts/lpfirst_generated.py
+@@ -0,0 +1,199 @@
++"""lpfirst on the 108 generated instances, against the compact Gurobi results
++of ``results/generated_bench/bench_io_noreduc.jsonl`` (BPC plan, Phase 6).
++
++    uv run python scripts/lpfirst_generated.py run --label p6 --workers 3 --threads 4
++    uv run python scripts/lpfirst_generated.py run --label p6 B_pos_n100_lE_iM
++    uv run python scripts/lpfirst_generated.py summary p6
++
++Per instance: lex (f1, f2), lex (f2, f1) and, on non-trivial instances, the
++weighted sums at λ = 0.25 / 0.5 / 0.75 with Gurobi's own reference points
++(f1_T, f2_T, f1_0) and the same Pareto box (f1 <= f1_0, f2 <= f2_T), so ĝ is
++comparable. Every phase gets ``--time-limit`` seconds (Gurobi had 600).
++
++A solve is ``ok`` when both prove the same value (lex: f1 and f2; weighted:
++ĝ within 1e-6 relative), or lpfirst proves what Gurobi did not. ``better``
++marks a proof Gurobi lacked. Results: ``results/lpfirst_bench/gen_<label>.jsonl``.
++"""
++from __future__ import annotations
++
++import argparse
++import json
++import sys
++import time
++from concurrent.futures import ProcessPoolExecutor, as_completed
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++OUT = ROOT / "results" / "lpfirst_bench"
++REF = ROOT / "results" / "generated_bench" / "bench_io_noreduc.jsonl"
++LAMS = (0.25, 0.5, 0.75)
++
++
++def _phase(inst, ti, w1, w2, b1, b2, seeds, opts, limit):
++    from fedhpc import lpfirst
++    st: dict = {}
++    t = time.perf_counter()
++    res = lpfirst.solve_lpfirst(inst, w1, w2, b1, b2, time_limit=limit, options=opts, ti=ti,
++                                seed_schedules=seeds, stats=st)
++    st["wall_s"] = time.perf_counter() - t
++    st["how"] = res.how
++    return res, {k: v for k, v in st.items() if isinstance(v, (int, float, str))}
++
++
++def _f(inst, a):
++    completion = {jid: t + inst.p_occ[jid, mid] for jid, (mid, t) in a.items()}
++    return inst.f1_of(completion), inst.f2_of(a)
++
++
++def run_one(name: str, ref: dict, threads: int, limit: float, opts_kw: dict) -> dict:
++    from fedhpc import bpc, instance_gen, lpfirst
++    from fedhpc.formulations import configure_env
++    from fedhpc.model import weighted_sum_degenerate, weighted_sum_terms
++    configure_env()
++    opts = lpfirst.LPFirstOptions(mip_threads=threads, lp_threads=threads, **opts_kw)
++    t0 = time.perf_counter()
++    inst = instance_gen.build(name)
++    ti = lpfirst._TI(inst, bpc._prepare(inst))
++    seeds = lpfirst.seed_schedules(inst, ti) if hasattr(lpfirst, "seed_schedules") \
++        else bpc.heuristic_schedules(inst)
++    rec = {"name": name, "build_s": time.perf_counter() - t0, "solves": {}}
++
++    def lex(primary):
++        w = (1.0, 0.0) if primary == "f1" else (0.0, 1.0)
++        t = time.perf_counter()
++        r1, s1 = _phase(inst, ti, *w, None, None, seeds, opts, limit)
++        out = {"phase1": s1}
++        if r1.status == "optimal":
++            f1, f2 = _f(inst, r1.assignment)
++            b1, b2 = (f1, None) if primary == "f1" else (None, f2)
++            r2, s2 = _phase(inst, ti, *w[::-1], b1, b2, [r1.assignment, *seeds], opts, limit)
++            out["phase2"] = s2
++            a = r2.assignment or r1.assignment
++            status = r2.status
++        else:
++            a, status = r1.assignment, "feasible" if r1.assignment else "none"
++        if a:
++            seeds.insert(0, a)
++            out["f1"], out["f2"] = _f(inst, a)
++        out["status"] = status
++        out["t"] = time.perf_counter() - t
++        g = ref[f"lex_{primary}"]
++        out["gurobi"] = {"status": g["status"], "f1": g["f1"], "f2": g["f2"], "t": g["t"]}
++        both = status == g["status"] == "optimal"
++        same = a is not None and abs(out["f1"] - g["f1"]) < 1e-4 and abs(out["f2"] - g["f2"]) < 1e-4
++        out["ok"] = (both and same) or (status == "optimal" and g["status"] != "optimal") \
++            or (status != "optimal")
++        out["better"] = status == "optimal" and g["status"] != "optimal"
++        out["agree"] = same if both else None
++        return out
++
++    rec["solves"]["lex_f1"] = lex("f1")
++    rec["solves"]["lex_f2"] = lex("f2")
++    f1_T, f2_T, f1_0 = ref["lex_f1"]["f1"], ref["lex_f1"]["f2"], ref["lex_f2"]["f1"]
++    if not weighted_sum_degenerate(f1_T, f2_T, f1_0, 0.0):
++        for lam in LAMS:
++            w1, w2, c = weighted_sum_terms(lam, f1_T, f2_T, f1_0, 0.0)
++            t = time.perf_counter()
++            r, s = _phase(inst, ti, w1, w2, f1_0, f2_T, seeds, opts, limit)
++            out = {"phase1": s, "status": r.status, "t": time.perf_counter() - t}
++            if r.assignment:
++                seeds.insert(0, r.assignment)
++                out["f1"], out["f2"] = _f(inst, r.assignment)
++                out["g"] = w1 * out["f1"] + w2 * out["f2"] + c
++            out["bound_g"] = r.bound + c
++            g = ref["lams"][str(lam)]["gurobi"]
++            out["gurobi"] = {k: g[k] for k in ("status", "f1", "f2", "g", "t")}
++            both = r.status == g["status"] == "optimal"
++            same = "g" in out and abs(out["g"] - g["g"]) <= 1e-6 * max(1.0, abs(g["g"]))
++            out["ok"] = (both and same) or r.status != "optimal" or g["status"] != "optimal"
++            if r.status == "optimal" and g["status"] != "optimal":
++                out["ok"] = "g" in out and out["g"] <= g["g"] + 1e-6
++            out["better"] = r.status == "optimal" and g["status"] != "optimal"
++            out["agree"] = same if both else None
++            rec["solves"][f"ws_{lam}"] = out
++    rec["t"] = time.perf_counter() - t0
++    return rec
++
++
++def run(args) -> None:
++    OUT.mkdir(parents=True, exist_ok=True)
++    out = OUT / f"gen_{args.label}.jsonl"
++    refs = {(r := json.loads(l))["name"]: r for l in REF.read_text().splitlines() if l.strip()}
++    names = args.names or sorted(refs)
++    done = set()
++    if out.exists():
++        done = {json.loads(l)["name"] for l in out.read_text().splitlines() if l.strip()}
++    todo = [n for n in names if n not in done]
++    todo.sort(key=lambda n: (("pos" not in n), not n.startswith("B"), n))
++    opts_kw = json.loads(args.options) if args.options else {}
++    print(f"{len(todo)} to run ({len(done)} already in {out.name})", flush=True)
++    with ProcessPoolExecutor(args.workers) as ex, out.open("a") as f:
++        futs = {ex.submit(run_one, n, refs[n], args.threads, args.time_limit, opts_kw): n
++                for n in todo}
++        for k, fut in enumerate(as_completed(futs), 1):
++            n = futs[fut]
++            try:
++                rec = fut.result()
++            except Exception as e:  # noqa: BLE001
++                print(f"[{k}/{len(todo)}] {n} FAILED {type(e).__name__}: {e}", flush=True)
++                continue
++            rec["label"] = args.label
++            f.write(json.dumps(rec) + "\n")
++            f.flush()
++            s = rec["solves"]
++            print(f"[{k}/{len(todo)}] {n} {rec['t']:.0f}s "
++                  + " ".join(f"{key}:{v['status'][:3]}{'' if v['ok'] else '!DIFF'}"
++                             f"{'+' if v['better'] else ''}" for key, v in s.items()), flush=True)
++
++
++def summary(args) -> None:
++    for label in args.labels:
++        rows = [json.loads(l) for l in (OUT / f"gen_{label}.jsonl").read_text().splitlines()
++                if l.strip()]
++        n = proven = better = diff = 0
++        lp_t = gu_t = 0.0
++        unproven, slow = [], []
++        for r in rows:
++            for key, v in r["solves"].items():
++                n += 1
++                lp_t += v["t"]
++                gu_t += v["gurobi"]["t"]
++                proven += v["status"] == "optimal"
++                better += bool(v["better"])
++                if not v["ok"]:
++                    diff += 1
++                    print(f"  DIFF {r['name']} {key}: lp {v.get('f1')},{v.get('f2')} "
++                          f"gurobi {v['gurobi']['f1']},{v['gurobi']['f2']}")
++                if v["status"] != "optimal":
++                    unproven.append(f"{r['name']}:{key}")
++                slow.append((v["t"], f"{r['name']}:{key}", v["gurobi"]["t"], v["gurobi"]["status"]))
++        print(f"{label}: {len(rows)} instances, {n} solves; lpfirst proved {proven} "
++              f"({better} that Gurobi did not) in {lp_t:.0f} s; Gurobi {gu_t:.0f} s; "
++              f"disagreements {diff}")
++        if unproven:
++            print("  unproven:", " ".join(unproven))
++        print("  slowest lpfirst solves (lp s, gurobi s):")
++        for t, key, gt, gs in sorted(slow, reverse=True)[:args.top]:
++            print(f"    {key:32s} {t:7.1f}  {gt:7.1f} {gs}")
++
++
++def main() -> None:
++    ap = argparse.ArgumentParser()
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    r = sub.add_parser("run")
++    r.add_argument("names", nargs="*")
++    r.add_argument("--label", required=True)
++    r.add_argument("--workers", type=int, default=3)
++    r.add_argument("--threads", type=int, default=4)
++    r.add_argument("--time-limit", type=float, default=600.0, help="seconds per phase")
++    r.add_argument("--options", default="", help="LPFirstOptions overrides as JSON")
++    s = sub.add_parser("summary")
++    s.add_argument("labels", nargs="+")
++    s.add_argument("--top", type=int, default=15)
++    args = ap.parse_args()
++    run(args) if args.cmd == "run" else summary(args)
++
++
++if __name__ == "__main__":
++    sys.path.insert(0, str(ROOT / "src"))
++    main()

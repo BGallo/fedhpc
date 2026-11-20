@@ -14,6 +14,10 @@ dependencies = [
     "numpy>=2.4.4",
 ]
 
+[project.optional-dependencies]
+# Licence-free LP/MIP backend for fedhpc.lpfirst (LPFirstOptions(backend="highs")).
+highs = ["highspy>=1.16"]
+
 [project.scripts]
 fedhpc          = "fedhpc:main"
 fedhpc-ablation = "fedhpc.ablation:main"
@@ -37,6 +41,7 @@ cache-keys = [
 
 [dependency-groups]
 dev = [
+    "highspy>=1.16",
     "pytest>=9.0.2",
 ]
 

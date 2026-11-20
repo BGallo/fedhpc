@@ -23,7 +23,7 @@ from fedhpc.pareto import map_pareto_frontier, true_pareto_frontier
 configure_env()
 
 _W = [(1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (0.3, 0.7)]
-NO_MIP = lpfirst.LPFirstOptions(rmp_mip_time=0.0)
+NO_MIP = lpfirst.LPFirstOptions(rmp_mip_time=0.0, heuristics=False)   # each proof step alone
 
 
 def _cases(known_pareto_inst):
@@ -189,11 +189,11 @@ def test_excess_inequality_behind_the_eligible_mip(case):
     if case.startswith("gap"):
         m = lpfirst._Master(ti, *w, None, None, bpc._big_m_for(inst))
         m.add(range(ti.n_arcs))
-        m.mdl.optimize()
+        assert m.solve_lp() == "optimal"
         d = m.duals()
         rc = lpfirst._price(ti, d, *w)
         L, mins = lpfirst._lagrangian(ti, d, rc, None, None)
-        assert L == pytest.approx(m.mdl.ObjVal, abs=1e-6) and L < opt - 0.25
+        assert L == pytest.approx(m.objective(), abs=1e-6) and L < opt - 0.25
         ex = excess(d, rc, mins, a_opt)
         assert 0.25 < ex <= opt - L + 1e-6
 

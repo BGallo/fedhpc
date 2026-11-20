@@ -85,6 +85,73 @@ pos_congestion (3340 jobs)    16.7 s      421 s
 ``true_pareto_frontier(engine="lpfirst")`` proves 461 points of the
 964-job front in 30 min, about 4 s per point, with no inconclusive box.
 That front is dense, about one point per f1 unit.
+
+Objective scaling
+-----------------
+Every solve works in units where one step of the objective's coarser term
+is 1 (:func:`fedhpc.model.weighted_sum_scale`). The normalised weighted
+sums have weights near 1e-5; unscaled, cost differences sat below Gurobi's
+OptimalityTol and the eligible MIP "proved" schedules 1.7e-5 worse than the
+optimum (B_pos_n100_lE_* at λ = 0.75). The artificials' big-M starts at
+1e3 times the largest objective coefficient and grows 100-fold while
+artificials stay in a converged LP (HiGHS fails on a fixed 1e6 factor).
+
+Primal heuristics (Phase 7, ``LPFirstOptions.heuristics``)
+-----------------------------------------------------------
+Between column generation and step 2, from the converged LP:
+
+- α-point list scheduling (α = 0.5, 0.25, 0.75, 0): jobs in α-point
+  order, each at the earliest start with room on its LP type (or a
+  no-dearer capacitated type that completes it sooner);
+- fix-and-solve (RINS-like): fix every job the LP places integrally (about
+  95 % of them on the generated pos instances) and solve the MIP over the
+  rest, widening the free set to overlapping fixed jobs if it fails;
+- LNS: sub-MIPs over sliding time windows of the incumbent (about
+  ``lns_jobs`` jobs each), at most ``lns_sweeps`` sweeps.
+
+The sub-MIPs use only the freed jobs' master columns plus their
+``cand_per_job`` placements of least reduced-cost gap. On B_pos_n100_lE_iM
+(f1^0, 3340 jobs) they reach 108211.67 in 26 s; the optimum is 108210.67,
+the seed was 267085.67.
+
+Job aggregation (Phase 8)
+-------------------------
+Every MIP (:func:`_mip`) merges identical free jobs (:meth:`_TI.classes`:
+same weight, release slot, units and per-type start sets, durations and
+costs) into one coverage row ``sum x = n_k`` with integer ``x <= n_k``, and
+spreads the solution back over the members. Exact, since such jobs are
+interchangeable. With cloud costs every job is distinct (I/O volumes
+differ), but once f2 is capped at 0 the cloud placements leave the
+eligible set and 3340 jobs collapse into about 730 classes (up to 156
+members). On B_pos_n100_lE_iM the eligible MIP fell from > 780 s
+(unproven) to 407 s.
+
+Placement tree (Phase 9, ``LPFirstOptions.tree``)
+-------------------------------------------------
+When more than ``max_eligible`` placements are eligible, or there is no
+incumbent, step 3 becomes a best-first branch and price over placements
+(:class:`_Tree`): nodes restrict the allowed placements, :func:`_cg`
+prices only those, reduced-cost fixing shrinks each node's set, a node
+small enough is solved by its MIP, and branching splits the most
+fractional job by type or at the half-mass start (Kramer et al. 2020).
+
+It is a fallback, not the default proof. On B_pos_n100_lE_iM, starting
+from the full 250 k eligible set, 175 nodes in 800 s left the bound at the
+LP value (108206.97), where the aggregated eligible MIP proves 108210.67
+in about 400 s. Branching one job of a class lets an identical twin take
+over its LP mass, so the bound does not move. A useful tree there would
+branch on class counts. Each node also rebuilds its LP from scratch
+(614 s of LP time over 214 iterations).
+
+Backends
+--------
+``LPFirstOptions.backend`` picks Gurobi or HiGHS (:mod:`fedhpc.lp_backend`)
+for every LP and MIP. Columns go in as CSC batches. HiGHS's duals give the
+same Lagrangian bound (``tests/test_lp_backend.py``). Measured on the
+B_pos_n100_lE_iM master (4.5 k rows, 141 k columns, 4 threads): the LP from
+scratch takes 15.5 s with HiGHS and 6.5 s with Gurobi. At 180 s the MIP has
+the same dual bound (108210.67) but a worse incumbent (108221.67 vs
+108213.67).
 """
 from __future__ import annotations
 
@@ -96,9 +163,11 @@ import gurobipy as gp
 import numpy as np
 from gurobipy import GRB
 
-from . import bpc, formulations
+INF = math.inf
+
+from . import bpc, formulations, lp_backend
 from .data import Instance
-from .model import Solution, grid_floor
+from .model import Solution, grid_floor, weighted_sum_scale
 
 __all__ = ["LPFirstOptions", "LPFirstResult", "solve_lpfirst", "solve_weighted_sum_lpfirst",
            "solve_f1_lpfirst", "solve_f2_lpfirst", "make_lpfirst_lexmin_bounded"]
@@ -113,6 +182,24 @@ class LPFirstOptions:
     restricted-master MIP (step 2). ``max_eligible`` — the most placements
     the exact MIP (step 3) may have; past it the result is not certified.
     ``mip_threads`` — Gurobi threads for both MIPs (0: Gurobi's default).
+    ``lp_threads`` — Gurobi threads for the master LP (0: Gurobi's default).
+
+    Primal heuristics (step 1b, Phase 7): ``heuristics`` turns them on;
+    ``heuristic_time`` caps them in all. ``cand_per_job`` — placements of
+    least reduced-cost gap a freed job may take in a sub-MIP. ``fix_time`` —
+    seconds per fix-and-solve MIP. ``lns_jobs`` — jobs starting in one LNS
+    window; ``lns_time_per`` — seconds per LNS sub-MIP; ``lns_sweeps`` —
+    full passes over the horizon.
+
+    Search tree (step 3', Phase 9): with ``tree``, an eligible set larger
+    than ``max_eligible`` (where step 3 would give up), or a solve without
+    an incumbent, is branched on instead; a node whose eligible set has at
+    most ``node_eligible`` placements gets its MIP, for ``node_mip_time``
+    seconds at most. Below ``max_eligible`` the aggregated eligible MIP is
+    faster (see the module docstring).
+
+    ``backend`` — LP/MIP solver for every master and MIP: ``"gurobi"`` or
+    ``"highs"`` (:mod:`fedhpc.lp_backend`).
     """
     smoothing: float = 0.5
     per_job: int = 3
@@ -121,6 +208,18 @@ class LPFirstOptions:
     rmp_mip_time: float = 30.0
     max_eligible: int = 400_000
     mip_threads: int = 0
+    lp_threads: int = 0
+    heuristics: bool = True
+    heuristic_time: float = 120.0
+    cand_per_job: int = 30
+    fix_time: float = 30.0
+    lns_jobs: int = 400
+    lns_time_per: float = 10.0
+    lns_sweeps: int = 2
+    tree: bool = True
+    backend: str = "gurobi"
+    node_eligible: int = 60_000
+    node_mip_time: float = 60.0
 
 
 @dataclass
@@ -208,6 +307,42 @@ class _TI:
         np.add.at(used, (kc, tc + pc), -1)
         self.row_needed = np.cumsum(used, axis=1)[:, :H] > 0
 
+    def classes(self) -> tuple[np.ndarray, np.ndarray]:
+        """``(cls, canon)``: each job position's class and each placement's
+        counterpart on its class representative (Phase 8).
+
+        Two jobs are in one class when they have the same weight, release
+        slot, capacity units and, type by type, the same start set, duration
+        and cost. Such jobs are interchangeable: swapping them changes f1 by
+        nothing (their ``C1`` differ by the constant ``w (a_rep - a_j)`` at
+        every start) and f2 not at all, and the start-set reductions treat
+        them alike because their start sets are compared directly."""
+        if getattr(self, "_classes", None) is None:
+            job_of = {j.id: j for j in self.inst.jobs}
+            ends = np.append(self.first[1:], self.n_arcs)
+            key_cls: dict[tuple, int] = {}
+            cls = np.empty(len(self.jobs), dtype=np.int64)
+            rep: list[int] = []
+            for i, jid in enumerate(self.jobs):
+                lo, hi = int(self.first[i]), int(ends[i])
+                j = job_of[jid]
+                key = (j.weight, max(0, math.ceil(j.arrival)), float(self.Q[lo]),
+                       self.MID[lo:hi].tobytes(), self.T[lo:hi].tobytes(),
+                       self.P[lo:hi].tobytes(), self.C2[lo:hi].tobytes())
+                c = key_cls.setdefault(key, len(rep))
+                if c == len(rep):
+                    rep.append(i)
+                cls[i] = c
+            rep_arr = np.array(rep, dtype=np.int64)
+            canon = np.arange(self.n_arcs) - self.first[self.J] + self.first[rep_arr[cls[self.J]]]
+            # C1_j = C1_rep + offset_j at every start: offset_j = w (a_rep - a_j)
+            arr = np.array([job_of[jid].arrival for jid in self.jobs], dtype=float)
+            wt = np.array([job_of[jid].weight for jid in self.jobs], dtype=float)
+            self.class_rep = rep_arr
+            self.class_offset = wt * (arr[rep_arr[cls]] - arr)
+            self._classes = (cls, canon)
+        return self._classes
+
     def index(self, jid: int, mid: int, t: int) -> int | None:
         hit = self.pair.get((jid, mid))
         if hit is None:
@@ -241,69 +376,147 @@ class _D:
 
 
 class _Master:
-    """The restricted master LP (or, with ``vtype=BINARY`` and no
-    artificials, a MIP over a fixed set of placements)."""
+    """The restricted master LP (or, with ``integer=True`` and no
+    artificials, a MIP over a fixed set of placements), on an
+    :mod:`fedhpc.lp_backend` backend (``"gurobi"`` or ``"highs"``)."""
 
     def __init__(self, ti: _TI, w1: float, w2: float, b1: float | None, b2: float | None,
-                 big_m: float | None, vtype=GRB.CONTINUOUS):
-        formulations.configure_env()
-        self.ti, self.w1, self.w2, self.vtype = ti, w1, w2, vtype
-        mdl = self.mdl = gp.Model("lpfirst", env=formulations._shared_env)
-        mdl.setParam("OutputFlag", 0)
-        self.cover = [mdl.addConstr(gp.LinExpr() == 1.0, name=f"cover[{jid}]") for jid in ti.jobs]
-        self.cap: dict[tuple[int, int], gp.Constr] = {}
-        for k, tau in zip(*np.nonzero(ti.row_needed)):
-            self.cap[int(k), int(tau)] = mdl.addConstr(gp.LinExpr() <= float(ti.N[k, tau]),
-                                                       name=f"cap[{k},{tau}]")
-        self.b1 = mdl.addConstr(gp.LinExpr() <= b1, name="bound1") if b1 is not None else None
-        self.b2 = mdl.addConstr(gp.LinExpr() <= b2, name="bound2") if b2 is not None else None
+                 big_m: float | None, integer: bool = False, *,
+                 free: np.ndarray | None = None, occupy: np.ndarray | None = None,
+                 cover_rhs: np.ndarray | None = None, backend: str = "gurobi",
+                 threads: int = 0):
+        """``free`` (bool per job position) — only these jobs get a coverage
+        row; the others are fixed elsewhere. ``occupy`` (types × H) —
+        capacity those fixed jobs already hold. Callers shift the bound
+        rows themselves. ``cover_rhs`` (per job position) — coverage
+        right-hand sides, and the placements' upper bounds, for an
+        aggregated model (Phase 8); default 1."""
+        self.ti, self.w1, self.w2, self.integer = ti, w1, w2, integer
+        self.be = lp_backend.make(backend, threads)
+        nj = len(ti.jobs)
+        self.rhs = np.ones(nj) if cover_rhs is None else np.asarray(cover_rhs, float)
+        self.free = np.ones(nj, dtype=bool) if free is None else np.asarray(free, dtype=bool)
+        fj = np.nonzero(self.free)[0]
+        self.cover_row = np.full(nj, -1, dtype=np.int64)
+        self.cover_row[fj] = self.be.add_rows(self.rhs[fj], self.rhs[fj])
+        cap_rhs = ti.N if occupy is None else ti.N - occupy
+        kk, tt = np.nonzero(ti.row_needed)
+        self.cap_row = np.full((len(ti.types), ti.H), -1, dtype=np.int64)
+        self.cap_row[kk, tt] = self.be.add_rows(np.full(len(kk), -INF), cap_rhs[kk, tt].astype(float))
+        self.b1_row = int(self.be.add_rows(np.array([-INF]), np.array([float(b1)]))[0]) \
+            if b1 is not None else -1
+        self.b2_row = int(self.be.add_rows(np.array([-INF]), np.array([float(b2)]))[0]) \
+            if b2 is not None else -1
         self.B1, self.B2 = b1, b2
-        mdl.update()
-        self.art = ([mdl.addVar(obj=big_m, column=gp.Column([1.0], [c])) for c in self.cover]
-                    if big_m is not None else [])
+        self.n_art = 0
+        self.big_m = big_m
+        self.big_m_cap = (big_m or 0.0) * 1e6
+        if big_m is not None:
+            rows = self.cover_row[fj]
+            self.be.add_cols(np.full(len(fj), float(big_m)), np.full(len(fj), INF),
+                             np.zeros(len(fj), dtype=bool), np.arange(len(fj) + 1),
+                             rows, np.ones(len(fj)))
+            self.n_art = len(fj)
         self.arcs: list[int] = []
-        self.vars: list[gp.Var] = []
         self.has = np.zeros(ti.n_arcs, dtype=bool)
+        self._x = None
 
     def add(self, arcs) -> None:
-        ti, mdl = self.ti, self.mdl
-        for a in arcs:
-            a = int(a)
-            if self.has[a]:
-                continue
-            self.has[a] = True
-            coefs, rows = [1.0], [self.cover[ti.J[a]]]
-            k = ti.K[a]
-            if k >= 0:
-                t, q = ti.T[a], float(ti.Q[a])
-                for tau in range(t, t + ti.P[a]):
-                    coefs.append(q)
-                    rows.append(self.cap[int(k), int(tau)])
-            if self.b1 is not None:
-                coefs.append(float(ti.C1[a]))
-                rows.append(self.b1)
-            if self.b2 is not None:
-                coefs.append(float(ti.C2[a]))
-                rows.append(self.b2)
-            self.arcs.append(a)
-            self.vars.append(mdl.addVar(obj=self.w1 * ti.C1[a] + self.w2 * ti.C2[a],
-                                        ub=1.0, vtype=self.vtype,
-                                        column=gp.Column(coefs, rows)))
+        ti = self.ti
+        arcs = np.unique(np.asarray(arcs, dtype=np.int64))
+        arcs = arcs[~self.has[arcs]]
+        if not len(arcs):
+            return
+        self.has[arcs] = True
+        n = len(arcs)
+        K, T, P, J = ti.K[arcs], ti.T[arcs], ti.P[arcs], ti.J[arcs]
+        p_eff = np.where(K >= 0, P, 0)
+        nb = (self.b1_row >= 0) + (self.b2_row >= 0)
+        per = 1 + p_eff + nb
+        starts = np.r_[0, np.cumsum(per)]
+        index = np.empty(int(starts[-1]), dtype=np.int64)
+        value = np.empty(int(starts[-1]))
+        index[starts[:-1]] = self.cover_row[J]
+        value[starts[:-1]] = 1.0
+        rep = np.repeat(np.arange(n), p_eff)
+        off = np.arange(len(rep)) - np.repeat(np.cumsum(p_eff) - p_eff, p_eff)
+        pos = starts[:-1][rep] + 1 + off
+        index[pos] = self.cap_row[K[rep], T[rep] + off]
+        value[pos] = ti.Q[arcs][rep]
+        nxt = starts[:-1] + 1 + p_eff
+        if self.b1_row >= 0:
+            index[nxt] = self.b1_row
+            value[nxt] = ti.C1[arcs]
+            nxt = nxt + 1
+        if self.b2_row >= 0:
+            index[nxt] = self.b2_row
+            value[nxt] = ti.C2[arcs]
+        if np.any(index < 0):
+            raise ValueError("a placement of a fixed job, or outside the capacity rows")
+        cost = self.w1 * ti.C1[arcs] + self.w2 * ti.C2[arcs]
+        self.be.add_cols(cost, self.rhs[J], np.full(n, self.integer), starts, index, value)
+        self.arcs.extend(arcs.tolist())
+        self._x = None
+
+    def raise_big_m(self, factor: float = 100.0) -> None:
+        """Make the coverage artificials ``factor`` times dearer (adaptive
+        big-M: start moderate, which HiGHS needs, and grow only while
+        artificials stay in the LP)."""
+        self.big_m *= factor
+        self.be.change_costs(np.arange(self.n_art), np.full(self.n_art, float(self.big_m)))
+        self._x = None
+
+    def col_of(self) -> dict[int, int]:
+        return {a: self.n_art + i for i, a in enumerate(self.arcs)}
+
+    def solve_lp(self) -> str:
+        self._x = None
+        return self.be.solve_lp()
+
+    def solve_mip(self, **kw) -> str:
+        self._x = None
+        return self.be.solve_mip(**kw)
+
+    def objective(self) -> float:
+        return self.be.objective()
 
     def duals(self) -> _D:
         ti = self.ti
+        rd = self.be.row_duals()
+        sigma = np.zeros(len(ti.jobs))
+        fj = np.nonzero(self.free)[0]
+        sigma[fj] = rd[self.cover_row[fj]]
         pi = np.zeros((len(ti.types), ti.H))
-        for (k, tau), c in self.cap.items():
-            pi[k, tau] = min(0.0, c.Pi)
-        return _D(np.array([c.Pi for c in self.cover]), pi,
-                  min(0.0, self.b1.Pi) if self.b1 is not None else 0.0,
-                  min(0.0, self.b2.Pi) if self.b2 is not None else 0.0)
+        m = self.cap_row >= 0
+        pi[m] = np.minimum(0.0, rd[self.cap_row[m]])
+        return _D(sigma, pi,
+                  min(0.0, float(rd[self.b1_row])) if self.b1_row >= 0 else 0.0,
+                  min(0.0, float(rd[self.b2_row])) if self.b2_row >= 0 else 0.0)
+
+    def _vals(self) -> np.ndarray:
+        if self._x is None:
+            self._x = self.be.col_values()
+        return self._x
 
     def artificial(self) -> float:
-        return sum(v.X for v in self.art)
+        return float(self._vals()[:self.n_art].sum())
+
+    def arc_values(self) -> np.ndarray:
+        """Values of the placement columns, in ``self.arcs`` order."""
+        return self._vals()[self.n_art:]
+
+    def x(self) -> np.ndarray:
+        """The current solution as a dense vector over all placements."""
+        out = np.zeros(self.ti.n_arcs)
+        if self.arcs:
+            out[np.asarray(self.arcs)] = self.arc_values()
+        return out
+
+    def chosen(self) -> list[int]:
+        return [a for a, v in zip(self.arcs, self.arc_values().tolist()) if v > 0.5]
 
     def assignment(self) -> dict[int, tuple[int, int]] | None:
-        chosen = [a for a, v in zip(self.arcs, self.vars) if v.X > 0.5]
+        chosen = self.chosen()
         out = self.ti.assignment_of(chosen)
         return out if len(out) == len(self.ti.jobs) == len(chosen) else None
 
@@ -362,33 +575,488 @@ def _within(inst: Instance, a: dict[int, tuple[int, int]], b1, b2) -> bool:
 
 
 def _mip(ti: _TI, arcs, w1, w2, b1, b2, cutoff: float, time_limit: float, step: float,
-         threads: int, start: dict | None = None):
+         threads: int, start: dict | None = None, *, fixed=None, focus: int = 0,
+         aggregate: bool = True, backend: str = "gurobi"):
     """Solve the placement MIP over ``arcs`` for a schedule below ``cutoff``.
     Returns ``(status, objective, assignment)``: ``"optimal"`` (proven on the
-    grid), ``"none"`` (proven: nothing below the cutoff) or ``"limit"``."""
-    m = _Master(ti, w1, w2, b1, b2, None, vtype=GRB.BINARY)
+    grid), ``"none"`` (proven: nothing below the cutoff) or ``"limit"``.
+
+    ``fixed`` — placements held fixed (one per job, none of them in
+    ``arcs``): only the other jobs get coverage rows, the fixed ones' capacity
+    and bound-row use is taken off the right-hand sides, and the result is a
+    sub-MIP of the full one (a large-neighbourhood step). ``"none"`` then only
+    means nothing below the cutoff *with those jobs fixed*.
+
+    ``aggregate`` (Phase 8) — identical free jobs (:meth:`_TI.classes`) share
+    one coverage row ``sum x = n_k`` over their representative's placements,
+    with integer ``x <= n_k``; the solution is spread back over the members.
+    Exact, since members are interchangeable; it removes the symmetry that
+    makes these MIPs slow on the zero-cost (all on-prem) phase."""
+    fixed = np.asarray(fixed if fixed is not None else [], dtype=np.int64)
+    free = occ = None
+    const = 0.0
+    if len(fixed):
+        free = np.ones(len(ti.jobs), dtype=bool)
+        free[ti.J[fixed]] = False
+        occ = _occupancy(ti, fixed)
+        const = float(w1 * ti.C1[fixed].sum() + w2 * ti.C2[fixed].sum())
+        if b1 is not None:
+            b1 = b1 - float(ti.C1[fixed].sum())
+        if b2 is not None:
+            b2 = b2 - float(ti.C2[fixed].sum())
+        arcs = [a for a in arcs if free[ti.J[a]]]
+    arcs = np.asarray(arcs, dtype=np.int64)
+    members = None
+    rhs = None
+    if aggregate and len(arcs):
+        cls, canon = ti.classes()
+        fmask = np.ones(len(ti.jobs), dtype=bool) if free is None else free
+        fj = np.nonzero(fmask)[0]
+        counts = np.bincount(cls[fj], minlength=len(ti.class_rep))
+        if counts.max() > 1:
+            rhs = np.zeros(len(ti.jobs))
+            rhs[ti.class_rep] = counts
+            free = rhs > 0
+            arcs = np.unique(canon[arcs])
+            off = float(ti.class_offset[fj].sum())   # Σ C1_j - C1_rep over the free jobs
+            const += w1 * off
+            if b1 is not None:
+                b1 = b1 - off
+            members = {}
+            for i in fj:
+                members.setdefault(int(cls[i]), []).append(int(i))
+    m = _Master(ti, w1, w2, b1, b2, None, integer=True, free=free, occupy=occ,
+                cover_rhs=rhs, backend=backend, threads=threads)
     m.add(arcs)
-    mdl = m.mdl
-    mdl.setParam("TimeLimit", max(0.0, time_limit))
-    mdl.setParam("Cutoff", cutoff)
-    mdl.setParam("MIPGap", 0.0)
-    mdl.setParam("MIPGapAbs", 0.999 * step if step > 0 else 1e-9)
-    mdl.setParam("IntFeasTol", 1e-9)
-    if threads:
-        mdl.setParam("Threads", threads)
+    start_vals: dict[int, float] = {}
     if start:
-        idx = {a: v for a, v in zip(m.arcs, m.vars)}
+        col = m.col_of()
+        canon = ti.classes()[1] if members is not None else None
         for a in ti.arcs_of(start):
-            if a in idx:
-                idx[a].Start = 1.0
-    mdl.optimize()
-    if mdl.Status in (GRB.CUTOFF, GRB.INFEASIBLE) or (mdl.Status == GRB.OPTIMAL and mdl.SolCount == 0):
+            if canon is not None:
+                a = int(canon[a])
+            if a in col:
+                start_vals[col[a]] = start_vals.get(col[a], 0.0) + 1.0
+    status = m.solve_mip(time_limit=time_limit,
+                         cutoff=cutoff - const if math.isfinite(cutoff) else cutoff,
+                         gap_abs=0.999 * step if step > 0 else 1e-9, focus=focus,
+                         start=start_vals)
+    if status == "infeasible":
         return "none", math.inf, None
-    a = m.assignment() if mdl.SolCount else None
+    a = None
+    if m.be.has_solution():
+        if members is None:
+            chosen = m.chosen()
+        else:
+            cls, _canon = ti.classes()
+            chosen = []
+            left = {c: list(v) for c, v in members.items()}
+            for a, v in zip(m.arcs, m.arc_values().tolist()):
+                n = int(round(v))
+                if n <= 0:
+                    continue
+                c = int(cls[ti.J[a]])
+                shift = a - int(ti.first[ti.J[a]])
+                for _ in range(n):
+                    if not left[c]:
+                        break
+                    i = left[c].pop()
+                    chosen.append(int(ti.first[i]) + shift)
+        chosen = chosen + fixed.tolist()
+        a = ti.assignment_of(chosen)
+        if not len(a) == len(ti.jobs) == len(chosen) or ti.inst.schedule_violations(a):
+            a = None
     obj = _objective_of(ti.inst, a, w1, w2) if a else math.inf
-    if mdl.Status == GRB.OPTIMAL and a is not None:
+    if status == "optimal" and a is not None:
         return "optimal", obj, a
     return "limit", obj, a
+
+
+def _occupancy(ti: _TI, arcs) -> np.ndarray:
+    """Capacity (types × H) the placements ``arcs`` hold."""
+    arcs = np.asarray(arcs, dtype=np.int64)
+    arcs = arcs[ti.K[arcs] >= 0]
+    d = np.zeros((len(ti.types), ti.H + 1))
+    np.add.at(d, (ti.K[arcs], ti.T[arcs]), ti.Q[arcs])
+    np.add.at(d, (ti.K[arcs], ti.T[arcs] + ti.P[arcs]), -ti.Q[arcs])
+    return np.cumsum(d, axis=1)[:, :ti.H]
+
+
+# ---------------------------------------------------------------------------
+# Primal heuristics (BPC plan, Phase 7)
+# ---------------------------------------------------------------------------
+
+def _per_job_argmax(ti: _TI, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``(arc, value)``: each job's largest placement in ``x``."""
+    mx = np.maximum.reduceat(x, ti.first)
+    hit = np.nonzero(x >= mx[ti.J] - 1e-12)[0]
+    _, first = np.unique(ti.J[hit], return_index=True)
+    return hit[first], mx
+
+
+def _alpha_schedule(ti: _TI, x: np.ndarray, alpha: float) -> dict[int, tuple[int, int]] | None:
+    """α-point list scheduling from a fractional placement vector (Hall,
+    Schulz, Shmoys & Wein 1997; Savelsbergh, Uma & Wein 2005).
+
+    A job's α-point is the first start by which an ``alpha`` share of its LP
+    mass has begun; jobs are placed in α-point order, each on the type its
+    α-point uses, at the earliest start where the type has room. A
+    capacitated job may move to another capacitated type that costs no more
+    when that completes it sooner, so bound rows on f2 stay safe."""
+    sup = np.nonzero(x > 1e-9)[0]
+    if not len(sup):
+        return None
+    order = np.lexsort((ti.T[sup], ti.J[sup]))
+    sup = sup[order]
+    jobs = ti.J[sup]
+    cum = np.cumsum(x[sup])
+    seg = np.r_[0, np.nonzero(np.diff(jobs))[0] + 1]
+    base = np.repeat(np.r_[0.0, cum[seg[1:] - 1]], np.diff(np.r_[seg, len(sup)]))
+    reached = (cum - base) >= alpha - 1e-9
+    reached_idx = np.nonzero(reached)[0]
+    _, first = np.unique(jobs[reached_idx], return_index=True)
+    pick = sup[reached_idx[first]]
+    if len(pick) != len(ti.jobs):
+        return None
+    inst = ti.inst
+    used = np.zeros_like(ti.N)
+    out: dict[int, tuple[int, int]] = {}
+    for a in pick[np.lexsort((ti.P[pick], ti.T[pick]))]:
+        i = int(ti.J[a])
+        jid = ti.jobs[i]
+        k0, c0 = int(ti.K[a]), float(ti.C2[a])
+        lo, hi = ti.first[i], (ti.first[i + 1] if i + 1 < len(ti.first) else ti.n_arcs)
+        best = None
+        for m in {int(v) for v in ti.MID[lo:hi]}:
+            n0, ts = ti.pair[jid, m]
+            k = int(ti.K[n0])
+            if k0 < 0 and m != int(ti.MID[a]):
+                continue                     # a cloud job keeps its LP type
+            if k0 >= 0 and (k < 0 or ti.C2[n0] > c0 + 1e-9):
+                continue                     # only capacitated types, no dearer
+            p, q = int(ti.P[n0]), float(ti.Q[n0])
+            if k < 0:
+                t = int(ts[0])
+            else:
+                bad = (ti.N[k] - used[k]) < q - 1e-9
+                pre = np.r_[0, np.cumsum(bad)]
+                ok = np.nonzero(pre[ts + p] - pre[ts] == 0)[0]
+                if not len(ok):
+                    continue
+                t = int(ts[ok[0]])
+            if best is None or t + p < best[0]:
+                best = (t + p, m, k, t, p, q)
+        if best is None:
+            return None
+        _, m, k, t, p, q = best
+        if k >= 0:
+            used[k, t:t + p] += q
+        out[jid] = (m, t)
+    return out
+
+
+def _fix_and_solve(ti: _TI, x: np.ndarray, gap_rc: np.ndarray, has: np.ndarray, w1, w2, b1, b2,
+                   cutoff: float, deadline: float, step: float, opts: "LPFirstOptions",
+                   start: dict | None):
+    """RINS-style dive: fix every job the LP places integrally, solve the
+    MIP over the fractional ones (their master columns plus their
+    ``cand_per_job`` placements of least ``gap_rc``), and widen the free set
+    to the fixed jobs overlapping them when that has no solution."""
+    arg, mx = _per_job_argmax(ti, x)
+    free = mx < 1 - 1e-6
+    for _round in range(3):
+        if not free.any() or time.perf_counter() >= deadline:
+            return None
+        cand = _candidates(ti, free, gap_rc, has, opts.cand_per_job, start)
+        fixed = arg[~free]
+        status, obj, a = _mip(ti, cand, w1, w2, b1, b2, cutoff,
+                              min(opts.fix_time, deadline - time.perf_counter()), step,
+                              opts.mip_threads, start, fixed=fixed, backend=opts.backend)
+        if a is not None:
+            return a
+        # widen: free the fixed jobs whose placement overlaps a free job's window
+        span = np.zeros((len(ti.types), ti.H + 1))
+        c = cand[ti.K[cand] >= 0]
+        np.add.at(span, (ti.K[c], ti.T[c]), 1)
+        np.add.at(span, (ti.K[c], ti.T[c] + ti.P[c]), -1)
+        busy = np.cumsum(span, axis=1)[:, :ti.H] > 0
+        f = fixed[ti.K[fixed] >= 0]
+        pre = np.c_[np.zeros(len(ti.types)), np.cumsum(busy, axis=1)]
+        hit = pre[ti.K[f], ti.T[f] + ti.P[f]] - pre[ti.K[f], ti.T[f]] > 0
+        if not hit.any():
+            return None
+        free[ti.J[f[hit]]] = True
+    return None
+
+
+def _candidates(ti: _TI, free: np.ndarray, gap_rc: np.ndarray, has: np.ndarray, per_job: int,
+                start: dict | None) -> np.ndarray:
+    """The free jobs' placements: master columns, the incumbent's and the
+    ``per_job`` of least ``gap_rc`` each."""
+    idx = np.nonzero(free[ti.J])[0]
+    order = np.lexsort((gap_rc[idx], ti.J[idx]))
+    idx = idx[order]
+    jobs = ti.J[idx]
+    seg = np.r_[0, np.nonzero(np.diff(jobs))[0] + 1]
+    rank = np.arange(len(idx)) - np.repeat(seg, np.diff(np.r_[seg, len(idx)]))
+    keep = (rank < per_job) | has[idx]
+    out = set(idx[keep].tolist())
+    if start:
+        out.update(a for a in ti.arcs_of(start) if free[ti.J[a]])
+    return np.array(sorted(out), dtype=np.int64)
+
+
+def _lns(ti: _TI, best: dict, ub: float, gap_rc: np.ndarray, has: np.ndarray, w1, w2, b1, b2,
+         step: float, deadline: float, opts: "LPFirstOptions", certified, st: dict):
+    """Large-neighbourhood search over time windows: free the jobs that the
+    incumbent runs during a window (on any capacitated type, plus the cloud
+    jobs released in it), re-solve that sub-MIP below the incumbent, slide on.
+    Stops after a sweep without improvement, at the deadline, or once the
+    incumbent is certified. Returns ``(ub, best)``."""
+    arcs = np.array(ti.arcs_of(best), dtype=np.int64)
+    if len(arcs) != len(ti.jobs):
+        return ub, best
+    rel = np.array([max(0, math.ceil(j.arrival)) for j in ti.inst.jobs])
+    pos = np.array([ti.jpos[j.id] for j in ti.inst.jobs])
+    release = np.empty(len(ti.jobs), dtype=np.int64)
+    release[pos] = rel
+    n_target = opts.lns_jobs
+    improved_any = True
+    sweeps = 0
+    while improved_any and time.perf_counter() < deadline and sweeps < opts.lns_sweeps:
+        improved_any = False
+        sweeps += 1
+        # windows holding about n_target job starts each
+        starts = np.sort(ti.T[arcs])
+        edges = np.unique(starts[::max(1, n_target // 2)])
+        for lo_i in range(len(edges)):
+            if time.perf_counter() >= deadline or certified(ub):
+                return ub, best
+            t_lo = int(edges[lo_i])
+            t_hi = int(edges[min(lo_i + 2, len(edges) - 1)]) if lo_i + 2 < len(edges) else ti.H
+            a_t, a_e = ti.T[arcs], ti.T[arcs] + ti.P[arcs]
+            in_win = (a_t < t_hi) & (a_e > t_lo)
+            in_win |= (ti.K[arcs] < 0) & (release[ti.J[arcs]] < t_hi) & (release[ti.J[arcs]] >= t_lo)
+            free = np.zeros(len(ti.jobs), dtype=bool)
+            free[ti.J[arcs[in_win]]] = True
+            if free.sum() < 2:
+                continue
+            cand = _candidates(ti, free, gap_rc, has, opts.cand_per_job, best)
+            fixed = arcs[~free[ti.J[arcs]]]
+            cut = ub - step + 1e-7 * max(1.0, abs(ub)) if step > 0 else ub - 1e-7 * max(1.0, abs(ub))
+            status, obj, a = _mip(ti, cand, w1, w2, b1, b2, cut,
+                                  min(opts.lns_time_per, deadline - time.perf_counter()), step,
+                                  opts.mip_threads, best, fixed=fixed, backend=opts.backend)
+            st["lns_mips"] = st.get("lns_mips", 0) + 1
+            if a is not None and obj < ub - 1e-9 and _within(ti.inst, a, b1, b2):
+                ub, best = obj, a
+                arcs = np.array(ti.arcs_of(best), dtype=np.int64)
+                improved_any = True
+                st["lns_improvements"] = st.get("lns_improvements", 0) + 1
+    return ub, best
+
+
+@dataclass
+class _CGOut:
+    status: str               # "converged", "certified" (stop(L) held) or "time"
+    L: float                  # best Lagrangian bound
+    center: "_D | None"       # its duals
+    center_rc: np.ndarray | None
+    rmp: float                # last restricted-master LP value
+
+
+def _cg(ti: _TI, master: "_Master", w1, w2, b1, b2, opts: LPFirstOptions,
+        deadline: float | None, allowed: np.ndarray | None, stop, st: dict) -> _CGOut:
+    """Column generation on ``master`` until it converges, ``stop(L)`` holds
+    or the deadline passes. ``allowed`` (bool per placement) restricts
+    pricing, for a node of the search tree: a forbidden placement gets an
+    infinite reduced cost, so it is never added and the Lagrangian bound is
+    the bound of the restricted problem (infinite when some job has no
+    allowed placement)."""
+    best_L, center, center_rc = -math.inf, None, None
+    rmp = math.inf
+    it = 0
+
+    def price(d):
+        rc = _price(ti, d, w1, w2)
+        if allowed is not None:
+            rc[~allowed] = np.inf
+        return rc
+
+    while True:
+        if deadline is not None and time.perf_counter() >= deadline:
+            return _CGOut("time", best_L, center, center_rc, rmp)
+        it += 1
+        tl = time.perf_counter()
+        status = master.solve_lp()
+        st["lp_s"] = st.get("lp_s", 0.0) + time.perf_counter() - tl
+        if status != "optimal":
+            raise RuntimeError(f"lpfirst master LP status {status} ({master.be.name}: "
+                               f"{getattr(master.be, 'last_status', '')})")
+        rmp = master.objective()
+        d = master.duals()
+        tp = time.perf_counter()
+        pick = np.array([], dtype=np.int64)
+        if center is not None and opts.smoothing > 0:
+            sd = center.mix(d, opts.smoothing)
+            rc_s = price(sd)
+            L, _m = _lagrangian(ti, sd, rc_s, b1, b2)
+            if L > best_L:
+                best_L, center, center_rc = L, sd, rc_s
+            pick = _select(ti, rc_s, master.has, opts.tol, opts.per_job, opts.max_cols)
+            if len(pick):
+                rc_d = _price_subset(ti, d, w1, w2, pick)
+                pick = pick[rc_d < -opts.tol]
+        if not len(pick):
+            rc = price(d)
+            L, _m = _lagrangian(ti, d, rc, b1, b2)
+            if L > best_L:
+                best_L, center, center_rc = L, d, rc
+            pick = _select(ti, rc, master.has, opts.tol, opts.per_job, opts.max_cols)
+        st["pricing_s"] = st.get("pricing_s", 0.0) + time.perf_counter() - tp
+        st["cg_iters"] = st.get("cg_iters", 0) + 1
+        if stop(best_L):
+            return _CGOut("certified", best_L, center, center_rc, rmp)
+        if not len(pick) or best_L >= rmp - max(opts.tol, 1e-9 * abs(rmp)):
+            if master.n_art and master.artificial() > 1e-6 and master.big_m < master.big_m_cap:
+                master.raise_big_m()          # artificials left: maybe M is too small
+                best_L, center, center_rc = -math.inf, None, None
+                continue
+            return _CGOut("converged", best_L, center, center_rc, rmp)
+        master.add(pick)
+
+
+class _Tree:
+    """Branch and price over placements (BPC plan, Phase 9).
+
+    A node is a set of allowed placements. Its relaxation is the
+    time-indexed master restricted to them, solved by :func:`_cg`; its
+    Lagrangian bound prunes it against the incumbent. After the bound:
+
+    - **reduced-cost fixing**: every placement whose gap exceeds
+      ``UB - L`` leaves the node's allowed set (the eligibility argument of
+      step 3, applied per node), so children inherit only eligible ones;
+    - **node MIP**: once at most ``node_eligible`` remain, the aggregated
+      MIP over them (cutoff ``UB - step``) solves the node outright; if it
+      hits ``node_mip_time`` the node branches instead;
+    - **branching** (Kramer et al. 2020): the most fractional job is split
+      by type when its LP mass spans types (its heaviest type against the
+      rest), else by start time at the point where its mass first reaches
+      one half, so both children cut off the node's LP solution;
+    - an α-point rounding of each node's LP tries to improve the incumbent.
+
+    Best-first; on a timeout the smallest open bound is a valid bound.
+    """
+
+    def __init__(self, ti, inst, w1, w2, b1, b2, big_m, opts, step, proves, st):
+        self.ti, self.inst, self.w = ti, inst, (w1, w2)
+        self.b1, self.b2, self.big_m, self.opts = b1, b2, big_m, opts
+        self.step, self.proves, self.st = step, proves, st
+
+    def _cut(self, ub):
+        m = 1e-7 * max(1.0, abs(ub))
+        return ub - self.step + m if self.step > 0 else ub - m
+
+    def _branch(self, x: np.ndarray, allowed: np.ndarray):
+        ti = self.ti
+        arg, mx = _per_job_argmax(ti, x)
+        frac = np.nonzero(mx < 1 - 1e-6)[0]
+        if not len(frac):
+            return None
+        i = int(frac[np.argmin(mx[frac])])
+        lo = int(ti.first[i])
+        hi = int(ti.first[i + 1]) if i + 1 < len(ti.first) else ti.n_arcs
+        seg = np.arange(lo, hi)
+        sup = seg[x[seg] > 1e-9]
+        types = ti.MID[sup]
+        side = np.zeros(ti.n_arcs, dtype=bool)
+        if len(set(types.tolist())) > 1:
+            mass = {m: float(x[sup[types == m]].sum()) for m in set(types.tolist())}
+            m_star = max(mass, key=mass.get)
+            side[seg[ti.MID[seg] == m_star]] = True
+            self.st["tree_type_branches"] = self.st.get("tree_type_branches", 0) + 1
+        else:
+            order = sup[np.argsort(ti.T[sup], kind="stable")]
+            cum = np.cumsum(x[order])
+            k = int(np.searchsorted(cum, 0.5 * cum[-1] - 1e-12))
+            k = min(k, len(order) - 2)
+            t_cut = int(ti.T[order[k]])
+            side[seg[ti.T[seg] <= t_cut]] = True
+        left, right = allowed.copy(), allowed.copy()
+        left[seg[~side[seg]]] = False
+        right[seg[side[seg]]] = False
+        return left, right
+
+    def run(self, ub, best, allowed, root_master, root_cg, deadline):
+        """Returns ``(ub, best, open_bound, proven)``."""
+        import heapq
+        ti, opts, st = self.ti, self.opts, self.st
+        w1, w2 = self.w
+        heap = [(root_cg.L, 0, allowed, np.asarray(root_master.arcs, dtype=np.int64), root_master,
+                 root_cg)]
+        counter = 1
+        st["tree_nodes"] = 0
+        while heap:
+            if deadline is not None and time.perf_counter() >= deadline:
+                return ub, best, heap[0][0], False
+            L0, _, allow, cols, master, cg = heapq.heappop(heap)
+            if self.proves(L0, ub):
+                continue
+            st["tree_nodes"] += 1
+            if master is None:
+                master = _Master(ti, w1, w2, self.b1, self.b2, self.big_m,
+                                 backend=opts.backend, threads=opts.lp_threads)
+                seed = set(cols[allow[cols]].tolist())
+                if best is not None:
+                    seed.update(a for a in ti.arcs_of(best) if allow[a])
+                seed.update(np.nonzero(~ti.capped & allow)[0].tolist())
+                master.add(sorted(seed))
+                cg = _cg(ti, master, w1, w2, self.b1, self.b2, opts, deadline, allow,
+                         lambda L: self.proves(L, ub), st)
+                if cg.status == "time":
+                    return ub, best, min(L0, heap[0][0]) if heap else L0, False
+                if cg.status == "certified" or not math.isfinite(cg.L):
+                    continue
+                if master.artificial() > 1e-6:
+                    continue          # the node's LP is infeasible
+            L = max(L0, cg.L)
+            if self.proves(L, ub):
+                continue
+            x = master.x()
+            # incumbent from the node: integral LP, or its α-point rounding
+            for cand in ([master.assignment()] if master.assignment() else []) + \
+                    [_alpha_schedule(ti, x, 0.5)]:
+                if cand is not None and _within(self.inst, cand, self.b1, self.b2):
+                    obj = _objective_of(self.inst, cand, w1, w2)
+                    if obj < ub - 1e-9:
+                        ub, best = obj, cand
+                        st["tree_improvements"] = st.get("tree_improvements", 0) + 1
+            if self.proves(L, ub):
+                continue
+            # reduced-cost fixing at the node
+            _L, mins = _lagrangian(ti, cg.center, cg.center_rc, self.b1, self.b2)
+            gap_rc = cg.center_rc + cg.center.sigma[ti.J] - mins[ti.J]
+            keep = allow & (gap_rc < (ub - cg.L) + 1e-7 * max(1.0, abs(ub)))
+            n_keep = int(keep.sum())
+            if n_keep <= opts.node_eligible:
+                status, obj, a = _mip(ti, np.nonzero(keep)[0], w1, w2, self.b1, self.b2,
+                                      self._cut(ub), min(opts.node_mip_time,
+                                                         (deadline - time.perf_counter())
+                                                         if deadline else opts.node_mip_time),
+                                      self.step, opts.mip_threads, best, backend=opts.backend)
+                st["tree_node_mips"] = st.get("tree_node_mips", 0) + 1
+                if a is not None and obj < ub - 1e-9 and _within(self.inst, a, self.b1, self.b2):
+                    ub, best = obj, a
+                if status in ("optimal", "none"):
+                    continue
+            kids = self._branch(x, keep)
+            if kids is None:      # integral LP but not better than ub: done
+                continue
+            cols = np.asarray(master.arcs, dtype=np.int64)
+            for kid in kids:
+                heapq.heappush(heap, (L, counter, kid, cols, None, None))
+                counter += 1
+        return ub, best, math.inf, True
 
 
 def solve_lpfirst(
@@ -414,7 +1082,14 @@ def solve_lpfirst(
     st = stats if stats is not None else {}
     if ti is None:
         ti = _TI(inst, bpc._prepare(inst))
-    w1, w2, b1, b2 = weight1, weight2, bound1_value, bound2_value
+    # Scale the objective so one step of its coarser term is 1 (as
+    # model.weighted_sum_scale does for the compact model): normalised
+    # weights (~1e-5) put cost differences below Gurobi's OptimalityTol and
+    # its MIPs then prune the optimum. Everything below works in scaled
+    # units; result() reports unscaled ones.
+    scale = weighted_sum_scale(inst, weight1, weight2) if (weight1 or weight2) else 1.0
+    w1, w2, b1, b2 = weight1 * scale, weight2 * scale, bound1_value, bound2_value
+    st["scale"] = scale
     step = bpc._objective_step(inst, w1, w2)
     if seed_schedules is None:
         seed_schedules = bpc.heuristic_schedules(inst)
@@ -425,30 +1100,37 @@ def solve_lpfirst(
             obj = _objective_of(inst, a, w1, w2)
             if obj < ub:
                 ub, best = obj, dict(a)
-    st["seed_obj"] = ub
+    st["seed_obj"] = ub / scale
+
+    def proves(L: float, u: float) -> bool:
+        if not math.isfinite(u):
+            return False
+        margin = 1e-7 * max(1.0, abs(u))
+        return L > u - step + margin if step > 0 else L >= u - margin
 
     def certified(L: float) -> bool:
-        if not math.isfinite(ub):
-            return False
-        margin = 1e-7 * max(1.0, abs(ub))
-        return L > ub - step + margin if step > 0 else L >= ub - margin
+        return proves(L, ub)
 
     def left() -> float:
         return math.inf if deadline is None else deadline - time.perf_counter()
 
     def result(status, how, L):
         st["time_s"] = time.perf_counter() - t0
-        st["bound"] = L
+        st["bound"] = L / scale
         if column_pool is not None:
             try:
-                column_pool.update(int(a) for a, v in zip(master.arcs, master.vars) if v.X > 1e-9)
-            except (gp.GurobiError, AttributeError):   # no LP solution yet
+                column_pool.update(int(a) for a, v in zip(master.arcs, master.arc_values().tolist())
+                                   if v > 1e-9)
+            except Exception:   # no LP solution yet
                 pass
             if best is not None:
                 column_pool.update(ti.arcs_of(best))
-        return LPFirstResult(status, ub if best is not None else math.inf, best, L, how, st)
+        return LPFirstResult(status, ub / scale if best is not None else math.inf, best,
+                             L / scale, how, st)
 
-    master = _Master(ti, w1, w2, b1, b2, bpc._big_m_for(inst))
+    # in scaled units; _cg raises it (up to 1e6 more) while artificials stay
+    big_m = 1e3 * max(1.0, float(np.max(w1 * ti.C1 + w2 * ti.C2)))
+    master = _Master(ti, w1, w2, b1, b2, big_m, backend=opts.backend, threads=opts.lp_threads)
     seed = set(column_pool or ())
     for a in seed_schedules:
         seed.update(ti.arcs_of(a))
@@ -456,65 +1138,74 @@ def solve_lpfirst(
     master.add(sorted(seed))
 
     # --- column generation, stopped by the certificate when possible
-    best_L, center, center_rc = -math.inf, None, None
-    rmp = math.inf
-    it = 0
-    while True:
-        if left() <= 0:
-            return result("feasible", "", best_L)
-        it += 1
-        tl = time.perf_counter()
-        master.mdl.optimize()
-        st["lp_s"] = st.get("lp_s", 0.0) + time.perf_counter() - tl
-        if master.mdl.Status != GRB.OPTIMAL:
-            raise RuntimeError(f"lpfirst master LP status {master.mdl.Status}")
-        rmp = master.mdl.ObjVal
-        d = master.duals()
-        tp = time.perf_counter()
-        pick = np.array([], dtype=np.int64)
-        if center is not None and opts.smoothing > 0:
-            sd = center.mix(d, opts.smoothing)
-            rc_s = _price(ti, sd, w1, w2)
-            L, _m = _lagrangian(ti, sd, rc_s, b1, b2)
-            if L > best_L:
-                best_L, center, center_rc = L, sd, rc_s
-            pick = _select(ti, rc_s, master.has, opts.tol, opts.per_job, opts.max_cols)
-            if len(pick):
-                rc_d = _price_subset(ti, d, w1, w2, pick)
-                pick = pick[rc_d < -opts.tol]
-        if not len(pick):
-            rc = _price(ti, d, w1, w2)
-            L, _m = _lagrangian(ti, d, rc, b1, b2)
-            if L > best_L:
-                best_L, center, center_rc = L, d, rc
-            pick = _select(ti, rc, master.has, opts.tol, opts.per_job, opts.max_cols)
-        st["pricing_s"] = st.get("pricing_s", 0.0) + time.perf_counter() - tp
-        st["cg_iters"] = it
-        if certified(best_L):
-            st["columns"] = len(master.arcs)
-            return result("optimal", "bound", best_L)
-        if not len(pick) or best_L >= rmp - max(opts.tol, 1e-9 * abs(rmp)):
-            break
-        master.add(pick)
+    cg = _cg(ti, master, w1, w2, b1, b2, opts, deadline, None, certified, st)
+    best_L, center, center_rc, rmp = cg.L, cg.center, cg.center_rc, cg.rmp
+    if cg.status == "time":
+        return result("feasible", "", best_L)
+    if cg.status == "certified":
+        st["columns"] = len(master.arcs)
+        return result("optimal", "bound", best_L)
     st["columns"] = len(master.arcs)
-    st["lp"] = rmp
+    st["lp"] = rmp / scale
     if master.artificial() > 1e-6:   # the LP optimum needs artificials: no schedule
         best = None
         return result("infeasible", "lp", best_L)
 
+    # --- step 1b: primal heuristics from the LP (α-points, fix-and-solve, LNS)
+    if opts.heuristics and math.isfinite(rmp) and not certified(best_L):
+        th = time.perf_counter()
+        stop = th + opts.heuristic_time if deadline is None else min(deadline, th + opts.heuristic_time)
+        x = master.x()
+        _L, mins = _lagrangian(ti, center, center_rc, b1, b2)
+        gap_rc = center_rc + center.sigma[ti.J] - mins[ti.J]
+        for alpha in (0.5, 0.25, 0.75, 0.0):
+            a = _alpha_schedule(ti, x, alpha)
+            if a is not None and _within(inst, a, b1, b2):
+                obj = _objective_of(inst, a, w1, w2)
+                if obj < ub:
+                    ub, best = obj, a
+        st["alpha_obj"] = ub / scale
+        if not certified(best_L):
+            cut = ub - step + 1e-7 * max(1.0, abs(ub)) if math.isfinite(ub) else INF
+            a = _fix_and_solve(ti, x, gap_rc, master.has, w1, w2, b1, b2, cut, stop, step,
+                               opts, best)
+            if a is not None and _within(inst, a, b1, b2):
+                obj = _objective_of(inst, a, w1, w2)
+                if obj < ub:
+                    ub, best = obj, a
+        st["fix_obj"] = ub / scale
+        if best is not None and not certified(best_L):
+            ub, best = _lns(ti, best, ub, gap_rc, master.has, w1, w2, b1, b2, step, stop, opts,
+                            lambda u: proves(best_L, u), st)
+        st["lns_obj"] = ub / scale
+        st["heuristic_s"] = time.perf_counter() - th
+        if certified(best_L):
+            return result("optimal", "heuristic", best_L)
+
     # --- step 2: the restricted master as a MIP
     if math.isfinite(rmp) and opts.rmp_mip_time > 0:
-        cut = ub - step + 1e-7 * max(1.0, abs(ub)) if math.isfinite(ub) else GRB.INFINITY
+        cut = ub - step + 1e-7 * max(1.0, abs(ub)) if math.isfinite(ub) else INF
         tm = time.perf_counter()
         status, obj, a = _mip(ti, master.arcs, w1, w2, b1, b2, cut,
-                              min(opts.rmp_mip_time, left()), step, opts.mip_threads, best)
+                              min(opts.rmp_mip_time, left()), step, opts.mip_threads, best,
+                              backend=opts.backend)
         st["rmp_mip_s"] = time.perf_counter() - tm
         if a is not None and obj < ub and _within(inst, a, b1, b2):
             ub, best = obj, a
         if certified(best_L):
             return result("optimal", "rmp_mip", best_L)
     if not math.isfinite(ub):
-        return result("feasible", "", best_L)
+        if not opts.tree or left() <= 0:
+            return result("feasible", "", best_L)
+        # no incumbent: every placement is eligible, so search the tree
+        tr = _Tree(ti, inst, w1, w2, b1, b2, big_m, opts, step, proves, st)
+        ub, best, L_open, done = tr.run(ub, best, np.ones(ti.n_arcs, dtype=bool), master, cg,
+                                        deadline)
+        if done:
+            if best is None:
+                return result("infeasible", "tree", math.inf)
+            return result("optimal", "tree", best_L)
+        return result("feasible", "", max(best_L, L_open))
 
     # --- step 3: the exact MIP over the eligible placements
     _L, mins = _lagrangian(ti, center, center_rc, b1, b2)
@@ -522,11 +1213,21 @@ def solve_lpfirst(
     eligible = np.nonzero(center_rc + center.sigma[ti.J] - mins[ti.J]
                           < gap + 1e-7 * max(1.0, abs(ub)))[0]
     st["eligible"] = int(len(eligible))
+    if opts.tree and len(eligible) > opts.max_eligible and left() > 0:
+        # --- step 3': branch and price over placements (Phase 9)
+        allowed = np.zeros(ti.n_arcs, dtype=bool)
+        allowed[eligible] = True
+        tr = _Tree(ti, inst, w1, w2, b1, b2, big_m, opts, step, proves, st)
+        ub, best, L_open, done = tr.run(ub, best, allowed, master, cg, deadline)
+        if done:
+            return result("optimal", "tree", best_L)
+        return result("feasible", "", max(best_L, L_open))
     if len(eligible) > opts.max_eligible or left() <= 0:
         return result("feasible", "", best_L)
     cut = ub - step + 1e-7 * max(1.0, abs(ub)) if step > 0 else ub - 1e-7 * max(1.0, abs(ub))
     tm = time.perf_counter()
-    status, obj, a = _mip(ti, eligible, w1, w2, b1, b2, cut, left(), step, opts.mip_threads)
+    status, obj, a = _mip(ti, eligible, w1, w2, b1, b2, cut, left(), step, opts.mip_threads,
+                          backend=opts.backend)
     st["eligible_mip_s"] = time.perf_counter() - tm
     if status == "limit":
         if a is not None and obj < ub and _within(inst, a, b1, b2):

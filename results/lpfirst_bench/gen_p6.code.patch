@@ -1,0 +1,670 @@
+diff --git a/src/fedhpc/lpfirst.py b/src/fedhpc/lpfirst.py
+index 4df2ced..11a2f9d 100644
+--- a/src/fedhpc/lpfirst.py
++++ b/src/fedhpc/lpfirst.py
+@@ -98,7 +98,7 @@ from gurobipy import GRB
+ 
+ from . import bpc, formulations
+ from .data import Instance
+-from .model import Solution, grid_floor
++from .model import Solution, grid_floor, weighted_sum_scale
+ 
+ __all__ = ["LPFirstOptions", "LPFirstResult", "solve_lpfirst", "solve_weighted_sum_lpfirst",
+            "solve_f1_lpfirst", "solve_f2_lpfirst", "make_lpfirst_lexmin_bounded"]
+@@ -113,6 +113,14 @@ class LPFirstOptions:
+     restricted-master MIP (step 2). ``max_eligible`` — the most placements
+     the exact MIP (step 3) may have; past it the result is not certified.
+     ``mip_threads`` — Gurobi threads for both MIPs (0: Gurobi's default).
++    ``lp_threads`` — Gurobi threads for the master LP (0: Gurobi's default).
++
++    Primal heuristics (step 1b, Phase 7): ``heuristics`` turns them on;
++    ``heuristic_time`` caps them in all. ``cand_per_job`` — placements of
++    least reduced-cost gap a freed job may take in a sub-MIP. ``fix_time`` —
++    seconds per fix-and-solve MIP. ``lns_jobs`` — jobs starting in one LNS
++    window; ``lns_time_per`` — seconds per LNS sub-MIP; ``lns_sweeps`` —
++    full passes over the horizon.
+     """
+     smoothing: float = 0.5
+     per_job: int = 3
+@@ -121,6 +129,14 @@ class LPFirstOptions:
+     rmp_mip_time: float = 30.0
+     max_eligible: int = 400_000
+     mip_threads: int = 0
++    lp_threads: int = 0
++    heuristics: bool = True
++    heuristic_time: float = 120.0
++    cand_per_job: int = 30
++    fix_time: float = 30.0
++    lns_jobs: int = 400
++    lns_time_per: float = 10.0
++    lns_sweeps: int = 2
+ 
+ 
+ @dataclass
+@@ -245,21 +261,30 @@ class _Master:
+     artificials, a MIP over a fixed set of placements)."""
+ 
+     def __init__(self, ti: _TI, w1: float, w2: float, b1: float | None, b2: float | None,
+-                 big_m: float | None, vtype=GRB.CONTINUOUS):
++                 big_m: float | None, vtype=GRB.CONTINUOUS, *,
++                 free: np.ndarray | None = None, occupy: np.ndarray | None = None):
++        """``free`` (bool per job position) — only these jobs get a coverage
++        row; the others are fixed elsewhere. ``occupy`` (types × H) —
++        capacity those fixed jobs already hold. Callers shift the bound
++        rows themselves."""
+         formulations.configure_env()
+         self.ti, self.w1, self.w2, self.vtype = ti, w1, w2, vtype
+         mdl = self.mdl = gp.Model("lpfirst", env=formulations._shared_env)
+         mdl.setParam("OutputFlag", 0)
+-        self.cover = [mdl.addConstr(gp.LinExpr() == 1.0, name=f"cover[{jid}]") for jid in ti.jobs]
++        self.cover = [mdl.addConstr(gp.LinExpr() == 1.0, name=f"cover[{jid}]")
++                      if free is None or free[i] else None
++                      for i, jid in enumerate(ti.jobs)]
++        cap_rhs = ti.N if occupy is None else ti.N - occupy
+         self.cap: dict[tuple[int, int], gp.Constr] = {}
+         for k, tau in zip(*np.nonzero(ti.row_needed)):
+-            self.cap[int(k), int(tau)] = mdl.addConstr(gp.LinExpr() <= float(ti.N[k, tau]),
++            self.cap[int(k), int(tau)] = mdl.addConstr(gp.LinExpr() <= float(cap_rhs[k, tau]),
+                                                        name=f"cap[{k},{tau}]")
+         self.b1 = mdl.addConstr(gp.LinExpr() <= b1, name="bound1") if b1 is not None else None
+         self.b2 = mdl.addConstr(gp.LinExpr() <= b2, name="bound2") if b2 is not None else None
+         self.B1, self.B2 = b1, b2
+         mdl.update()
+-        self.art = ([mdl.addVar(obj=big_m, column=gp.Column([1.0], [c])) for c in self.cover]
++        self.art = ([mdl.addVar(obj=big_m, column=gp.Column([1.0], [c]))
++                     for c in self.cover if c is not None]
+                     if big_m is not None else [])
+         self.arcs: list[int] = []
+         self.vars: list[gp.Var] = []
+@@ -302,8 +327,18 @@ class _Master:
+     def artificial(self) -> float:
+         return sum(v.X for v in self.art)
+ 
++    def x(self) -> np.ndarray:
++        """The current solution as a dense vector over all placements."""
++        out = np.zeros(self.ti.n_arcs)
++        if self.vars:
++            out[np.asarray(self.arcs)] = self.mdl.getAttr("X", self.vars)
++        return out
++
++    def chosen(self) -> list[int]:
++        return [a for a, v in zip(self.arcs, self.mdl.getAttr("X", self.vars)) if v > 0.5]
++
+     def assignment(self) -> dict[int, tuple[int, int]] | None:
+-        chosen = [a for a, v in zip(self.arcs, self.vars) if v.X > 0.5]
++        chosen = self.chosen()
+         out = self.ti.assignment_of(chosen)
+         return out if len(out) == len(self.ti.jobs) == len(chosen) else None
+ 
+@@ -362,18 +397,39 @@ def _within(inst: Instance, a: dict[int, tuple[int, int]], b1, b2) -> bool:
+ 
+ 
+ def _mip(ti: _TI, arcs, w1, w2, b1, b2, cutoff: float, time_limit: float, step: float,
+-         threads: int, start: dict | None = None):
++         threads: int, start: dict | None = None, *, fixed=None, focus: int = 0):
+     """Solve the placement MIP over ``arcs`` for a schedule below ``cutoff``.
+     Returns ``(status, objective, assignment)``: ``"optimal"`` (proven on the
+-    grid), ``"none"`` (proven: nothing below the cutoff) or ``"limit"``."""
+-    m = _Master(ti, w1, w2, b1, b2, None, vtype=GRB.BINARY)
++    grid), ``"none"`` (proven: nothing below the cutoff) or ``"limit"``.
++
++    ``fixed`` — placements held fixed (one per job, none of them in
++    ``arcs``): only the other jobs get coverage rows, the fixed ones' capacity
++    and bound-row use is taken off the right-hand sides, and the result is a
++    sub-MIP of the full one (a large-neighbourhood step). ``"none"`` then only
++    means nothing below the cutoff *with those jobs fixed*."""
++    fixed = np.asarray(fixed if fixed is not None else [], dtype=np.int64)
++    free = occ = None
++    const = 0.0
++    if len(fixed):
++        free = np.ones(len(ti.jobs), dtype=bool)
++        free[ti.J[fixed]] = False
++        occ = _occupancy(ti, fixed)
++        const = float(w1 * ti.C1[fixed].sum() + w2 * ti.C2[fixed].sum())
++        if b1 is not None:
++            b1 = b1 - float(ti.C1[fixed].sum())
++        if b2 is not None:
++            b2 = b2 - float(ti.C2[fixed].sum())
++        arcs = [a for a in arcs if free[ti.J[a]]]
++    m = _Master(ti, w1, w2, b1, b2, None, vtype=GRB.BINARY, free=free, occupy=occ)
+     m.add(arcs)
+     mdl = m.mdl
+     mdl.setParam("TimeLimit", max(0.0, time_limit))
+-    mdl.setParam("Cutoff", cutoff)
++    mdl.setParam("Cutoff", cutoff - const if math.isfinite(cutoff) else cutoff)
+     mdl.setParam("MIPGap", 0.0)
+     mdl.setParam("MIPGapAbs", 0.999 * step if step > 0 else 1e-9)
+     mdl.setParam("IntFeasTol", 1e-9)
++    if focus:
++        mdl.setParam("MIPFocus", focus)
+     if threads:
+         mdl.setParam("Threads", threads)
+     if start:
+@@ -384,13 +440,202 @@ def _mip(ti: _TI, arcs, w1, w2, b1, b2, cutoff: float, time_limit: float, step:
+     mdl.optimize()
+     if mdl.Status in (GRB.CUTOFF, GRB.INFEASIBLE) or (mdl.Status == GRB.OPTIMAL and mdl.SolCount == 0):
+         return "none", math.inf, None
+-    a = m.assignment() if mdl.SolCount else None
++    a = None
++    if mdl.SolCount:
++        chosen = m.chosen() + fixed.tolist()
++        a = ti.assignment_of(chosen)
++        if not len(a) == len(ti.jobs) == len(chosen):
++            a = None
+     obj = _objective_of(ti.inst, a, w1, w2) if a else math.inf
+     if mdl.Status == GRB.OPTIMAL and a is not None:
+         return "optimal", obj, a
+     return "limit", obj, a
+ 
+ 
++def _occupancy(ti: _TI, arcs) -> np.ndarray:
++    """Capacity (types × H) the placements ``arcs`` hold."""
++    arcs = np.asarray(arcs, dtype=np.int64)
++    arcs = arcs[ti.K[arcs] >= 0]
++    d = np.zeros((len(ti.types), ti.H + 1))
++    np.add.at(d, (ti.K[arcs], ti.T[arcs]), ti.Q[arcs])
++    np.add.at(d, (ti.K[arcs], ti.T[arcs] + ti.P[arcs]), -ti.Q[arcs])
++    return np.cumsum(d, axis=1)[:, :ti.H]
++
++
++# ---------------------------------------------------------------------------
++# Primal heuristics (BPC plan, Phase 7)
++# ---------------------------------------------------------------------------
++
++def _per_job_argmax(ti: _TI, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
++    """``(arc, value)``: each job's largest placement in ``x``."""
++    mx = np.maximum.reduceat(x, ti.first)
++    hit = np.nonzero(x >= mx[ti.J] - 1e-12)[0]
++    _, first = np.unique(ti.J[hit], return_index=True)
++    return hit[first], mx
++
++
++def _alpha_schedule(ti: _TI, x: np.ndarray, alpha: float) -> dict[int, tuple[int, int]] | None:
++    """α-point list scheduling from a fractional placement vector (Hall,
++    Schulz, Shmoys & Wein 1997; Savelsbergh, Uma & Wein 2005).
++
++    A job's α-point is the first start by which an ``alpha`` share of its LP
++    mass has begun; jobs are placed in α-point order, each on the type its
++    α-point uses, at the earliest start where the type has room. A
++    capacitated job may move to another capacitated type that costs no more
++    when that completes it sooner, so bound rows on f2 stay safe."""
++    sup = np.nonzero(x > 1e-9)[0]
++    if not len(sup):
++        return None
++    order = np.lexsort((ti.T[sup], ti.J[sup]))
++    sup = sup[order]
++    jobs = ti.J[sup]
++    cum = np.cumsum(x[sup])
++    seg = np.r_[0, np.nonzero(np.diff(jobs))[0] + 1]
++    base = np.repeat(np.r_[0.0, cum[seg[1:] - 1]], np.diff(np.r_[seg, len(sup)]))
++    reached = (cum - base) >= alpha - 1e-9
++    reached_idx = np.nonzero(reached)[0]
++    _, first = np.unique(jobs[reached_idx], return_index=True)
++    pick = sup[reached_idx[first]]
++    if len(pick) != len(ti.jobs):
++        return None
++    inst = ti.inst
++    used = np.zeros_like(ti.N)
++    out: dict[int, tuple[int, int]] = {}
++    for a in pick[np.lexsort((ti.P[pick], ti.T[pick]))]:
++        i = int(ti.J[a])
++        jid = ti.jobs[i]
++        k0, c0 = int(ti.K[a]), float(ti.C2[a])
++        lo, hi = ti.first[i], (ti.first[i + 1] if i + 1 < len(ti.first) else ti.n_arcs)
++        best = None
++        for m in {int(v) for v in ti.MID[lo:hi]}:
++            n0, ts = ti.pair[jid, m]
++            k = int(ti.K[n0])
++            if k0 < 0 and m != int(ti.MID[a]):
++                continue                     # a cloud job keeps its LP type
++            if k0 >= 0 and (k < 0 or ti.C2[n0] > c0 + 1e-9):
++                continue                     # only capacitated types, no dearer
++            p, q = int(ti.P[n0]), float(ti.Q[n0])
++            if k < 0:
++                t = int(ts[0])
++            else:
++                bad = (ti.N[k] - used[k]) < q - 1e-9
++                pre = np.r_[0, np.cumsum(bad)]
++                ok = np.nonzero(pre[ts + p] - pre[ts] == 0)[0]
++                if not len(ok):
++                    continue
++                t = int(ts[ok[0]])
++            if best is None or t + p < best[0]:
++                best = (t + p, m, k, t, p, q)
++        if best is None:
++            return None
++        _, m, k, t, p, q = best
++        if k >= 0:
++            used[k, t:t + p] += q
++        out[jid] = (m, t)
++    return out
++
++
++def _fix_and_solve(ti: _TI, x: np.ndarray, gap_rc: np.ndarray, has: np.ndarray, w1, w2, b1, b2,
++                   cutoff: float, deadline: float, step: float, opts: "LPFirstOptions",
++                   start: dict | None):
++    """RINS-style dive: fix every job the LP places integrally, solve the
++    MIP over the fractional ones (their master columns plus their
++    ``cand_per_job`` placements of least ``gap_rc``), and widen the free set
++    to the fixed jobs overlapping them when that has no solution."""
++    arg, mx = _per_job_argmax(ti, x)
++    free = mx < 1 - 1e-6
++    for _round in range(3):
++        if not free.any() or time.perf_counter() >= deadline:
++            return None
++        cand = _candidates(ti, free, gap_rc, has, opts.cand_per_job, start)
++        fixed = arg[~free]
++        status, obj, a = _mip(ti, cand, w1, w2, b1, b2, cutoff,
++                              min(opts.fix_time, deadline - time.perf_counter()), step,
++                              opts.mip_threads, start, fixed=fixed)
++        if a is not None:
++            return a
++        # widen: free the fixed jobs whose placement overlaps a free job's window
++        span = np.zeros((len(ti.types), ti.H + 1))
++        c = cand[ti.K[cand] >= 0]
++        np.add.at(span, (ti.K[c], ti.T[c]), 1)
++        np.add.at(span, (ti.K[c], ti.T[c] + ti.P[c]), -1)
++        busy = np.cumsum(span, axis=1)[:, :ti.H] > 0
++        f = fixed[ti.K[fixed] >= 0]
++        pre = np.c_[np.zeros(len(ti.types)), np.cumsum(busy, axis=1)]
++        hit = pre[ti.K[f], ti.T[f] + ti.P[f]] - pre[ti.K[f], ti.T[f]] > 0
++        if not hit.any():
++            return None
++        free[ti.J[f[hit]]] = True
++    return None
++
++
++def _candidates(ti: _TI, free: np.ndarray, gap_rc: np.ndarray, has: np.ndarray, per_job: int,
++                start: dict | None) -> np.ndarray:
++    """The free jobs' placements: master columns, the incumbent's and the
++    ``per_job`` of least ``gap_rc`` each."""
++    idx = np.nonzero(free[ti.J])[0]
++    order = np.lexsort((gap_rc[idx], ti.J[idx]))
++    idx = idx[order]
++    jobs = ti.J[idx]
++    seg = np.r_[0, np.nonzero(np.diff(jobs))[0] + 1]
++    rank = np.arange(len(idx)) - np.repeat(seg, np.diff(np.r_[seg, len(idx)]))
++    keep = (rank < per_job) | has[idx]
++    out = set(idx[keep].tolist())
++    if start:
++        out.update(a for a in ti.arcs_of(start) if free[ti.J[a]])
++    return np.array(sorted(out), dtype=np.int64)
++
++
++def _lns(ti: _TI, best: dict, ub: float, gap_rc: np.ndarray, has: np.ndarray, w1, w2, b1, b2,
++         step: float, deadline: float, opts: "LPFirstOptions", certified, st: dict):
++    """Large-neighbourhood search over time windows: free the jobs that the
++    incumbent runs during a window (on any capacitated type, plus the cloud
++    jobs released in it), re-solve that sub-MIP below the incumbent, slide on.
++    Stops after a sweep without improvement, at the deadline, or once the
++    incumbent is certified. Returns ``(ub, best)``."""
++    arcs = np.array(ti.arcs_of(best), dtype=np.int64)
++    if len(arcs) != len(ti.jobs):
++        return ub, best
++    rel = np.array([max(0, math.ceil(j.arrival)) for j in ti.inst.jobs])
++    pos = np.array([ti.jpos[j.id] for j in ti.inst.jobs])
++    release = np.empty(len(ti.jobs), dtype=np.int64)
++    release[pos] = rel
++    n_target = opts.lns_jobs
++    improved_any = True
++    sweeps = 0
++    while improved_any and time.perf_counter() < deadline and sweeps < opts.lns_sweeps:
++        improved_any = False
++        sweeps += 1
++        # windows holding about n_target job starts each
++        starts = np.sort(ti.T[arcs])
++        edges = np.unique(starts[::max(1, n_target // 2)])
++        for lo_i in range(len(edges)):
++            if time.perf_counter() >= deadline or certified(ub):
++                return ub, best
++            t_lo = int(edges[lo_i])
++            t_hi = int(edges[min(lo_i + 2, len(edges) - 1)]) if lo_i + 2 < len(edges) else ti.H
++            a_t, a_e = ti.T[arcs], ti.T[arcs] + ti.P[arcs]
++            in_win = (a_t < t_hi) & (a_e > t_lo)
++            in_win |= (ti.K[arcs] < 0) & (release[ti.J[arcs]] < t_hi) & (release[ti.J[arcs]] >= t_lo)
++            free = np.zeros(len(ti.jobs), dtype=bool)
++            free[ti.J[arcs[in_win]]] = True
++            if free.sum() < 2:
++                continue
++            cand = _candidates(ti, free, gap_rc, has, opts.cand_per_job, best)
++            fixed = arcs[~free[ti.J[arcs]]]
++            cut = ub - step + 1e-7 * max(1.0, abs(ub)) if step > 0 else ub - 1e-7 * max(1.0, abs(ub))
++            status, obj, a = _mip(ti, cand, w1, w2, b1, b2, cut,
++                                  min(opts.lns_time_per, deadline - time.perf_counter()), step,
++                                  opts.mip_threads, best, fixed=fixed)
++            st["lns_mips"] = st.get("lns_mips", 0) + 1
++            if a is not None and obj < ub - 1e-9 and _within(ti.inst, a, b1, b2):
++                ub, best = obj, a
++                arcs = np.array(ti.arcs_of(best), dtype=np.int64)
++                improved_any = True
++                st["lns_improvements"] = st.get("lns_improvements", 0) + 1
++    return ub, best
++
++
+ def solve_lpfirst(
+     inst: Instance, weight1: float, weight2: float,
+     bound1_value: float | None = None, bound2_value: float | None = None,
+@@ -414,7 +659,14 @@ def solve_lpfirst(
+     st = stats if stats is not None else {}
+     if ti is None:
+         ti = _TI(inst, bpc._prepare(inst))
+-    w1, w2, b1, b2 = weight1, weight2, bound1_value, bound2_value
++    # Scale the objective so one step of its coarser term is 1 (as
++    # model.weighted_sum_scale does for the compact model): normalised
++    # weights (~1e-5) put cost differences below Gurobi's OptimalityTol and
++    # its MIPs then prune the optimum. Everything below works in scaled
++    # units; result() reports unscaled ones.
++    scale = weighted_sum_scale(inst, weight1, weight2) if (weight1 or weight2) else 1.0
++    w1, w2, b1, b2 = weight1 * scale, weight2 * scale, bound1_value, bound2_value
++    st["scale"] = scale
+     step = bpc._objective_step(inst, w1, w2)
+     if seed_schedules is None:
+         seed_schedules = bpc.heuristic_schedules(inst)
+@@ -425,20 +677,23 @@ def solve_lpfirst(
+             obj = _objective_of(inst, a, w1, w2)
+             if obj < ub:
+                 ub, best = obj, dict(a)
+-    st["seed_obj"] = ub
++    st["seed_obj"] = ub / scale
+ 
+-    def certified(L: float) -> bool:
+-        if not math.isfinite(ub):
++    def proves(L: float, u: float) -> bool:
++        if not math.isfinite(u):
+             return False
+-        margin = 1e-7 * max(1.0, abs(ub))
+-        return L > ub - step + margin if step > 0 else L >= ub - margin
++        margin = 1e-7 * max(1.0, abs(u))
++        return L > u - step + margin if step > 0 else L >= u - margin
++
++    def certified(L: float) -> bool:
++        return proves(L, ub)
+ 
+     def left() -> float:
+         return math.inf if deadline is None else deadline - time.perf_counter()
+ 
+     def result(status, how, L):
+         st["time_s"] = time.perf_counter() - t0
+-        st["bound"] = L
++        st["bound"] = L / scale
+         if column_pool is not None:
+             try:
+                 column_pool.update(int(a) for a, v in zip(master.arcs, master.vars) if v.X > 1e-9)
+@@ -446,9 +701,13 @@ def solve_lpfirst(
+                 pass
+             if best is not None:
+                 column_pool.update(ti.arcs_of(best))
+-        return LPFirstResult(status, ub if best is not None else math.inf, best, L, how, st)
++        return LPFirstResult(status, ub / scale if best is not None else math.inf, best,
++                             L / scale, how, st)
+ 
+-    master = _Master(ti, w1, w2, b1, b2, bpc._big_m_for(inst))
++    big_m = 1e6 * max(1.0, float(np.max(w1 * ti.C1 + w2 * ti.C2)))   # in scaled units
++    master = _Master(ti, w1, w2, b1, b2, big_m)
++    if opts.lp_threads:
++        master.mdl.setParam("Threads", opts.lp_threads)
+     seed = set(column_pool or ())
+     for a in seed_schedules:
+         seed.update(ti.arcs_of(a))
+@@ -497,11 +756,42 @@ def solve_lpfirst(
+             break
+         master.add(pick)
+     st["columns"] = len(master.arcs)
+-    st["lp"] = rmp
++    st["lp"] = rmp / scale
+     if master.artificial() > 1e-6:   # the LP optimum needs artificials: no schedule
+         best = None
+         return result("infeasible", "lp", best_L)
+ 
++    # --- step 1b: primal heuristics from the LP (α-points, fix-and-solve, LNS)
++    if opts.heuristics and math.isfinite(rmp) and not certified(best_L):
++        th = time.perf_counter()
++        stop = th + opts.heuristic_time if deadline is None else min(deadline, th + opts.heuristic_time)
++        x = master.x()
++        _L, mins = _lagrangian(ti, center, center_rc, b1, b2)
++        gap_rc = center_rc + center.sigma[ti.J] - mins[ti.J]
++        for alpha in (0.5, 0.25, 0.75, 0.0):
++            a = _alpha_schedule(ti, x, alpha)
++            if a is not None and _within(inst, a, b1, b2):
++                obj = _objective_of(inst, a, w1, w2)
++                if obj < ub:
++                    ub, best = obj, a
++        st["alpha_obj"] = ub / scale
++        if not certified(best_L):
++            cut = ub - step + 1e-7 * max(1.0, abs(ub)) if math.isfinite(ub) else GRB.INFINITY
++            a = _fix_and_solve(ti, x, gap_rc, master.has, w1, w2, b1, b2, cut, stop, step,
++                               opts, best)
++            if a is not None and _within(inst, a, b1, b2):
++                obj = _objective_of(inst, a, w1, w2)
++                if obj < ub:
++                    ub, best = obj, a
++        st["fix_obj"] = ub / scale
++        if best is not None and not certified(best_L):
++            ub, best = _lns(ti, best, ub, gap_rc, master.has, w1, w2, b1, b2, step, stop, opts,
++                            lambda u: proves(best_L, u), st)
++        st["lns_obj"] = ub / scale
++        st["heuristic_s"] = time.perf_counter() - th
++        if certified(best_L):
++            return result("optimal", "heuristic", best_L)
++
+     # --- step 2: the restricted master as a MIP
+     if math.isfinite(rmp) and opts.rmp_mip_time > 0:
+         cut = ub - step + 1e-7 * max(1.0, abs(ub)) if math.isfinite(ub) else GRB.INFINITY
+diff --git a/tests/test_lpfirst.py b/tests/test_lpfirst.py
+index a7ec95f..6320c38 100644
+--- a/tests/test_lpfirst.py
++++ b/tests/test_lpfirst.py
+@@ -23,7 +23,7 @@ from fedhpc.pareto import map_pareto_frontier, true_pareto_frontier
+ configure_env()
+ 
+ _W = [(1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (0.3, 0.7)]
+-NO_MIP = lpfirst.LPFirstOptions(rmp_mip_time=0.0)
++NO_MIP = lpfirst.LPFirstOptions(rmp_mip_time=0.0, heuristics=False)   # each proof step alone
+ 
+ 
+ def _cases(known_pareto_inst):
+diff --git a/scripts/lpfirst_generated.py b/scripts/lpfirst_generated.py
+new file mode 100644
+index 0000000..813c04f
+--- /dev/null
++++ b/scripts/lpfirst_generated.py
+@@ -0,0 +1,199 @@
++"""lpfirst on the 108 generated instances, against the compact Gurobi results
++of ``results/generated_bench/bench_io_noreduc.jsonl`` (BPC plan, Phase 6).
++
++    uv run python scripts/lpfirst_generated.py run --label p6 --workers 3 --threads 4
++    uv run python scripts/lpfirst_generated.py run --label p6 B_pos_n100_lE_iM
++    uv run python scripts/lpfirst_generated.py summary p6
++
++Per instance: lex (f1, f2), lex (f2, f1) and, on non-trivial instances, the
++weighted sums at λ = 0.25 / 0.5 / 0.75 with Gurobi's own reference points
++(f1_T, f2_T, f1_0) and the same Pareto box (f1 <= f1_0, f2 <= f2_T), so ĝ is
++comparable. Every phase gets ``--time-limit`` seconds (Gurobi had 600).
++
++A solve is ``ok`` when both prove the same value (lex: f1 and f2; weighted:
++ĝ within 1e-6 relative), or lpfirst proves what Gurobi did not. ``better``
++marks a proof Gurobi lacked. Results: ``results/lpfirst_bench/gen_<label>.jsonl``.
++"""
++from __future__ import annotations
++
++import argparse
++import json
++import sys
++import time
++from concurrent.futures import ProcessPoolExecutor, as_completed
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++OUT = ROOT / "results" / "lpfirst_bench"
++REF = ROOT / "results" / "generated_bench" / "bench_io_noreduc.jsonl"
++LAMS = (0.25, 0.5, 0.75)
++
++
++def _phase(inst, ti, w1, w2, b1, b2, seeds, opts, limit):
++    from fedhpc import lpfirst
++    st: dict = {}
++    t = time.perf_counter()
++    res = lpfirst.solve_lpfirst(inst, w1, w2, b1, b2, time_limit=limit, options=opts, ti=ti,
++                                seed_schedules=seeds, stats=st)
++    st["wall_s"] = time.perf_counter() - t
++    st["how"] = res.how
++    return res, {k: v for k, v in st.items() if isinstance(v, (int, float, str))}
++
++
++def _f(inst, a):
++    completion = {jid: t + inst.p_occ[jid, mid] for jid, (mid, t) in a.items()}
++    return inst.f1_of(completion), inst.f2_of(a)
++
++
++def run_one(name: str, ref: dict, threads: int, limit: float, opts_kw: dict) -> dict:
++    from fedhpc import bpc, instance_gen, lpfirst
++    from fedhpc.formulations import configure_env
++    from fedhpc.model import weighted_sum_degenerate, weighted_sum_terms
++    configure_env()
++    opts = lpfirst.LPFirstOptions(mip_threads=threads, lp_threads=threads, **opts_kw)
++    t0 = time.perf_counter()
++    inst = instance_gen.build(name)
++    ti = lpfirst._TI(inst, bpc._prepare(inst))
++    seeds = lpfirst.seed_schedules(inst, ti) if hasattr(lpfirst, "seed_schedules") \
++        else bpc.heuristic_schedules(inst)
++    rec = {"name": name, "build_s": time.perf_counter() - t0, "solves": {}}
++
++    def lex(primary):
++        w = (1.0, 0.0) if primary == "f1" else (0.0, 1.0)
++        t = time.perf_counter()
++        r1, s1 = _phase(inst, ti, *w, None, None, seeds, opts, limit)
++        out = {"phase1": s1}
++        if r1.status == "optimal":
++            f1, f2 = _f(inst, r1.assignment)
++            b1, b2 = (f1, None) if primary == "f1" else (None, f2)
++            r2, s2 = _phase(inst, ti, *w[::-1], b1, b2, [r1.assignment, *seeds], opts, limit)
++            out["phase2"] = s2
++            a = r2.assignment or r1.assignment
++            status = r2.status
++        else:
++            a, status = r1.assignment, "feasible" if r1.assignment else "none"
++        if a:
++            seeds.insert(0, a)
++            out["f1"], out["f2"] = _f(inst, a)
++        out["status"] = status
++        out["t"] = time.perf_counter() - t
++        g = ref[f"lex_{primary}"]
++        out["gurobi"] = {"status": g["status"], "f1": g["f1"], "f2": g["f2"], "t": g["t"]}
++        both = status == g["status"] == "optimal"
++        same = a is not None and abs(out["f1"] - g["f1"]) < 1e-4 and abs(out["f2"] - g["f2"]) < 1e-4
++        out["ok"] = (both and same) or (status == "optimal" and g["status"] != "optimal") \
++            or (status != "optimal")
++        out["better"] = status == "optimal" and g["status"] != "optimal"
++        out["agree"] = same if both else None
++        return out
++
++    rec["solves"]["lex_f1"] = lex("f1")
++    rec["solves"]["lex_f2"] = lex("f2")
++    f1_T, f2_T, f1_0 = ref["lex_f1"]["f1"], ref["lex_f1"]["f2"], ref["lex_f2"]["f1"]
++    if not weighted_sum_degenerate(f1_T, f2_T, f1_0, 0.0):
++        for lam in LAMS:
++            w1, w2, c = weighted_sum_terms(lam, f1_T, f2_T, f1_0, 0.0)
++            t = time.perf_counter()
++            r, s = _phase(inst, ti, w1, w2, f1_0, f2_T, seeds, opts, limit)
++            out = {"phase1": s, "status": r.status, "t": time.perf_counter() - t}
++            if r.assignment:
++                seeds.insert(0, r.assignment)
++                out["f1"], out["f2"] = _f(inst, r.assignment)
++                out["g"] = w1 * out["f1"] + w2 * out["f2"] + c
++            out["bound_g"] = r.bound + c
++            g = ref["lams"][str(lam)]["gurobi"]
++            out["gurobi"] = {k: g[k] for k in ("status", "f1", "f2", "g", "t")}
++            both = r.status == g["status"] == "optimal"
++            same = "g" in out and abs(out["g"] - g["g"]) <= 1e-6 * max(1.0, abs(g["g"]))
++            out["ok"] = (both and same) or r.status != "optimal" or g["status"] != "optimal"
++            if r.status == "optimal" and g["status"] != "optimal":
++                out["ok"] = "g" in out and out["g"] <= g["g"] + 1e-6
++            out["better"] = r.status == "optimal" and g["status"] != "optimal"
++            out["agree"] = same if both else None
++            rec["solves"][f"ws_{lam}"] = out
++    rec["t"] = time.perf_counter() - t0
++    return rec
++
++
++def run(args) -> None:
++    OUT.mkdir(parents=True, exist_ok=True)
++    out = OUT / f"gen_{args.label}.jsonl"
++    refs = {(r := json.loads(l))["name"]: r for l in REF.read_text().splitlines() if l.strip()}
++    names = args.names or sorted(refs)
++    done = set()
++    if out.exists():
++        done = {json.loads(l)["name"] for l in out.read_text().splitlines() if l.strip()}
++    todo = [n for n in names if n not in done]
++    todo.sort(key=lambda n: (("pos" not in n), not n.startswith("B"), n))
++    opts_kw = json.loads(args.options) if args.options else {}
++    print(f"{len(todo)} to run ({len(done)} already in {out.name})", flush=True)
++    with ProcessPoolExecutor(args.workers) as ex, out.open("a") as f:
++        futs = {ex.submit(run_one, n, refs[n], args.threads, args.time_limit, opts_kw): n
++                for n in todo}
++        for k, fut in enumerate(as_completed(futs), 1):
++            n = futs[fut]
++            try:
++                rec = fut.result()
++            except Exception as e:  # noqa: BLE001
++                print(f"[{k}/{len(todo)}] {n} FAILED {type(e).__name__}: {e}", flush=True)
++                continue
++            rec["label"] = args.label
++            f.write(json.dumps(rec) + "\n")
++            f.flush()
++            s = rec["solves"]
++            print(f"[{k}/{len(todo)}] {n} {rec['t']:.0f}s "
++                  + " ".join(f"{key}:{v['status'][:3]}{'' if v['ok'] else '!DIFF'}"
++                             f"{'+' if v['better'] else ''}" for key, v in s.items()), flush=True)
++
++
++def summary(args) -> None:
++    for label in args.labels:
++        rows = [json.loads(l) for l in (OUT / f"gen_{label}.jsonl").read_text().splitlines()
++                if l.strip()]
++        n = proven = better = diff = 0
++        lp_t = gu_t = 0.0
++        unproven, slow = [], []
++        for r in rows:
++            for key, v in r["solves"].items():
++                n += 1
++                lp_t += v["t"]
++                gu_t += v["gurobi"]["t"]
++                proven += v["status"] == "optimal"
++                better += bool(v["better"])
++                if not v["ok"]:
++                    diff += 1
++                    print(f"  DIFF {r['name']} {key}: lp {v.get('f1')},{v.get('f2')} "
++                          f"gurobi {v['gurobi']['f1']},{v['gurobi']['f2']}")
++                if v["status"] != "optimal":
++                    unproven.append(f"{r['name']}:{key}")
++                slow.append((v["t"], f"{r['name']}:{key}", v["gurobi"]["t"], v["gurobi"]["status"]))
++        print(f"{label}: {len(rows)} instances, {n} solves; lpfirst proved {proven} "
++              f"({better} that Gurobi did not) in {lp_t:.0f} s; Gurobi {gu_t:.0f} s; "
++              f"disagreements {diff}")
++        if unproven:
++            print("  unproven:", " ".join(unproven))
++        print("  slowest lpfirst solves (lp s, gurobi s):")
++        for t, key, gt, gs in sorted(slow, reverse=True)[:args.top]:
++            print(f"    {key:32s} {t:7.1f}  {gt:7.1f} {gs}")
++
++
++def main() -> None:
++    ap = argparse.ArgumentParser()
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    r = sub.add_parser("run")
++    r.add_argument("names", nargs="*")
++    r.add_argument("--label", required=True)
++    r.add_argument("--workers", type=int, default=3)
++    r.add_argument("--threads", type=int, default=4)
++    r.add_argument("--time-limit", type=float, default=600.0, help="seconds per phase")
++    r.add_argument("--options", default="", help="LPFirstOptions overrides as JSON")
++    s = sub.add_parser("summary")
++    s.add_argument("labels", nargs="+")
++    s.add_argument("--top", type=int, default=15)
++    args = ap.parse_args()
++    run(args) if args.cmd == "run" else summary(args)
++
++
++if __name__ == "__main__":
++    sys.path.insert(0, str(ROOT / "src"))
++    main()

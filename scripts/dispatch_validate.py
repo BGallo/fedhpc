@@ -75,8 +75,11 @@ def run_one(rec, threads, kw, trivial=False, solver="dispatch", seed=42):
         g = sol.f2 if out["trivial"] else _g(L, sol.f1, sol.f2, ref)
         rel = (lambda x: 100 * (x - gstar) / gstar) if gstar > 1e-12 else (lambda x: None)
         # pen_g = w1 f1 + w2 f2 (+ penalties); g = pen_g - w1 f1_T (f2_0 = 0)
-        w1 = L / (ref[2] - ref[0])
-        trace = [] if out["trivial"] else _trace(st, dt, lambda pg: rel(pg - w1 * ref[0]))
+        # (f1_0 = f1_T on trivial instances, so w1 is only defined for the others)
+        w1 = 0.0 if out["trivial"] else L / (ref[2] - ref[0])
+        # trivial: g* = 0 has no relative gap, so the trace keeps the raw pen_g
+        trace = (_trace(st, dt, lambda pg: pg) if out["trivial"]
+                 else _trace(st, dt, lambda pg: rel(pg - w1 * ref[0])))
         out["lams"][lam] = dict(g=g, gstar=gstar, gap=rel(g), t=dt,
                                 old_g=old["g"], old_gap=rel(old["g"]), old_t=old["t"], trace=trace,
                                 stats={k: v for k, v in st.items() if isinstance(v, (int, float))})
