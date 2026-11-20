@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import math
 from abc import ABC, abstractmethod
+from bisect import bisect_left
 from collections import Counter
 
 import gurobipy as gp
@@ -105,6 +106,36 @@ def add_fixed_cost_vars(mdl: gp.Model, inst: Instance, x: XVars) -> None:
                     gp.quicksum(by_pair[j.id, mid]) <= z,
                     name=f"use[{j.id},{mid}]",
                 )
+
+
+def add_pool_rows(mdl: gp.Model, inst: Instance, x: dict) -> None:
+    """Shared capacity of every binding pool (see data.CapacityPool and binding_pools):
+
+        Σ_{j, m ∈ pool, s ≤ τ < s + p^occ_jm} q_j x[j,m,s] + occupied[τ] ≤ capacity
+
+    at every slot τ < H where some pooled option starts. That suffices: between two such slots the new units
+    only end and running jobs only release theirs, so the pool's usage peaks at a start.
+    """
+    pools = binding_pools(inst)
+    if not pools:
+        return
+    nodes_of = {j.id: j.nodes for j in inst.jobs}
+    H = inst.horizon
+    for k, pool in enumerate(pools):
+        arcs = [(jid, mid, s, var) for (jid, mid, s), var in x.items() if mid in pool.type_ids]
+        slots = sorted({s for (_j, _m, s, _v) in arcs if s < H})
+        if not slots:
+            continue
+        terms: dict[int, tuple[list, list]] = {tau: ([], []) for tau in slots}
+        for jid, mid, s, var in arcs:
+            end = min(H, s + inst.p_occ[jid, mid])
+            for tau in slots[bisect_left(slots, s):bisect_left(slots, end)]:
+                terms[tau][0].append(nodes_of[jid])
+                terms[tau][1].append(var)
+        for tau in slots:
+            coefs, vars_ = terms[tau]
+            mdl.addConstr(gp.LinExpr(coefs, vars_) + pool.occupied.get(tau, 0) <= pool.capacity,
+                          name=f"pool[{k},{tau}]")
 
 
 class Formulation(ABC):
@@ -297,19 +328,46 @@ def nonnegative_data(inst: Instance) -> bool:
     )
 
 
+def binding_pools(inst: Instance) -> list:
+    """The pools (Instance.pools) whose capacity can bind: fewer units free at
+    t = 0 than the jobs with an option on the pool hold together (running jobs
+    only ever release units). The others never bind and are left out of the
+    model: their types are unbounded."""
+    out = []
+    for pool in inst.pools:
+        demand = sum(j.nodes for j in inst.jobs if any(m in pool.type_ids for m in inst.F[j.id]))
+        if pool.capacity - pool.occupied.get(0, 0) < demand:
+            out.append(pool)
+    return out
+
+
+def pooled_types(inst: Instance) -> set[int]:
+    """Types of every pool (binding or not): they have no flow network."""
+    return {m for pool in inst.pools for m in pool.type_ids}
+
+
 def unbounded_types(inst: Instance) -> set[int]:
     """Types whose capacity can never bind: unlimited, or with at least as many
     instances free at t = 0 as the jobs feasible on them hold together (running
-    jobs only ever release capacity)."""
+    jobs only ever release capacity), and not in a binding pool."""
     n_feasible = Counter()
     for j in inst.jobs:
         for m in inst.F[j.id]:
             n_feasible[m] += j.nodes
+    bound = {m for pool in binding_pools(inst) for m in pool.type_ids}
     return {
         m.id for m in inst.instance_types
-        if m.capacity is None
-        or m.capacity - inst.n_running.get(m.id, 0) >= n_feasible[m.id]
+        if m.id not in bound and (
+            m.capacity is None
+            or m.capacity - inst.n_running.get(m.id, 0) >= n_feasible[m.id])
     }
+
+
+def _covers(a, b) -> bool:
+    """Whether start set ``a`` contains every start of ``b``."""
+    if isinstance(a, range) and isinstance(b, range):
+        return not b or (a.start <= b.start and b.stop <= a.stop)
+    return set(b) <= set(a)
 
 
 def _truncate(starts, cut: int):
@@ -429,6 +487,7 @@ class SpaceTimeFormulation(Formulation):
         where ``applied`` says whether an objective-specific rule ran."""
         unb = unbounded_types(inst)
         fixed = {m.id: m.fixed_cost for m in inst.instance_types}
+        pool_of = {m: k for k, pool in enumerate(binding_pools(inst)) for m in pool.type_ids}
         lex = self.lex_deadlines and objective == LEX_F1
         weighted = (self.rejection_deadlines and isinstance(objective, tuple)
                     and min(objective) >= 0)
@@ -437,6 +496,20 @@ class SpaceTimeFormulation(Formulation):
         out = {}
         for j in inst.jobs:
             Sj = {m: S[j.id, m] for m in inst.F[j.id] if S[j.id, m]}
+            if self.pareto_unbounded and pool_of:
+                # R2 on a binding pool: an option is dropped when another type of the same pool, without fixed
+                # cost, holds the job no longer (p_occ), costs no more and allows every start it allows. At
+                # any start the other type completes no later, costs no more and holds a subset of the pool's
+                # slots, so the swap keeps every schedule feasible and raises neither objective.
+                kept_pool: list[int] = []
+                for m in sorted((m for m in Sj if m in pool_of),
+                                key=lambda m: (inst.p_occ[j.id, m], inst.c[j.id, m], fixed[m] > 0, m)):
+                    if any(pool_of[k] == pool_of[m] and not fixed[k]
+                           and inst.p_occ[j.id, k] <= inst.p_occ[j.id, m] and inst.c[j.id, k] <= inst.c[j.id, m]
+                           and _covers(Sj[k], Sj[m]) for k in kept_pool):
+                        del Sj[m]
+                    else:
+                        kept_pool.append(m)
             cloud = [m for m in Sj if m in unb]
             if self.collapse_unbounded:
                 for m in cloud:
@@ -496,8 +569,12 @@ class SpaceTimeFormulation(Formulation):
     def build(self, inst: Instance, objective: Objective = None) -> tuple[gp.Model, dict]:
         H = inst.horizon
         # S[j,m]: allowed start times (T_jm, or its normal-pattern subset)
+        pooled = pooled_types(inst)
         if self.normal_patterns or self.compressed_flow:
             S, pattern_nodes, pattern_loss = _normal_pattern_graph_data(inst)
+            # Per-type normal patterns do not see a pool's shared capacity: pooled types keep every start.
+            for key in [k for k in S if k[1] in pooled]:
+                S[key] = inst.T[key]
         else:
             S = inst.T
         reducing = any((self.collapse_unbounded, self.pareto_unbounded,
@@ -510,6 +587,8 @@ class SpaceTimeFormulation(Formulation):
             S = {(j.id, m): S[j.id, m] for j in inst.jobs for m in inst.F[j.id]}
         # Types whose flow network is dropped (R1): no x arc touches it.
         no_flow = unbounded_types(inst) if reduced and self.collapse_unbounded else set()
+        # Pooled types (capacity=None) are limited by their pool's rows only; their options may end after H.
+        no_flow |= pooled
         mdl = gp.Model("fedhpc", env=_shared_env)
         mdl.setParam("OutputFlag", 0)
 
@@ -647,6 +726,8 @@ class SpaceTimeFormulation(Formulation):
                     name=f"flow[{mid},{v}]",
                 )
 
+        add_pool_rows(mdl, inst, x)
+
         # Fixed usage costs: z[m] linked to x (no-op without fixed costs)
         add_fixed_cost_vars(mdl, inst, x)
 
@@ -669,6 +750,9 @@ class OccupancyFormulation(Formulation):
     """
 
     def build(self, inst: Instance, objective: Objective = None) -> tuple[gp.Model, dict]:
+        if inst.pools:
+            raise NotImplementedError("OccupancyFormulation does not model capacity pools: "
+                                      "use SpaceTimeFormulation")
         H = inst.horizon
         mdl = gp.Model("fedhpc", env=_shared_env)
         mdl.setParam("OutputFlag", 0)

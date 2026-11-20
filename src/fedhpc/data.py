@@ -95,6 +95,23 @@ class RunningJob:
 
 
 @dataclass
+class CapacityPool:
+    """A capacity shared by several instance types (e.g. a cap on the VMs of all cloud types together).
+
+    At every slot t, the units held by the new jobs on the pool's types plus ``occupied[t]`` (units held by
+    jobs already running on them, not re-optimized) are at most ``capacity``. Every member type must have
+    ``capacity=None``: the pool is its only limit, so a member type has no flow network
+    (formulations.SpaceTimeFormulation), and an option of it may end after the horizon (its occupancy is
+    counted up to H). When the pool can bind (formulations.binding_pools), its options may start at any slot
+    of ``[a_j, start_window)`` (``None``: the horizon); otherwise its types are unbounded, as without the pool.
+    """
+    type_ids: frozenset[int]
+    capacity: int
+    occupied: dict[int, int] = field(default_factory=dict)  # {slot: units held by running jobs}
+    start_window: int | None = None
+
+
+@dataclass
 class Instance:
     jobs: list[Job]
     instance_types: list[InstanceType]
@@ -113,6 +130,9 @@ class Instance:
     # (integral weights × integer completions). The exact Pareto searches and
     # lexicographic certificates rely on both steps.
     cost_resolution: float = 1e-4
+
+    # Capacities shared by several types (see CapacityPool); default: none.
+    pools: list[CapacityPool] = field(default_factory=list)
 
     # ---- Populated by build() for new (optimizable) jobs --------------------
 
@@ -177,6 +197,15 @@ class Instance:
             m.fixed_cost = round(m.fixed_cost / delta) * delta
 
         type_map = {m.id: m for m in self.instance_types}
+        pool_window: dict[int, int] = {}
+        for pool in self.pools:
+            for mid in pool.type_ids:
+                if mid not in type_map or type_map[mid].capacity is not None:
+                    raise ValueError(f"pool member {mid} must be a known type with capacity=None")
+                if mid in pool_window:
+                    raise ValueError(f"type {mid} is in more than one pool")
+                pool_window[mid] = (self.horizon if pool.start_window is None
+                                    else max(1, min(self.horizon, pool.start_window)))
 
         for j in self.jobs:
             # (eq. 1) Resource-based feasibility
@@ -219,7 +248,11 @@ class Instance:
                 # any y[m,t]/occupancy, while still counting as a completion
                 # (ghost arrival) at v = t + p_occ — fabricating free capacity.
                 a_min = max(0, math.ceil(j.arrival))
-                t_max_excl = self.horizon - self.p_occ[j.id, m_id] + 1
+                if m_id in pool_window:
+                    # A pooled option may end after the horizon (see CapacityPool).
+                    t_max_excl = max(a_min + 1, pool_window[m_id])
+                else:
+                    t_max_excl = self.horizon - self.p_occ[j.id, m_id] + 1
                 self.T[j.id, m_id] = range(a_min, t_max_excl)
 
         infeasible = [j.id for j in self.jobs if not self.F[j.id]]
@@ -310,6 +343,7 @@ class Instance:
         cap = {m.id: m.capacity for m in self.instance_types if m.capacity is not None}
         # per finite type, a difference array of busy slots over [0, H)
         delta = {mid: [0] * (H + 1) for mid in cap}
+        pool_delta = [[0] * (H + 1) for _ in self.pools]
         for jid, (mid, t) in assignment.items():
             if jid not in known:
                 out.append(f"unknown job {jid}")
@@ -324,6 +358,10 @@ class Instance:
             if mid in delta:
                 delta[mid][t] += nodes[jid]
                 delta[mid][t + self.p_occ[jid, mid]] -= nodes[jid]
+            for k, pool in enumerate(self.pools):
+                if mid in pool.type_ids:
+                    pool_delta[k][t] += nodes[jid]
+                    pool_delta[k][min(H, t + self.p_occ[jid, mid])] -= nodes[jid]
         for mid, d in delta.items():
             busy = 0
             for t in range(H):
@@ -331,6 +369,16 @@ class Instance:
                 used = busy + self.occupied.get((mid, t), 0)
                 if used > cap[mid]:
                     out.append(f"type {mid} uses {used} > capacity {cap[mid]} "
+                               f"in slot {t}")
+                    break
+        for k, pool in enumerate(self.pools):
+            busy = 0
+            for t in range(H):
+                busy += pool_delta[k][t]
+                used = busy + pool.occupied.get(t, 0)
+                # Running jobs alone may exceed it: only new units can be held to the cap.
+                if busy > 0 and used > pool.capacity:
+                    out.append(f"pool {sorted(pool.type_ids)} uses {used} > capacity {pool.capacity} "
                                f"in slot {t}")
                     break
         return out
