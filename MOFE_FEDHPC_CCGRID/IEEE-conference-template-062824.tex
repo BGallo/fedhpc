@@ -283,9 +283,9 @@ Intuitively, $\alpha_1$ is the price, in fitness units, of one unit of weighted 
 
 \emph{Cap penalty.} The model only searches schedules with $f_1\leq f_1^0$. The decoder cannot guarantee this bound, so it is imposed as a soft constraint:
 \begin{equation}
- P_{\mathrm{cap}}(S)=\beta\max\bigl\{0,\;f_1(S)-f_1^0\bigr\},\qquad \beta=10^3\alpha_1.
+ P_{\mathrm{cap}}(S)=\beta\max\bigl\{0,\;f_1(S)-f_1^0\bigr\},\qquad \beta=\begin{cases}10^3\alpha_1, & \lambda>0,\\ 10^3\alpha_2, & \lambda=0.\end{cases}
 \end{equation}
-Schedules within the cap are unaffected. Beyond it, each extra unit of turnaround costs a thousand times its normal price, so such schedules survive only while nothing better is available.
+Schedules within the cap are unaffected. Beyond it, each extra unit of turnaround costs a thousand times its normal price, so such schedules survive only while nothing better is available. At $\lambda=0$ turnaround has no price ($\alpha_1=0$), so the cap is priced in money units instead and still binds.
 
 \emph{Infeasibility penalty.} A job is \emph{unplaced} when it has no cloud option and no on-premises start is left before the horizon. With $v(S)$ the number of unplaced jobs,
 \begin{equation}
