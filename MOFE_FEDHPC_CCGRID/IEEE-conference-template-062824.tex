@@ -26,6 +26,8 @@
 \usepackage{textcomp}
 \usepackage{xcolor}
 \usepackage{tabularx}
+\usepackage{siunitx}
+\newcommand{\code}[1]{\texttt{#1}}
 \def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
     T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
 \begin{document}
@@ -100,14 +102,16 @@ In this section we review the previous works on Federated HPC, Mathematical Opti
 \centering
 \begin{tabular}{|l|l|l|l|l|l|}
 \hline
-                 & Objective                                                 & Submission Time & Data Movement & Method              & Enviroment      \\ \hline
+                 & Objective                                                 & Submission Time & Data Movement & Method              & Environment     \\ \hline
 Brotcorne et al. & Makespan and Cost                                         & No           & No            & Exact               & Cloud           \\ \hline
 Luo et al.       & Total Completion Time and Cost                            & No           & No            & Waiting Policy      & Hybrid          \\ \hline
 Kramer et al.    & Total Weighted Completion Time                            & Yes          & No            & Exact               & On-prem         \\ \hline
 Chen et al.      & Total Weighted Completion Time and Cost                   & No           & No            & Exact               & Cloud           \\ \hline
 Wang et al.      & Affinity, resource availability, latency and load balance & No           & Yes           & Greedy              & Federated       \\ \hline
-This Work        & Total Weighted Turnround Time and Cost                    & Yes          & Yes           & Exact and heuristic & Federated+Cloud \\ \hline
+This Work        & Total Weighted Turnaround Time and Cost                   & Yes          & Yes           & Exact and heuristic & Federated+Cloud \\ \hline
 \end{tabular}
+\caption{Related work by objective, submission times, data movement, method and environment.}
+\label{tab:related-work}
 \end{table*}
 
 
@@ -520,7 +524,7 @@ the \code{W2} workload, $N=300$, load E and io level M.
 Factor & Levels & Meaning \\
 \midrule
 Class & A, B & machine list\\
-Workload & W1, W2 & job set (\cref{sec:workloads}) \\
+Workload & W1, W2 & job set (Table~\ref{tab:workloads}) \\
 Node count $N$ & 100, 300, 500 & nodes of every on-prem type \\
 Load & F, H, E & jobs running at $t=0$ on each on-prem type: 0 (free),
   $\lfloor N/2\rfloor$ (half) or $N$ (entirely full) \\
@@ -570,7 +574,9 @@ Class & Wkl. & $N$ & $\bar g$ & Gap (\%) & \#BKS & $t$ & $\bar g$ & Gap (\%) & \
 \end{tabular}
 \end{table*}
 
-The table \ref{tab:ga-vs-gurobi} shows the  aggregated results between three different weights (0.25, 0.5 and 0.75) and three different I/O levels, their weighted-sum objective value and time of each solve, there is a clear trend of Gurobi taking the longest but always encountering the best solution, with the GA having a mean gap of 4.36\% to the Gurobi solution while being on average 17 times faster.  While threshold bursting is the fastest it is also the worse in terms of quality having a mean gap of 257\% to the best solution.  In terms of absolute time to solution Gurobi solves on average on 71 seconds, the GA  5.5 seconds and threshold 8.5 miliseconds.  
+The table \ref{tab:ga-vs-gurobi} shows the  aggregated results between three different weights (0.25, 0.5 and 0.75) and three different I/O levels, their weighted-sum objective value and time of each solve, there is a clear trend of Gurobi taking the longest but always encountering the best solution, with the GA having a mean gap of 4.36\% to the Gurobi solution while being about 16 times faster on average (91.1 seconds for Gurobi against 5.6 seconds for the GA).
+% REVISION: the threshold-bursting figures (257% gap, 8.5 ms) were removed: no table supports them. Re-add them with a
+% table row (or the online cloud-bursting baselines, plan item B3) before citing them again.  
 
 
 
@@ -614,7 +620,7 @@ MOSPACE & \textbf{14{,}513.2} & \textbf{949.6} & \textbf{3{,}594.2} & \textbf{23
 \begin{table*}[htbp]
 \centering
 \small
-\caption{Turnaround and waiting time of the window jobs with cloud offloading enabled. MOSPACE is swept over $\alpha$; the Slurm baselines over the size of the cloud cluster, each offloaded job on the cheapest VM type that fits. BSLD: mean bounded slowdown $\max(1, (w + r)/\max(r, 10\,\mathrm{s}))$.}
+\caption{Turnaround and waiting time of the window jobs with cloud offloading enabled. MOSPACE is swept over $\lambda$; the Slurm baselines over the size of the cloud cluster, each offloaded job on the cheapest VM type that fits. BSLD: mean bounded slowdown $\max(1, (w + r)/\max(r, 10\,\mathrm{s}))$.}
 \label{tab:cloud-slurm-baselines}
 \resizebox{\textwidth}{!}{%
 \begin{tabular}{llrrrrrrrrrr}
@@ -623,9 +629,9 @@ Policy & Setting & \multicolumn{2}{c}{Turnaround} & \multicolumn{5}{c}{Wait} & B
  & & Total (job-h) & Mean (min) & Total (job-h) & Mean (min) & Median (min) & P95 (min) & Max (h) & & (jobs) & (\$) \\
 \hline
 \multicolumn{12}{l}{\textit{Workload 1 (964 jobs)}} \\
-MOSPACE & $\alpha=0.25$ & 1{,}705.4 & 106.1 & 4.7 & 0.3 & 0.0 & 0.0 & 1.44 & 1.00 & 580 & 1{,}186.6 \\
- & $\alpha=0.50$ & 1{,}702.1 & 105.9 & 1.4 & 0.1 & 0.0 & 0.0 & 1.40 & 1.00 & 583 & 1{,}669.5 \\
- & $\alpha=0.75$ & 1{,}700.7 & 105.9 & 0.0 & 0.0 & 0.0 & 0.0 & 0.00 & 1.00 & 583 & 1{,}688.1 \\
+MOSPACE & $\lambda=0.25$ & 1{,}705.4 & 106.1 & 4.7 & 0.3 & 0.0 & 0.0 & 1.44 & 1.00 & 580 & 1{,}186.6 \\
+ & $\lambda=0.50$ & 1{,}702.1 & 105.9 & 1.4 & 0.1 & 0.0 & 0.0 & 1.40 & 1.00 & 583 & 1{,}669.5 \\
+ & $\lambda=0.75$ & 1{,}700.7 & 105.9 & 0.0 & 0.0 & 0.0 & 0.0 & 0.00 & 1.00 & 583 & 1{,}688.1 \\
 \cline{2-12}
 Federated Slurm & 50 nodes & 2{,}463.7 & 153.3 & 763.0 & 47.5 & 44.8 & 77.5 & 1.30 & 4.29 & 210 & 1{,}023.4 \\
  & 100 nodes & 2{,}202.5 & 137.1 & 501.8 & 31.2 & 27.6 & 67.1 & 1.16 & 3.43 & 404 & 2{,}099.5 \\
@@ -638,9 +644,9 @@ Multi-cluster Slurm & 50 nodes & 2{,}571.6 & 160.1 & 870.9 & 54.2 & 51.8 & 114.7
  & 400 nodes & 1{,}700.7 & 105.9 & 0.0 & 0.0 & 0.0 & 0.0 & 0.00 & 1.00 & 583 & 1{,}688.1 \\
 \hline
 \multicolumn{12}{l}{\textit{Workload 2 (3349 jobs)}} \\
-MOSPACE & $\alpha=0.25$ & 8{,}047.6 & 144.2 & 57.9 & 1.0 & 0.0 & 6.2 & 1.35 & 1.01 & 1667 & 6{,}471.2 \\
- & $\alpha=0.50$ & 7{,}990.6 & 143.2 & 0.9 & 0.0 & 0.0 & 0.1 & 0.27 & 1.00 & 1585 & 12{,}347.9 \\
- & $\alpha=0.75$ & 7{,}989.7 & 143.1 & 0.0 & 0.0 & 0.0 & 0.0 & 0.00 & 1.00 & 1538 & 12{,}635.0 \\
+MOSPACE & $\lambda=0.25$ & 8{,}047.6 & 144.2 & 57.9 & 1.0 & 0.0 & 6.2 & 1.35 & 1.01 & 1667 & 6{,}471.2 \\
+ & $\lambda=0.50$ & 7{,}990.6 & 143.2 & 0.9 & 0.0 & 0.0 & 0.1 & 0.27 & 1.00 & 1585 & 12{,}347.9 \\
+ & $\lambda=0.75$ & 7{,}989.7 & 143.1 & 0.0 & 0.0 & 0.0 & 0.0 & 0.00 & 1.00 & 1538 & 12{,}635.0 \\
 \cline{2-12}
 Federated Slurm & 50 nodes & 11{,}363.3 & 203.6 & 3{,}373.6 & 60.4 & 72.6 & 95.2 & 1.62 & 7.99 & 293 & 2{,}042.3 \\
  & 100 nodes & 10{,}698.0 & 191.7 & 2{,}708.4 & 48.5 & 59.0 & 79.4 & 1.35 & 6.63 & 514 & 4{,}577.4 \\
