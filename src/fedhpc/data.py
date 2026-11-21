@@ -12,6 +12,30 @@ Key design:
 - `kind` is a display-only label; the MIP does not use it.
 - RunningJob represents a pre-scheduled job already running at t=0 that occupies
   on-prem capacity without being re-optimized.
+
+Data transfer — two modes, chosen per instance
+----------------------------------------------
+*Per-type* (the default, no ``links``): ``ι_j`` is the result volume a job
+moves at type m's rate τ^IO_m and price κ^IO_m (cloud egress home; on-prem
+types have τ^IO = κ^IO = 0).
+
+*Site-aware* (``Instance.links`` non-empty; docs/geo_distributed_transfer.md,
+Level 1): every type sits at a ``site`` and every job has an ``origin`` (where
+its inputs are) and a ``dest`` (where its results go; default: the origin).
+The job stages ``io_in`` GB in from the origin and ``io_volume`` GB out to the
+destination over the directed links:
+
+    τ_jm = τ(o_j→s(m))·ι^in_j + τ(s(m)→d_j)·ι^out_j      (slots)
+    κ_jm = κ(o_j→s(m))·ι^in_j + κ(s(m)→d_j)·ι^out_j      ($)
+
+A link's τ is 1/B_eff with B_eff = min(source read, network, sink write)
+(the generator's business; the model only sees slots/GB and $/GB), and a
+same-site transfer is free and instant. τ_jm replaces τ^IO_m·ι_j in p_bill,
+κ_jm replaces κ^IO_m·ι_j in c, so staging is folded into the (j, m) tables
+and the formulations, reductions and heuristics see nothing new. In this mode
+the per-type τ^IO / κ^IO must be 0 (a transfer is priced once). A job's
+``sites`` (default: all) restricts F_j to the types at those sites — e.g. a
+site-licensed code or an incompatible software stack.
 """
 from __future__ import annotations
 
@@ -46,6 +70,11 @@ class Job:
     # Pareto searches and BPC pruning rely on.
     nodes: int = 1       # q_j — instances the job holds at once (a multi-node job: > 1)
     gpu: float = 0.0     # q^gpu_j — GPUs per instance
+    # ---- site-aware transfer (used only when Instance.links is non-empty) ----
+    io_in: float = 0.0             # ι^in_j — GB staged in from the origin (io_volume is ι^out_j)
+    origin: str | None = None      # o_j — site holding the job's inputs
+    dest: str | None = None        # d_j — site its results go to (None = origin)
+    sites: list[str] | None = None  # sites whose types the job may run on (None = all)
 
 
 @dataclass
@@ -64,6 +93,7 @@ class InstanceType:
     capacity: int | None = None  # max simultaneous instances (None = unlimited)
     fixed_cost: float = 0.0
     gpu: float = 0.0     # C^gpu_m — GPUs per instance (declared last: positional constructors keep working)
+    site: str | None = None  # where the type runs (site-aware transfer; see the module docstring)
     # U_m — one-off monetary charge added to f2 when at least one (new) job is
     # scheduled on this type (e.g. rental setup / activation fee). For a
     # capacity-1 type this is exactly a per-machine usage fee. Modelled in the
@@ -94,6 +124,16 @@ class RunningJob:
     units: int = 1
 
 
+@dataclass(frozen=True)
+class Link:
+    """A directed transfer link between two sites: ``time`` slots per GB
+    (1 / effective bandwidth) and ``cost`` $ per GB (e.g. cloud egress)."""
+    src: str
+    dst: str
+    time: float
+    cost: float = 0.0
+
+
 @dataclass
 class Instance:
     jobs: list[Job]
@@ -114,10 +154,19 @@ class Instance:
     # lexicographic certificates rely on both steps.
     cost_resolution: float = 1e-4
 
+    # Directed site-to-site links {(src, dst): Link}. Non-empty switches on the
+    # site-aware transfer model (module docstring); same-site pairs need no entry.
+    links: dict[tuple[str, str], Link] = field(default_factory=dict)
+
     # ---- Populated by build() for new (optimizable) jobs --------------------
 
     p_bill: dict[tuple[int, int], float] = field(default_factory=dict)
-    # p^bill_jm = e_j/P_m + τ^IO_m · ι_j   (float, no deploy, used for cost)
+    # p^bill_jm = e_j/P_m + τ_jm   (float, no deploy, used for cost)
+
+    io_t: dict[tuple[int, int], float] = field(default_factory=dict)
+    io_c: dict[tuple[int, int], float] = field(default_factory=dict)
+    # τ_jm (slots) and κ_jm ($) of the job's transfers on type m:
+    # per-type mode τ^IO_m·ι_j / κ^IO_m·ι_j, site-aware mode the link sums.
 
     p_occ: dict[tuple[int, int], int] = field(default_factory=dict)
     # p^occ_jm = ceil(p^bill_jm + π_m)      (integer, with deploy, used for scheduling)
@@ -177,20 +226,37 @@ class Instance:
             m.fixed_cost = round(m.fixed_cost / delta) * delta
 
         type_map = {m.id: m for m in self.instance_types}
+        geo = self.site_aware
+        if geo:
+            self._check_sites()
 
         for j in self.jobs:
-            # (eq. 1) Resource-based feasibility
+            # (eq. 1) Resource-based feasibility (and, site-aware, the job's allowed sites)
             self.F[j.id] = [
                 m.id for m in self.instance_types
                 if j.cpu <= m.cpu and j.mem <= m.mem and j.stor <= m.stor and j.gpu <= m.gpu
                 and (m.capacity is None or j.nodes <= m.capacity)
+                and (not geo or j.sites is None or m.site in j.sites)
             ]
 
             for m_id in self.F[j.id]:
                 m = type_map[m_id]
 
+                # Transfer time τ_jm and cost κ_jm
+                if geo:
+                    dest = j.origin if j.dest is None else j.dest
+                    t_in, c_in = self._link(j.origin, m.site)
+                    t_out, c_out = self._link(m.site, dest)
+                    io_t = t_in * j.io_in + t_out * j.io_volume
+                    io_c = c_in * j.io_in + c_out * j.io_volume
+                else:
+                    io_t = m.io_time * j.io_volume
+                    io_c = m.cost_io * j.io_volume
+                self.io_t[j.id, m_id] = io_t
+                self.io_c[j.id, m_id] = io_c
+
                 # (eq. 2) Billable time — no deploy penalty
-                p_bill = j.exec_time / m.perf + m.io_time * j.io_volume
+                p_bill = j.exec_time / m.perf + io_t
                 self.p_bill[j.id, m_id] = p_bill
 
                 # (eq. 3) Occupation time — includes deploy, ceiled to positive int
@@ -200,7 +266,7 @@ class Instance:
                 # rounded to the cost grid δ. Every instance of a multi-node
                 # job is billed (VM and storage); the I/O volume is the job's.
                 units = round((
-                    m.cost_io * j.io_volume
+                    io_c
                     + j.nodes * (m.cost_vm * p_bill + m.cost_stor * j.stor * p_bill)
                 ) / delta)
                 self.c_units[j.id, m_id] = units
@@ -282,6 +348,41 @@ class Instance:
             # Occupancy during [0, end_slot): counts towards per-slot capacity usage
             for t in range(end_slot):
                 self.occupied[mid, t] = self.occupied.get((mid, t), 0) + rj.units
+
+    # ---- Site-aware transfer -------------------------------------------------
+
+    @property
+    def site_aware(self) -> bool:
+        """Whether transfers follow the site-aware model (``links`` non-empty)."""
+        return bool(self.links)
+
+    def _link(self, src: str, dst: str) -> tuple[float, float]:
+        """(slots per GB, $ per GB) from ``src`` to ``dst``; a same-site move is free."""
+        if src == dst:
+            return 0.0, 0.0
+        link = self.links.get((src, dst))
+        if link is None:
+            raise ValueError(f"No link from site {src!r} to site {dst!r}")
+        return link.time, link.cost
+
+    def _check_sites(self) -> None:
+        bad_types = [m.id for m in self.instance_types if m.site is None]
+        if bad_types:
+            raise ValueError(f"Site-aware instance: types without a site {bad_types}")
+        double = [m.id for m in self.instance_types if m.io_time or m.cost_io]
+        if double:
+            raise ValueError("Site-aware instance: per-type io_time / cost_io must be 0 "
+                             f"(transfers are priced by the links), types {double}")
+        bad_jobs = [j.id for j in self.jobs if j.origin is None]
+        if bad_jobs:
+            raise ValueError(f"Site-aware instance: jobs without an origin {bad_jobs[:10]}")
+        bad_links = [k for k, ln in self.links.items()
+                     if k != (ln.src, ln.dst) or ln.time < 0 or ln.cost < 0]
+        if bad_links:
+            raise ValueError(f"Malformed or negative links {bad_links}")
+        bad_vol = [j.id for j in self.jobs if j.io_in < 0 or j.io_volume < 0]
+        if bad_vol:
+            raise ValueError(f"Negative transfer volumes (jobs {bad_vol[:10]})")
 
     # ---- Schedule feasibility ----------------------------------------------
 
@@ -385,6 +486,7 @@ class Instance:
         instance_types = [InstanceType(**td) for td in data["instance_types"]]
         jobs = [Job(**jd) for jd in data["jobs"]]
         running_jobs = [RunningJob(**rd) for rd in data.get("running_jobs", [])]
+        links = {(ln.src, ln.dst): ln for ln in (Link(**d) for d in data.get("links", []))}
 
         # Infer slot_size_seconds from metadata when present.
         slot_size_seconds: float = 1.0
@@ -400,6 +502,7 @@ class Instance:
             running_jobs=running_jobs,
             slot_size_seconds=slot_size_seconds,
             cost_resolution=float(data.get("cost_resolution", 1e-4)),
+            links=links,
         )
         inst.build()
         return inst

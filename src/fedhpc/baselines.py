@@ -6,11 +6,16 @@ onto the same space-time capacity model the MIP uses: every on-prem type has a
 finite instance capacity that is pre-occupied at ``t=0`` by ``inst.running_jobs``
 and frees up as those jobs finish; cloud types are unlimited and priced.
 
-Because ``p_occ`` is type-independent on these instances (``perf=1``,
-``deploy=0``, ``io_time=0`` for every type) a job's completion time depends only
-on *when* it starts, and its cost depends only on *which* type it runs on.  The
-whole trade-off is therefore "how much cloud money to spend to buy the capacity
-that lets jobs start sooner" — exactly what the baselines below sweep.
+On the single-site generated instances (``perf=1``, ``deploy=0`` and on-prem
+``io_time=0``) ``p_occ`` differs between on-prem types not at all, so there a
+job's completion time depends only on *when* it starts, and its cost only on
+*which* type it runs on: the trade-off is "how much cloud money to spend to
+buy the capacity that lets jobs start sooner". On site-aware instances
+(``Instance.links``, docs/geo_distributed_transfer.md) ``p_occ`` also depends
+on the site — staging data to a remote centre takes time — so every on-prem
+choice below compares *completions*, not starts, except
+``earliest_start_federation``, which models a transfer-oblivious federation
+on purpose.
 
 Baselines
 ---------
@@ -32,6 +37,13 @@ Baselines
                                 cheapest feasible cloud type.  Sweeping ``theta``
                                 traces a cost/turnaround frontier between the
                                 two anchors above.
+``earliest_start_federation`` — Slurm-federation-inspired, on-prem only: in
+                                arrival order each job goes to the on-prem
+                                type that can *start* it earliest (sibling
+                                jobs, first cluster to start wins; ties toward
+                                the shorter occupation). Blind to staging time
+                                and price, so on site-aware instances it shows
+                                what ignoring data location costs.
 
 Every function returns a :class:`fedhpc.model.Solution` with
 ``status="heuristic"`` so it feeds straight into
@@ -51,6 +63,7 @@ __all__ = [
     "greedy_earliest_completion",
     "threshold_bursting",
     "threshold_bursting_sweep",
+    "earliest_start_federation",
     "make_solution",
 ]
 
@@ -329,14 +342,17 @@ def threshold_bursting(inst: Instance, theta: float, *, order: str = "arrival") 
 
     for jid in job_ids:
         a_slot = arrival_slot[jid]
-        # earliest on-prem option
+        # earliest-completing on-prem option (= earliest start when p_occ does
+        # not depend on the type; staging time makes them differ across sites)
         op_best: tuple[int, int] | None = None                # (start, type)
+        op_comp = math.inf
         for mid in (m for m in inst.F[jid] if m in onprem):
             t = state.earliest_start(jid, mid)
             if t is None:
                 continue
-            if op_best is None or t < op_best[0]:
-                op_best = (t, mid)
+            comp = t + inst.p_occ[jid, mid]
+            if op_best is None or comp < op_comp:
+                op_best, op_comp = (t, mid), comp
 
         use_onprem = op_best is not None and (op_best[0] - a_slot) <= theta
         if use_onprem:
@@ -375,3 +391,34 @@ def threshold_bursting_sweep(
         H = inst.horizon
         thetas = [0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 24, 48, float(H)]
     return [(th, threshold_bursting(inst, th, order=order)) for th in thetas]
+
+
+def earliest_start_federation(inst: Instance) -> Solution:
+    """Slurm-federation-inspired on-prem list schedule, blind to data location.
+
+    Jobs in arrival order; each goes to the on-prem type where it can start
+    earliest (Slurm federation submits a sibling job to every cluster and the
+    first one able to start it wins), ties toward the shorter occupation and
+    then the lower type id. Staging time is paid but never weighed, so on
+    site-aware instances the policy ships a job to a free remote centre even
+    when waiting at home would finish it sooner. Jobs with no on-prem slot
+    before the horizon are left unscheduled (``status="partial"``).
+    """
+    onprem = _onprem_ids(inst)
+    state = _Capacity.fresh(inst)
+    assignment: dict[int, tuple[int, int]] = {}
+    for jid in _arrival_order(inst):
+        best: tuple[int, int, int] | None = None              # (start, p_occ, type)
+        for mid in (m for m in inst.F[jid] if m in onprem):
+            t = state.earliest_start(jid, mid)
+            if t is None:
+                continue
+            key = (t, inst.p_occ[jid, mid], mid)
+            if best is None or key < best:
+                best = key
+        if best is None:
+            continue
+        t, _p, mid = best
+        state.place(jid, mid, t)
+        assignment[jid] = (mid, t)
+    return make_solution(inst, assignment)

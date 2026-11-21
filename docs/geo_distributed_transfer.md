@@ -1,6 +1,7 @@
 # Data transfer between geographically distributed on-prem clusters
 
-Design note (2026-11-19). Nothing here is implemented or benchmarked yet.
+Design note (2026-11-19). **Level 1 implemented on branch `geo-distributed-io`
+(2026-11-21)**, see §4.
 
 ## 1. How transfer is modelled today
 
@@ -132,3 +133,110 @@ every report step).
 Build a site-aware version of one generated instance: give each on-prem type a
 site and each job an origin. Solve it at λ ∈ {0.25, 0.5, 0.75}, then compare
 columns, rows, build and solve time and root gap against the current instance.
+
+## 4. Implementation (branch `geo-distributed-io`)
+
+- **Data layer** (`src/fedhpc/data.py`). `Instance.links` (directed `Link(src,
+  dst, time, cost)`) switches the site-aware mode on. `InstanceType.site`,
+  `Job.origin`, `Job.dest` (default: the origin), `Job.io_in` (stage-in GB;
+  `io_volume` stays the stage-out GB) and `Job.sites` (allowed sites, which
+  restrict F_j). `build()` fills `io_t[j,m]` / `io_c[j,m]` and folds them into
+  `p_bill` / `p_occ` / `c` exactly as §3 proposes. Without links nothing
+  changes (same tables, bit for bit). In site-aware mode the per-type
+  `io_time` / `cost_io` must be 0, so that no transfer is priced twice.
+- **Generator** (`src/fedhpc/geo_gen.py`). Two centres S1/S2 with class-A
+  pools each, plus AWS, built from the real workloads. Origins are 65/35. The
+  input volume follows the output model's size law. Single runs are pinned to
+  their origin. The links come from B_eff = min(read, network, write) (critique
+  §3.4). The `wan` factor sets the per-flow WAN speed (0 = co-located control).
+  The modes are `fed` / `iso` × cloud `C` / `N`.
+- **Baselines** (`src/fedhpc/baselines.py`). `threshold_bursting` now takes the
+  earliest-*completing* on-prem option, which is identical when p_occ does not
+  depend on the type. The new `earliest_start_federation` is a
+  Slurm-federation-inspired policy that ignores transfers.
+- **Tests** (`tests/test_geo.py`). Link arithmetic, validation, the
+  wait-or-move trade-off, reduction exactness on random site-aware instances
+  (reduced vs plain SpaceTime, lex and weighted sum), and dispatch feasibility.
+- **Experiment.** Run `scripts/bench_geo.py --set all`, then
+  `scripts/geo_report.py`. The results are in `results/geo_bench/REPORT.md`.
+
+The C++ dispatch decoder needs no change. It already scores each on-prem
+option per (j, m) when a job starts, so a remote centre is chosen only when it
+scores better *now*. What it cannot do is wait for the home centre in
+preference to a free remote one: the decoder is non-delay.
+
+## 5. Findings (v2 run, `results/geo_bench/REPORT.md`)
+
+32 instances: 2 workloads × n ∈ {50, 150} nodes per type per centre; WAN set
+to co-located / 10 Gb/s / 1 Gb/s; federated or isolated; with or without
+cloud. Gurobi runs with MIPGap 0, 6 threads and 3600 s per solve, and with
+Presolve=0 in lex phase 2. The raw records are in `bench.jsonl`. The v1 run
+used the default phase-2 presolve and a 1800 s limit; it is kept as
+`bench_v1_presolve_default.jsonl`.
+
+**Formulation (critique §3.1).** With the reductions the model has 1.05M
+columns (fedhpc) and 3.47M (pos); without them it has 1.57M and 5.17M, about
+33% fewer. The root LP is integral, to within 2e-4%, for both min f1 and the
+λ = 0.5 scalarisation on every instance. Site-dependent transfer therefore
+does not weaken the relaxation.
+
+**Transfer effect (§1).** At 1 Gb/s, f1_T moves by at most 0.2% against the
+co-located control, and f1_0 and the λ = 0.5 optimum do not move at all on
+the certified instances. What the optimizer changes is *where* jobs run:
+inter-centre placements drop from 230 to 149 (fedhpc n50) and from 1155 to 948
+(pos n150), and the remaining transfers are hidden in staging slots. The
+transfer model matters for placement decisions but, at these volumes, not for
+the objective values.
+
+**Value of federating, no cloud (§2a).** The federated MILP beats the isolated
+centres by 1.6–6.1% in f1, and at 1 Gb/s it reaches the co-located value. On
+pos n50 the isolated centres are infeasible within the horizon, while the
+federation is feasible. The transfer-blind, Slurm-inspired earliest-start
+policy is better than per-centre FCFS but *worse than the isolated optimum*
+(fedhpc n50: 20,792 vs 18,528; pos n150: 86,880 vs 63,591, with one job left
+unplaced). Plan A4's claim therefore holds: federation pays only when the
+placement is optimised.
+
+**With cloud (§2b).** Federation lowers the cost of the fastest schedule
+(f2_T) by 7–39%. At equal λ, it gives a better f1 for comparable or lower
+spend on fedhpc and pos n150. On pos n50 the isolated weighted-sum points are
+much slower (121,800 vs 63,381 at λ = .5), because the isolated centres cannot
+absorb the load without the cloud.
+
+**Heuristics (§3, critique §4.2).** GA-mid's mean gap is 3.96% on fedhpc,
+consistent with the paper's 4.36%, and 30.5% on pos. On the certified pos
+n150 instances it is 4–23%. The dispatch ILS shows similar pos gaps on the
+single-site class-A twins (v1 check), so the difficulty comes from pos, not
+from the two centres. In deployment mode, where GA-mid estimates its own
+reference points and uses no Gurobi, it averages 4.9% on fedhpc and 35.7% on
+pos. **Caveat:** GA-mid at λ = 1 without cloud is poor on pos: 139,808 vs a
+MILP value of 60,318 on n150, which is worse than the earliest-start
+baseline. Do not use it as the no-cloud federation result.
+
+**End-to-end time (§4).** On fedhpc, the Gurobi pipeline (two anchors plus
+three weighted sums) and the Gurobi-free pipeline are within a few tens of
+seconds of each other (10–83 s vs 13–112 s). On pos n150 the Gurobi-free
+pipeline is not faster (278–385 s vs 276–1090 s). On pos n50 the Gurobi
+pipeline hits time limits (4.5–7.4k s), while the Gurobi-free one takes
+200–870 s, but with gaps of 20–60%.
+
+**Instance checks (§3.6).** Every job has a free option. The cheapest
+schedule costs $0 everywhere except `pos_n50 … isoC` (f2_0 = $212): there, the
+free capacity cannot finish every job within the horizon, so having a free
+option per job is necessary but not sufficient for a free schedule.
+`pos_n50 … isoN` is infeasible.
+
+**Caveats.**
+- The f1_0 anchors on pos n50 (lex phase 2) and both anchors on pos n50 fedN
+  are time-limited incumbents, marked †. Their values agree to 0.01%
+  (139,981–140,111) but are not certified, which explains the 5-slot
+  "non-monotonicity" of 10 Gb/s against co-located. The ĝ gaps on † instances
+  are measured against these anchors. The isoC row, whose f1_0 is 434,515, is
+  especially unreliable.
+- Input volumes are synthetic, built from the output-volume size law.
+- Origins are drawn by hashing each job id (65/35), because the traces carry
+  no user or site field.
+- Link rates are nominal B_eff values, with no contention between concurrent
+  transfers. This is Level 1 of §2.
+- The dispatch decoder is non-delay, so it cannot choose to wait for the home
+  centre.
