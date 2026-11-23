@@ -1,0 +1,64 @@
+% =============================================================================
+% MOSPACE architecture (TikZ). Single column (3.5in); \input inside figure.
+% Colours and pool macros: figures/architecture_preamble.tex.
+% =============================================================================
+\begin{tikzpicture}[
+  font=\scriptsize,
+  >={Stealth[length=1.9mm,width=1.4mm]},
+  comp/.style={draw=archaccent, fill=white, rounded corners=1.5pt, line width=0.6pt,
+               minimum width=2.45cm, text width=2.35cm, minimum height=0.95cm,
+               align=center, inner sep=1.5pt},
+  flow/.style={->, line width=0.6pt, draw=archaccent},
+  ctrl/.style={->, line width=0.7pt},
+  ev/.style={->, line width=0.6pt, draw=black!65, dash pattern=on 2.2pt off 1.4pt},
+  grp/.style={rounded corners=2pt, line width=0.6pt, inner sep=0pt},
+]
+% ---------------------------------------------------------------- scheduler
+\node[comp] (queue) at (1.35,0)    {\textbf{Job queue}\\ all pending jobs};
+\node[comp] (plan)  at (4.3,0)     {\textbf{Planner}\\ arc-flow MILP or GA};
+\node[comp] (disp)  at (7.25,0)    {\textbf{Dispatcher}\\ starts due jobs};
+\node[comp] (mon)   at (4.3,-1.55) {\textbf{State monitor}\\ running jobs, free nodes};
+
+\draw[flow] (queue) -- (plan);
+\draw[flow] (plan)  -- (disp);
+\draw[flow] (mon)   -- node[right, align=left] {re-plan if the\\ plan is invalid} (plan);
+
+\begin{scope}[on background layer]
+  \node[grp, draw=archaccent, fill=archbroker, fit={(0,0.95) (8.6,-2.25)}] (sched) {};
+\end{scope}
+\node[anchor=north east, font=\scriptsize\bfseries, text=archaccent] at (8.52,0.92)
+  {MOSPACE central scheduler};
+
+% submission
+\node[draw, rounded corners=1.5pt, line width=0.6pt, minimum width=2.45cm,
+      minimum height=0.55cm, font=\scriptsize\bfseries] (users) at (1.35,1.75) {Users};
+\draw[ctrl] (users) -- node[right, pos=0.22] {submit} (queue);
+
+% ----------------------------------------------------------- execution layer
+\node[grp, draw=black!65, fill=archsite, minimum width=4.3cm, minimum height=1.9cm]
+  (onp) at (2.15,-4.3) {};
+\node[anchor=north west, font=\scriptsize\bfseries] at ([shift={(0.06,-0.03)}]onp.north west)
+  {On-premises pools};
+\archpool{0.15}{-3.95}{4}{$m_1$ (site A)}
+\archpool{0.15}{-4.35}{5}{$m_2$ (site A)}
+\archpool{0.15}{-4.75}{2}{$m_3$ (site B)}
+\node[anchor=south east, font=\scriptsize\itshape, align=right] at ([shift={(-0.06,0.05)}]onp.south east)
+  {fixed capacity, no charge};
+
+\node[grp, draw=archcloudln, fill=archcloud, minimum width=4.0cm, minimum height=1.9cm]
+  (cl) at (6.6,-4.3) {};
+\node[anchor=north west, font=\scriptsize\bfseries] at ([shift={(0.06,-0.03)}]cl.north west)
+  {Cloud pools};
+\archvm{4.75}{-3.95}{2}{$m_4$ (AWS type)}
+\archvm{4.75}{-4.35}{1}{$m_5$ (Azure type)}
+\node[anchor=south east, font=\scriptsize\itshape, align=right] at ([shift={(-0.06,0.05)}]cl.south east)
+  {on demand, priced};
+
+\begin{scope}[on background layer]
+  \node[grp, draw=black!40, dash pattern=on 3pt off 1.5pt, fit={(-0.1,-3.15) (8.7,-5.35)}] (exec) {};
+\end{scope}
+
+% decisions down, events up
+\draw[ctrl] (disp.south) -- node[left, align=right] {start $j$ on\\ pool $\hat m_j$} (7.25,-3.15);
+\draw[ev] (4.45,-3.15) -- node[right] {start / end events} (4.45,-2.025);
+\end{tikzpicture}

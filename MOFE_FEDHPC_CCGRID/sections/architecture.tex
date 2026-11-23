@@ -1,0 +1,123 @@
+% =============================================================================
+% Section: System architecture  (plan item A1)
+% Intended position: new Section III, before "Mathematical model".
+% Notation introduced here and used later:
+%   \hat e_j              runtime estimate used for job j  (e_j^raw := \hat e_j)
+%   b_m(t)                instances of pool m held by running jobs at time t
+%   (\hat m_j, \hat s_j)  planned pool and planned start of job j
+% \revnote{...} marks items the authors must verify before submission.
+% =============================================================================
+\section{System Architecture}
+\label{sec:architecture}
+
+MOSPACE is a \emph{central scheduler}. The federation is a set of resource
+pools $M$. An on-premises pool is a group of identical nodes at one site. A
+cloud pool is one VM type of one provider. MOSPACE is the only scheduling
+authority over all pools. Every job enters its queue, and it alone decides in
+which pool each job runs and when the job starts. The pools only execute: a
+pool starts a job on whole nodes when MOSPACE tells it to and reports when
+the job starts and ends.
+
+This assignment of authority differs from existing multi-cluster
+mechanisms. Slurm's multi-cluster mode and Slurm federation choose a cluster
+for each job and leave the start time to that cluster's
+scheduler~\cite{Yoo2003,Jette2023}. Two-level placement~\cite{Wang2025Efficient}
+and cloud-bursting policies~\cite{Luo24,ambati2021good} decide one job at a
+time. With paid capacity, decisions about different jobs are coupled: a free
+on-premises slot is worth most to the competing job whose cloud alternative
+is the most expensive. Only a scheduler that plans all pending jobs together
+can make this trade-off, so MOSPACE keeps one plan for the whole queue. This
+corresponds to an operator that runs several node groups or sites and holds
+its own cloud accounts, which is the setting of
+Section~\ref{sec:experimental_setup}. Table~\ref{tab:arch-req} lists what the
+design needs from the platform and how the evaluation provides it.
+
+\begin{figure}[t]
+  \centering
+  \input{figures/architecture.tex}
+  \caption{MOSPACE architecture. The central scheduler plans every pending
+  job and starts each one on its planned pool $\hat m_j$. The pools only
+  execute jobs and report events. Shaded squares are busy nodes; dashed
+  squares are cloud VMs that are not running.}
+  \label{fig:architecture}
+\end{figure}
+
+\subsection{Components}
+\label{sec:arch-components}
+
+Fig.~\ref{fig:architecture} shows the four components of the scheduler.
+
+\emph{Job queue.} The queue holds every pending job $j$ with its arrival
+time $a_j$, demands $q_j^r$, I/O volume $\iota_j$, priority $w_j$ and runtime
+estimate $\hat e_j$. The model uses $e^{\mathrm{raw}}_j=\hat e_j$.
+
+\emph{State monitor.} The monitor tracks running jobs and free nodes from the
+start and end events of the pools. A running job holds its nodes until its
+estimated end, which gives the committed load $b_m(t)$. Only $N_m-b_m(t)$
+instances of pool $m$ are free for planning at time $t$.
+
+\emph{Planner.} The planner builds the model of Section~\ref{sec:model} from
+the queue and the committed load and solves it with the arc-flow MILP or the
+GA of Section~\ref{sec:solutions}. The result is a plan: a pool $\hat m_j$ and a
+start $\hat s_j$ for every pending job. Identical nodes of an on-premises
+site form one pool; a job may use the pools that its partition request
+allows. Each cloud VM type is its own pool. The horizon $H$ is extended until
+an all-on-premises list schedule of the queue fits, so a zero-cost schedule
+always exists, as Section~\ref{sec:model} assumes.
+
+\emph{Dispatcher.} At time $\tau$, the dispatcher starts every job with
+$\hat s_j\le\tau$ on pool $\hat m_j$ and allocates whole nodes to it. A job
+may also start before $\hat s_j$ on its planned pool if this delays no other
+planned job. This is conservative backfilling against the plan, and it
+changes neither a planned completion nor a cost.
+
+\subsection{Decision loop}
+\label{sec:arch-loop}
+
+The scheduler runs once per event timestamp, after all submissions and job
+ends at that timestamp have been applied. It re-plans the whole queue only
+if the current plan is invalid, which happens when (i) a new job has
+arrived, (ii) a running job has ended before or after its estimated end, or
+(iii) a planned start has failed. Otherwise the dispatcher keeps following
+the plan. Following the plan loses nothing when no event deviates from it,
+because the part of an optimal plan that has not yet started is optimal for
+the remaining jobs. Running jobs are never moved.
+
+Jobs already pending when MOSPACE takes over a system are a backlog that the
+current plan did not schedule. They are started on-premises in
+first-come-first-served order before the planner places later jobs on the
+remaining capacity.
+
+\begin{table}[t]
+\centering
+\caption{What the central scheduler requires from the platform, and how the
+evaluation provides it.}
+\label{tab:arch-req}
+\footnotesize
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\columnwidth}{@{}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}p{3.3cm}@{}}
+\toprule
+Requirement & In the evaluation \\
+\midrule
+Exclusive control: all jobs on the pools pass through the scheduler &
+  All trace jobs; jobs running or pending at the start are included \\
+A runtime estimate $\hat e_j$ for each job &
+  Runtime recorded in the trace\revnote{or walltime / prediction, if added} \\
+Start a job on whole nodes of a given pool &
+  Simulator allocator, exclusive nodes \\
+Job start and end events &
+  Simulator events \\
+Price, boot time and quota of each cloud pool &
+  On-demand list prices; boot time and quota per experiment \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\emph{Scope.} The evaluation runs the queue, planner and dispatcher logic
+unchanged inside the simulator, which plays the role of the pools. It does
+not include a production deployment. The architecture fixes the model's
+assumptions: jobs are single-node parallel jobs with exclusive allocation,
+runtimes are estimates, and the cost objective counts cloud expenditure
+only.
+\revnote{Report the decision time per call (p50/p95/max) and the fraction of
+calls that needed a solve.}

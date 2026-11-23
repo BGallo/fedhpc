@@ -1,0 +1,37 @@
+% Standalone draft of the "Federation Architecture" section (plan item A1),
+% typeset with the paper's class so that sizes and fonts match the submission.
+%
+% To merge into the paper (IEEE-conference-template-062824.tex):
+%   preamble:            \input{figures/architecture_preamble.tex}
+%   after Related Work:  \input{sections/architecture.tex}
+\documentclass[conference]{IEEEtran}
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{textcomp}
+\input{figures/architecture_preamble.tex}
+
+\begin{document}
+\title{MOSPACE --- Federation Architecture (draft section)}
+\author{\IEEEauthorblockN{Draft for internal review}}
+\maketitle
+
+\setcounter{section}{2}
+\input{sections/architecture.tex}
+
+% --- Placeholders so cross-references to the rest of the paper resolve. ---
+\section{Mathematical model}\label{sec:model}
+\emph{Placeholder: Section~III of the paper.}
+\section{Proposed solutions}\label{sec:solutions}
+\emph{Placeholder.}
+\section{Experimental setup}\label{sec:experimental_setup}
+\emph{Placeholder.}
+\section{Results}\label{sec:results}
+\emph{Placeholder.}
+
+\IfFileExists{IEEEtran.bst}{\bibliographystyle{IEEEtran}}{\bibliographystyle{ieeetr}}
+\bibliography{bibliography}
+\end{document}
