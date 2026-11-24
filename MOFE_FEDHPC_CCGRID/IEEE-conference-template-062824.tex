@@ -21,7 +21,6 @@
 \algblockdefx{ParFor}{EndParFor}[1]%
   {\textbf{for} #1 \textbf{in parallel do}}%
   {\textbf{end for}}
-\usepackage[noend]{algpseudocode}
 \usepackage{graphicx}
 \usepackage{textcomp}
 \usepackage{xcolor}
@@ -43,14 +42,14 @@ bgallo@id.uff.br}
 \and
 \IEEEauthorblockN{2\textsuperscript{nd} Lucia Drummond}
 \IEEEauthorblockA{\textit{Institute of Computing} \\
-\textit{Unversidade Federal Fluminense}\\
+\textit{Universidade Federal Fluminense}\\
 Niterói, Brazil \\
 lucia@ic.uff.br}
 \and
 \IEEEauthorblockN{3\textsuperscript{rd} José Viterbo}
-\IEEEauthorblockA{\textit{dept. name of organization (of Aff.)} \\
-\textit{name of organization (of Aff.)}\\
-Niterói, Brazil \\
+\IEEEauthorblockA{\textit{Institute of Computing} \\
+\textit{Universidade Federal Fluminense}\\
+Niterói, Brazil\\
 viterbo@ic.uff.br}
 \and
 \IEEEauthorblockN{4\textsuperscript{th} Eduardo Uchoa}
@@ -63,7 +62,7 @@ eduardo.uchoa@gmail.com}
 \maketitle
 
 \begin{abstract}
-A federated high-performance computing (HPC) system coordinates computational resources across distinct execution platforms. At the scheduling layer, resource federation requires joint decisions regarding where and when jobs execute, particularly when resource types differ in capacity, performance, availability, and monetary cost. In this work, we propose MOSPACE, a multi-objective scheduler for parallel jobs on a hybrid computing federation comprising fixed-capacity on-premises resources and pools of on-demand cloud virtual machines. We formulate the scheduling problem as a weighted bi-objective optimization model that minimizes both total job turnaround time and financial cost. To solve this problem, we introduce a arc-flow mixed-integer linear programming (MILP) formulation alongside a Genetic Algorithm (GA) that provides faster approximate solutions. We evaluate both approaches across 108 problem instances featuring varying numbers of jobs and cluster configurations. The MILP formulation solved all instances to optimality in an average of 91.1 seconds, whereas the GA achieved an average optimality gap of 4.36\% in under 6 seconds. Furthermore, we evaluate our proposed approach in a simulated environment using a production cluster job log and a federated platform consisting of a 1,654-node HPC cluster with access to AWS EC2 instances. Finally, we compare MOSPACE against isolated infrastructures, each maintaining its own independent job queue, as well as the state-of-the-art cloud-bursting strategy from the literature.
+A federated high-performance computing (HPC) system coordinates computational resources across distinct execution platforms. At the scheduling layer, resource federation requires joint decisions regarding where and when jobs execute, particularly when resource types differ in capacity, performance, availability, and monetary cost. In this work, we propose MOSPACE, a multi-objective scheduler for parallel jobs on a hybrid computing federation comprising fixed-capacity on-premises resources and pools of on-demand cloud virtual machines. We formulate the scheduling problem as a weighted bi-objective optimization model that minimizes both total job turnaround time and financial cost. To solve this problem, we introduce an arc-flow mixed-integer linear programming (MILP) formulation alongside a Genetic Algorithm (GA) that provides faster approximate solutions. We evaluate both approaches across 108 problem instances featuring varying numbers of jobs and cluster configurations. The MILP formulation solved all instances to optimality in an average of 91.1 seconds, whereas the GA achieved an average optimality gap of 4.36\% in under 6 seconds. Furthermore, we evaluated our proposed approach in a simulated environment using a production cluster job log and a federated platform consisting of a 1,654-node HPC cluster with access to AWS EC2 instances. Finally, we compared MOSPACE against Federated and Multi-Cluster Slurm in a simulated Federated Environment and it achieved lower turnaround, wait time and bounded slowdown.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -72,16 +71,25 @@ Federated HPC, heterogeneous scheduling, multi-objective optimization, mixed-int
 
 \section{Introduction}
 
-High-performance computing  (HPC) systems support computationally intensive applications in areas such as energy, climate modeling, aerospace engineering, drug discovery, and machine learning. These applications frequently require more processors, memory, accelerators, or storage than conventional computing infrastructures can provide. HPC clusters address this demand through large collections of interconnected computational resources managed as an integrated system.
-Despite their computational capacity, on-premises HPC systems remain finite. Their acquisition and expansion require substantial capital investment, while their operation involves energy, maintenance, cooling, and administrative costs. Since permanently provisioning enough hardware for occasional demand peaks is economically inefficient, HPC centers are commonly designed around an expected workload rather than the maximum workload they may receive. Periods of high demand can therefore produce long queues, increased job turnaround times, and delayed access to computational resources. To provide access to a greater variety and quantity of hardware as well as improve utilization of the computing resources\cite{Magugliani2025} Federated HPC seeks to coordinate geographically distributed and independently operated infrastructures through common services for access, resource allocation, data management, and workflow execution.  Federation does not imply that geographically separate machines form a single tightly coupled supercomputer or that their local schedulers are replaced by one global scheduler. The individual facilities retain different capacities, architectures, availability constraints, and operational policies. At the federation level, a user or broker can instead select an execution platform for a submitted job and coordinate access to resources that remain locally managed. Consequently, the scheduling problem includes a placement decision across heterogeneous resource pools.
+High-performance computing  (HPC) systems support computationally intensive applications in areas such as energy, climate modeling, aerospace engineering, drug discovery, and machine learning. 
+Despite their computational capacity, on-premises HPC systems remain finite. Their acquisition and expansion require substantial capital investment, while their operation involves energy, maintenance, cooling, and administrative costs. Since permanently provisioning enough hardware for occasional demand peaks is economically inefficient, HPC centers are commonly designed around an expected workload rather than the maximum workload they may receive. Periods of high demand can therefore produce long queues, increased job turnaround times, and delayed access to computational resources. To provide access to a greater variety and quantity of hardware as well as improve utilization of the computing resources\cite{Magugliani2025} Federated HPC seeks to coordinate geographically distributed and independently operated infrastructures through common services for access, resource allocation, data management, and workflow execution.  Federation does not imply that geographically separate machines form a single tightly coupled supercomputer or that their local schedulers are replaced by one global scheduler although one could prove beneficial. Consequently, the scheduling problem includes a placement decision across heterogeneous resource pools.
 
-In that scenario, cloud computing has also  provided an alternative source of computational capacity. Its on-demand provisioning model allows resources to be allocated temporarily without the permanent acquisition of additional hardware. An HPC organization can therefore retain its on-premises infrastructure as its primary computational platform while using cloud resources during periods of congestion. This strategy is commonly referred to as cloud bursting.\cite{BUYYA2009599,mell2011nist}. The use of several cloud providers extends this scenario to a multi-cloud environment. Different providers and instance types offer distinct combinations of processing performance, memory, storage, accelerator availability, provisioning delay, and monetary cost. When these resources are combined with an on-premises HPC cluster, the resulting environment is heterogeneous in both technical and economic terms. Hybrid HPC--cloud infrastructures are an important configuration of this broader setting. A fixed-capacity HPC centre can augment its resources with virtual machines acquired from external cloud providers. Such resources have different performance characteristics, provisioning delays, transfer overheads, and usage prices. 
+In that scenario, cloud computing has also  provided an alternative source of computational capacity. Its on-demand provisioning model allows resources to be allocated temporarily without the permanent acquisition of additional hardware. An HPC organization can therefore retain its on-premises infrastructure as its primary computational platform while using cloud resources during periods of congestion. This strategy is commonly referred to as cloud bursting~\cite{BUYYA2009599,mell2011nist}. The use of several cloud providers extends this scenario to a multi-cloud environment. Different providers and instance types offer distinct combinations of processing performance, memory, storage, accelerator availability, provisioning delay, and monetary cost. When these resources are combined with an on-premises HPC cluster, the resulting environment is heterogeneous in both technical and economic terms. Hybrid HPC--cloud infrastructures are an important configuration of this broader setting. A fixed-capacity HPC centre can augment its resources with virtual machines acquired from external cloud providers. Such resources have different performance characteristics, provisioning delays, transfer overheads, and usage prices. 
 
-In this work we deal with  a federated HPC environment, that being a computational environment composed of capacity-constrained geographically distributed on-premises resources and elastically provisioned resources from one or more cloud providers. The problem then lies in scheduling jobs between heterogeneous capacity both in terms of performance and monetary cost.
+In this work, we deal with a cloud enabled federated HPC environment, that being a computational environment composed of capacity-constrained geographically distributed on-premises resources and elastically provisioned resources from one or more cloud providers. The problem then lies in scheduling jobs between heterogeneous capacity both in terms of performance and monetary cost.
 
-Existing research addresses complementary aspects of scheduling across heterogeneous computing infrastructures, but differs in workload assumptions, resource models, and optimization objectives. Brotcorne et al.~\cite{Brotcorne2023} formulate a bi-objective optimization problem that minimizes monetary cost and makespan for bags of identical tasks in capacity-constrained multi-cloud environments. From the mathematical scheduling literature, Kramer et al.~\cite{Kramer2020} investigate weighted completion-time minimization with submission times on identical parallel machines using arc-flow formulations and decomposition methods, whereas Chen et al.~\cite{Chen2024} address unrelated parallel machines with weighted completion-time and machine-usage costs, assuming jobs are initially available. Although these studies address important components of the problem, none considers their combination within a single scheduling model. In contrast, MOSPACE jointly optimizes resource placement and scheduling for independently submitted, priority-weighted parallel jobs across finite-capacity on-premises and pay as you go cloud resources, accounting for heterogeneous execution characteristics, provisioning delays, data-transfer overheads, and associated monetary charges. This integrated formulation enables the explicit optimization of the trade-off between job turnaround and external-resource expenditure.
+Existing research addresses complementary aspects of scheduling across heterogeneous computing infrastructures, but differs in workload assumptions, resource models, and optimization objectives. Brotcorne et al.~\cite{Brotcorne2023} formulate a bi-objective optimization problem that minimizes monetary cost and makespan for bags of identical tasks in capacity-constrained multi-cloud environments. From the mathematical scheduling literature, Kramer et al.~\cite{Kramer2020} investigate weighted completion-time minimization with submission times on identical parallel machines using arc-flow formulations and decomposition methods, whereas Chen et al.~\cite{Chen2024} address unrelated parallel machines with weighted completion-time and machine-usage costs, assuming jobs are initially available. Although these studies address important components of the problem, none considers their combination within a single scheduling model.
 
-We propose MOSPACE, a multi-objective scheduler for this Federated HPC use case. We consider independent, non-preemptive parallel jobs, each assigned to one compatible execution instance, with job-specific submission times, priorities, resource requirements, and input/output volumes. Candidate instance types have bounded availability and may differ in execution duration, provisioning time, and cost. The model assumes centralized visibility and coordination at the federation level; interoperability among autonomous local schedulers and simultaneous execution of one job across multiple sites are outside its scope.
+We propose MOSPACE, a multi-objective scheduler for this Federated HPC use case. We consider independent, non-preemptive parallel jobs, each running on one or more instances of a single compatible instance type, with job-specific submission times, priorities, resource requirements, and input/output volumes whose location determines the cost and time of moving data between sites. Candidate instance types have bounded availability and may differ in execution duration, provisioning time, and cost. The model assumes centralized visibility and coordination at the federation level; interoperability among autonomous local schedulers and simultaneous execution of one job across multiple sites are outside its scope.
+
+xxxx frase cheia de erros de ingles sem referencias, super mal escrita!
+
+Assuming a central scheduler have knowledge of both job runtime and the others characteristics MOSPACE needs is a big assumption, but the literature provides extensive support for machine learning solution to predict runtime of job\cite{Nunes2025} as well as different methods for predicting I/O. 
+xxxx
+
+
+XXXX as contrbuicoes baixo sao de apper de SBPO!!!!
+
 The main contributions are as follows:
 \begin{itemize}
     \item A strong arc-flow formulation where homogeneous capacity are modeled as a single graph that takes into account turnaround time, costs and data movement.
@@ -91,40 +99,28 @@ The main contributions are as follows:
 
 The remainder of this work is organized as follows: The section \ref{sec:related_work} goes over the most relevant works that most closely matches the problem this paper solves, in the section \ref{sec:model} we go into detail over the arc-flow formulation that allows for a optimal solution at reasonable solve times, section \ref{sec:solutions} describes the proposed GA while section \ref{sec:experimental_setup}
 describes the offline instances used to benchmark our solutions and the trace-driven simulation experiments and finally the results and conclusions are at \ref{sec:results}.
-\section{Related Work}
+
+\section{Literature Review}
 \label{sec:related_work}
 
-In this section we review the previous works on Federated HPC, Mathematical Optimization of scheduling problems and Cloud Computing. As MOSPACE addresses centralized scheduling at the federation level, we focus on approaches that coordinate resource allocation across distinct computing infrastructures, as well as optimization methods for scheduling jobs under heterogeneous resource constraints. We first examine existing mechanisms for multi-cluster and federated scheduling, followed by  mathematical formulations for scheduling on heterogeneous machines. Particular attention is given to the extent to which these approaches jointly account for job turnaround, monetary expenditure, resource availability, and data-transfer overheads.
+In this section we review the previous works on Federated HPC, Mathematical Optimization of scheduling problems and Cloud Computing.
 
-\begin{table*}[]
-\centering
-\begin{tabular}{|l|l|l|l|l|l|}
-\hline
-                 & Objective                                                 & Submission Time & Data Movement & Method              & Enviroment      \\ \hline
-Brotcorne et al. & Makespan and Cost                                         & No           & No            & Exact               & Cloud           \\ \hline
-Luo et al.       & Total Completion Time and Cost                            & No           & No            & Waiting Policy      & Hybrid          \\ \hline
-Kramer et al.    & Total Weighted Completion Time                            & Yes          & No            & Exact               & On-prem         \\ \hline
-Chen et al.      & Total Weighted Completion Time and Cost                   & No           & No            & Exact               & Cloud           \\ \hline
-Wang et al.      & Affinity, resource availability, latency and load balance & No           & Yes           & Greedy              & Federated       \\ \hline
-This Work        & Total Weighted Turnround Time and Cost                    & Yes          & Yes           & Exact and heuristic & Federated+Cloud \\ \hline
-\end{tabular}
-\end{table*}
+xxxx a frase acima é absurda, o que vc quer dizer?? trabalhos que envolvem todos esses conceitos ao mesmo tempo!!! Olha o que vc escreveu!!!
+
+As MOSPACE addresses centralized scheduling at the federation level, we focus on approaches that coordinate resource allocation across distinct computing infrastructures, as well as optimization methods for scheduling jobs under heterogeneous resource constraints. We first examine existing mechanisms for multi-cluster and federated scheduling, followed by  mathematical formulations for scheduling on heterogeneous machines. Particular attention is given to the extent to which these approaches jointly account for job turnaround, monetary expenditure, resource availability, and data-transfer overheads.
 
 
-Slurm is a widely adopted workload manager for HPC systems~\cite{Yoo2003} and provides two distinct mechanisms for operating across multiple clusters. In multi-cluster mode, jobs can be submitted to a specified set of clusters, with Slurm selecting the cluster expected to provide the earliest start time based on current scheduling estimates. In federated mode\cite{Jette2023}, jobs are replicated across eligible member clusters, whose local schedulers independently attempt to allocate resources while coordinating to ensure that each job executes only once. Although these mechanisms enable resource sharing across independently managed clusters, they do not jointly optimize global scheduling decisions against a common monetary cost and turnaround objective. MOSPACE instead formulates federation-level resource selection and scheduling of jobs as a centralized multi-objective optimization problem, explicitly accounting for heterogeneous processing characteristics, finite resource capacity, and external execution costs.
+HPC centers employ Resource and Job Management Systems (RJMS) to more easily integrate their compute infrastructure and answer to the different needs of users and the organization as whole. Slurm is a widely adopted RJMS for HPC systems~\cite{Yoo2003} and provides two distinct mechanisms for operating across multiple clusters. In multi-cluster mode, jobs can be submitted to a specified set of clusters, with Slurm selecting the cluster expected to provide the earliest start time based on current scheduling estimates. In federated mode\cite{Jette2023}, jobs are replicated across eligible member clusters, whose local schedulers independently attempt to allocate resources while coordinating to ensure that each job executes only once. Although these mechanisms enable resource sharing across independently managed clusters, they do not jointly optimize global scheduling decisions against a common monetary cost and turnaround objective. MOSPACE instead formulates federation-level resource selection and scheduling of jobs as a centralized multi-objective optimization problem, explicitly accounting for heterogeneous processing characteristics, finite resource capacity, and external execution costs.
 
-A recent survey by Wu et al.~\cite{Wu2025} organizes geo-distributed scheduling research across cloud, edge, and supercomputing settings. Each environment is organized by objective (performance, fairness, fault tolerance) and by technique (heuristic, AI-based, mathematical, hybrid). Performance is divided into compute utilization and data management, the latter covering network routing, data placement and replication. The authors include HPC because its focus on extreme performance and large-scale utilization sets it apart from the other paradigms, and they position the survey as the first to span all four. Our work proposes both a heuristic and a mathematical solution where our focus is on optimizing system performance metrics ( Turnaround Time and Monetary Cost).
+Wang et al.~\cite{Wang2025Efficient} propose a two-level scheduling architecture for job placement across geographically distributed, heterogeneous clusters. A global coordination layer aggregates static hardware and topology attributes alongside dynamic telemetry (utilization, queue lengths, and network state) into a standardized resource capability model, which maps CPU, memory, and GPU specifications into dimensionless performance factors via weighted linear combinations. Using a filter-and-score heuristic, clusters violating hard affinity or capacity constraints are pruned, while feasible candidates are scored to reward residual capacity and attribute similarity and penalize estimated startup and data-transfer latency. Task replicas are then distributed proportionally to these scores via largest-remainder rounding. Implemented as a Karmada plugin and evaluated on a three-region testbed and CloudSim Plus simulations, the approach improves resource utilization, scheduling latency scaling, and failure rates compared to Round-Robin and Karmada's default resource-aware scheduler.
 
-Wang et al.~\cite{Wang2025Efficient} address job placement across geographically distributed, heterogeneous clusters with a two-level architecture in which a global coordination layer sits above autonomous clusters and makes placement decisions from a global resource view. That view combines static data (hardware specifications, capacities, topology) with dynamic data (utilization, queue lengths, network state). To make heterogeneous hardware comparable, the authors propose a standardized resource capability model. It maps CPU, memory and GPU attributes into dimensionless performance factors, each a weighted linear combination of normalized quantities: clock frequency, effective cache size, ISA and microarchitecture coefficients for CPUs; bandwidth, channel count and memory type for memory; architecture generation and peak FLOPS for GPUs.
-Placement then works as a filter-and-score heuristic. Clusters that fail hard affinity constraints (GPU type, CPU architecture, software frameworks) or lack enough normalized capacity are discarded. Each remaining cluster gets a composite score that rewards remaining compute capacity and attribute similarity and penalizes an estimated latency (startup overhead plus the time to transfer input data at the available bandwidth). Task replicas are split among clusters in proportion to the normalized scores, using a largest-remainder rounding scheme. The strategy was implemented as a Karmada scheduling plugin and evaluated on a testbed of heterogeneous clusters spread over three regions, as well as in CloudSim Plus simulations with up to twenty clusters and 800{,}000 tasks. Against Round-Robin and Karmada's default resource-aware strategy, it achieved higher and better-balanced utilization, slower growth of scheduling latency, and lower scheduling and execution failure rates.
-
-Although they share our concern with heterogeneity across federated resource pools, their approach differs from ours in several ways. Firstly they propose a online placement rule without any quality guarantee or optimization method like ours. They also fail to address  monetary cost.  Finally, the evaluation is limited to simple heuristic baselines and to operational metrics such as utilization, latency and failure rates. It does not report solution quality relative to an optimum or a bound. 
+Despite addressing heterogeneity across federated resource pools, their work differs from ours in three key aspects: (1) it relies on an online heuristic without optimization or theoretical quality guarantees; (2) it omits monetary cost considerations; and (3) its evaluation is restricted to heuristic baselines and operational metrics rather than benchmarking solution quality against an optimum or analytical bound.
 
 Brotcorne et al.~\cite{Brotcorne2023} proposed mathematical programming models for multi-cloud VM provisioning that jointly consider makespan and cost, with both global and time-dependent limits on instance availability. Their workloads consist of bags of identical tasks, and their time objective differs from per-job turnaround. Their work differ from ours in their lack of submission time from the jobs and the focus on BoT applications instead of parallel jobs.
 
 In hybrid fixed/elastic clusters, Ambati et al.~\cite{ambati2021good} analyzed policies that trade waiting time against public-cloud expenditure. Starburst, by Luo et al.~\cite{Luo24}, implements a higher-level scheduler over private and elastic cloud clusters and adjusts waiting budgets to improve the trade-off between cloud expenditure and job turnaround time.  MOSPACE improves on their work by both providing an exact solution to the problem of cloud bursting and incorporating multiple heterogeneous infrastructure  
 
-Kramer et al.~\cite{Kramer2020} studied minimizing total weighted completion time with submission times on identical parallel machines, using mixed-integer formulations and arc-flow-based branch-and-price. They are the main contribution in the literature that uses submission times and they also use a arc-flow formulation to solve the scheduling problem of parallel identical machines, ours formulation solve the unrelated parallel machines problem while also taking into account monetary cost.
+Kramer et al.~\cite{Kramer2020} studied minimizing total weighted completion time with submission times on identical parallel machines, using mixed-integer formulations and arc-flow-based branch-and-price. They are the main contribution in the literature that uses submission times and they also use an arc-flow formulation to solve the scheduling problem of parallel identical machines, ours formulation solve the unrelated parallel machines problem while also taking into account monetary cost.
 
 Chen et al.~\cite{Chen2024} developed exact models and branch-and-price
 for unrelated parallel machines with weighted completion-time and
@@ -136,42 +132,48 @@ As is evident most of the literature consider jobs without submission time, mean
 \section{Mathematical model}
 \label{sec:model}
 
-The scheduling of jobs in a federated environment presents a hard problem in terms of scheduling. The problem we are trying to solve is one where there are N numbers of on-premises clusters with access to M different clouds, with O jobs with different execution times and resources requirements and we aim to schedule the O jobs across the different resources so that we minimize both the cost and the total turnaround time of jobs.  We formulate the joint selection of a computing node and a start time for each job as a arc-flow MILP. Each instance type, which is any number of homogeneous non geographically distributed infrastructure, has it's own Directed Acyclic Graph (DAG) in which processing arcs occupy an instance for a job's full duration and waiting arcs allow idle capacity. The model minimizes priority-weighted turnaround and monetary expenditure, subject to release times and bounded instance availability.
+The scheduling of jobs in a federated environment presents a hard problem in terms of scheduling. The problem we are trying to solve is one where there are multiple on-premises clusters with access to multiple different clouds and we schedule jobs with different execution times and resources requirements  across the different resources so that we minimize both the cost and the total turnaround time of jobs. Each job's data lives at one site, so running it elsewhere requires staging its inputs in and its results out, which takes time and may cost money. We formulate the joint selection of an instance type and a start time for each job as an arc-flow MILP. Each instance type, a pool of homogeneous instances located at one site, has its own Directed Acyclic Graph (DAG) in which processing arcs occupy the instances a job needs for its full duration and waiting arcs allow idle capacity. The model minimizes priority-weighted turnaround and monetary expenditure, subject to release times, bounded instance availability and the time and price of moving data between sites.
 
 \subsection{Setting and notation}
 
-Let $J=\{1,\ldots,n\}$ be the jobs and let $M$ be the instance types, partitioned into on-premises types $M^{\mathrm{on}}$ and cloud types $M^{\mathrm{cloud}}$. Each type $m$ comprises at most $N_m\in\mathbb{Z}_{>0}$ homogeneous instances. Jobs are independent and non-preemptive; each occupies one entire instance, without sharing it with another job. The horizon is discretized as $T=\{0,\ldots,H\}$ with step duration $\Delta>0$.
+Let $J=\{1,\ldots,n\}$ be the jobs and $\mathcal{S}$ the sites, i.e.\ the on-premises clusters and the cloud regions. Let $M$ be the instance types, partitioned into on-premises types $M^{\mathrm{on}}$ and cloud types $M^{\mathrm{cloud}}$. Type $m$ is located at site $\sigma(m)\in\mathcal{S}$ and comprises at most $N_m\in\mathbb{Z}_{>0}$ homogeneous instances. For a cloud type, any $N_m\geq\sum_{j\in J}q_j$ makes the bound non-binding. Jobs are independent and non-preemptive. Job $j$ runs on $q_j\in\mathbb{Z}_{>0}$ instances of a single type, which it holds exclusively and which start and finish together. The horizon is discretized as $T=\{0,\ldots,H\}$ with step duration $\Delta>0$.
 
-Each job $j$ has arrival time $a_j\in T$, base execution time $e_j^{\mathrm{raw}}\geq0$, I/O volume $\iota_j\geq0$, priority weight $w_j\geq0$, and resource demands $q_j^r\geq0$ for $r\in R=\{\mathrm{cpu},\mathrm{mem},\mathrm{stor}\}$. Each type $m$ has capacities $C_m^r$, performance factor $P_m>0$, I/O time per volume unit $\tau_m^{\mathrm{IO,raw}}\geq0$, and provisioning time $\pi_m^{\mathrm{raw}}\geq0$. Feasible types are
+Each job $j$ has arrival time $a_j\in T$, base execution time $e_j^{\mathrm{raw}}\geq0$, priority weight $w_j\geq0$, node count $q_j$, and per-instance resource demands $q_j^r\geq0$ for $r\in R=\{\mathrm{cpu},\mathrm{mem},\mathrm{stor},\mathrm{gpu}\}$. Its input data, of volume $\iota_j^{\mathrm{in}}\geq0$, reside at the origin site $o_j\in\mathcal{S}$. Its results, of volume $\iota_j^{\mathrm{out}}\geq0$, must reach the destination site $d_j\in\mathcal{S}$, usually $d_j=o_j$. The job may run only at its allowed sites $\mathcal{S}_j\subseteq\mathcal{S}$. Each type $m$ has per-instance capacities $C_m^r$, a performance factor $P_m>0$ and a provisioning time $\pi_m^{\mathrm{raw}}\geq0$. Feasible types are
 \begin{equation}
- F_j=\{m\in M:q_j^r\leq C_m^r\ \forall r\in R\},
- \qquad j\in J.
+ F_j=\{m\in M:q_j^r\leq C_m^r\ \forall r\in R,\ q_j\leq N_m,\ \sigma(m)\in\mathcal{S}_j\},
 \end{equation}
-We assume $F_j\neq\emptyset$ for every job. Resource demands determine type compatibility; simultaneous-job capacity is enforced through the instance counts $N_m$.
+for $j\in J$. We assume $F_j\neq\emptyset$ for every job. Resource demands determine type compatibility, and simultaneous use is bounded by the instance counts $N_m$. A GPU partition is a type with $C_m^{\mathrm{gpu}}>0$.
 
-The nonnegative rates $\kappa_m^{\mathrm{VM}}$, $\kappa_m^{\mathrm{S}}$, and $\kappa_m^{\mathrm{IO}}$ charge instance use per physical time unit, allocated storage per physical time unit, and I/O volume, respectively. All three rates are zero for $m\in M^{\mathrm{on}}$, so the cost objective excludes fixed on-premises expenses. Provisioning occupies the instance at the beginning of every job but is not billed; idle intervals are also uncharged.
+Each ordered pair of sites $(s,s')$ is joined by a transfer link with time per volume unit $\theta_{ss'}^{\mathrm{raw}}\geq0$ and price per volume unit $\kappa_{ss'}\geq0$. Data that do not leave a site move at no cost, so $\theta_{ss}^{\mathrm{raw}}=\kappa_{ss}=0$. Typically, $\kappa_{ss'}>0$ only when $s$ is a cloud region (internet egress), and links between connected HPC centers have $\kappa_{ss'}=0$ but $\theta_{ss'}^{\mathrm{raw}}>0$. For $j\in J$ and $m\in F_j$, the transfer time and the transfer price are
+\begin{align}
+ \tau_{jm}^{\mathrm{raw}}&=\theta_{o_j\sigma(m)}^{\mathrm{raw}}\iota_j^{\mathrm{in}}+\theta_{\sigma(m)d_j}^{\mathrm{raw}}\iota_j^{\mathrm{out}},\\
+ \kappa_{jm}^{\mathrm{IO}}&=\kappa_{o_j\sigma(m)}\iota_j^{\mathrm{in}}+\kappa_{\sigma(m)d_j}\iota_j^{\mathrm{out}}.
+\end{align}
+Both are per job: the data of a multi-node job are moved once. A job that runs at its origin and returns its results there moves nothing. The offline instances of Section~\ref{sec:experimental_setup} use the special case of one on-premises site $h$ with $o_j=d_j=h$ and $\iota_j^{\mathrm{in}}=0$. Each cloud provider is a site, $\kappa_{\sigma(m)h}$ is its egress price, and $\theta_{\sigma(m)h}^{\mathrm{raw}}$ follows from the VM's disk throughput.
+
+The nonnegative rates $\kappa_m^{\mathrm{VM}}$ and $\kappa_m^{\mathrm{S}}$ charge, per instance, use per physical time unit and allocated storage per physical time unit. Both are zero for $m\in M^{\mathrm{on}}$, so the cost objective excludes fixed on-premises expenses. Provisioning occupies the instances at the beginning of every job but is not billed; idle intervals are also uncharged.
 
 \subsection{Durations and execution costs}
 
 For $j\in J$ and $m\in F_j$, the continuous billable duration and its discretized value are
 \begin{align}
  p_{jm}^{\mathrm{bill,raw}}
- &=e_j^{\mathrm{raw}}/P_m+\tau_m^{\mathrm{IO,raw}}\iota_j,\\
+ &=e_j^{\mathrm{raw}}/P_m+\tau_{jm}^{\mathrm{raw}},\\
  p_{jm}^{\mathrm{bill}}
  &=\max\{1,\lceil p_{jm}^{\mathrm{bill,raw}}/\Delta\rceil\}.
 \end{align}
-Provisioning extends occupation without increasing billable time:
+Staging is part of the billable duration, so all $q_j$ instances are held while the data move. Provisioning extends occupation without increasing billable time:
 \begin{equation}
  \pi_m=\lceil\pi_m^{\mathrm{raw}}/\Delta\rceil,
  \qquad p_{jm}^{\mathrm{occ}}=p_{jm}^{\mathrm{bill}}+\pi_m.
 \end{equation}
-The execution cost is therefore
+Every instance is billed, and the transfer once, so the execution cost is
 \begin{equation}
- c_{jm}^{\mathrm{proc}}=\kappa_m^{\mathrm{IO}}\iota_j+
- (\kappa_m^{\mathrm{VM}}+\kappa_m^{\mathrm{S}}q_j^{\mathrm{stor}})
+ c_{jm}^{\mathrm{proc}}=\kappa_{jm}^{\mathrm{IO}}+
+ q_j(\kappa_m^{\mathrm{VM}}+\kappa_m^{\mathrm{S}}q_j^{\mathrm{stor}})
  p_{jm}^{\mathrm{bill}}\Delta.
 \end{equation}
-This models billing in blocks of duration $\Delta$, with a minimum of one block. Rounded billable time exceeds its continuous value by less than $\Delta$ for positive durations, and by exactly $\Delta$ for a zero duration.
+This models billing in blocks of duration $\Delta$, with a minimum of one block. Rounded billable time exceeds its continuous value by less than $\Delta$ for positive durations, and by exactly $\Delta$ for a zero duration. Because the transfer enters only $p_{jm}^{\mathrm{occ}}$ and $c_{jm}^{\mathrm{proc}}$, a remote site is simply a slower, and possibly priced, option for the job. Placing a job away from its data therefore trades staging time and transfer cost against waiting at its origin.
 
 Feasible occupation starts respect arrivals and completion within the horizon:
 \begin{equation}
@@ -188,58 +190,131 @@ For each type $m$, let $G_m=(T,A_m)$ be a directed acyclic graph with waiting an
  j\in J,\ m\in F_j,\ t\in T_{jm}\},\\
  A_m&=A_m^{\mathrm{wait}}\cup A_m^{\mathrm{proc}}.
 \end{align}
-Processing arcs occupy an instance over $[t,t+p_{jm}^{\mathrm{occ}})$, including provisioning. Their job indices distinguish arcs with identical endpoints.
+Processing arc $(j,t,t+p_{jm}^{\mathrm{occ}})$ carries $q_j$ units of flow: it occupies $q_j$ instances over $[t,t+p_{jm}^{\mathrm{occ}})$, including provisioning and staging. Job indices distinguish arcs with identical endpoints.
 
-The binary variable $x_{jmt}$ selects a processing arc, and the integer variable $y_{mt}$ counts idle instances over $[t,t+1)$. Define the fixed boundary values $y_{m,-1}=y_{m,H}=N_m$ to inject and collect $N_m$ units of flow. The model imposes
+
+The binary variable $x_{jmt}$ selects a processing arc, while
+$y_{mt}$ denotes the number of unused instances of type $m$
+during $[t,t+1)$. The boundary values
+$y_{m,-1}=y_{m,H}=N_m$ inject and collect $N_m$ units of
+flow. The formulation imposes
 \begin{align}
- &\sum_{m\in F_j}\sum_{t\in T_{jm}}x_{jmt}=1
- && j\in J,\label{eq:model-assignment}\\
- &\begin{aligned}
- y_{m,v-1}
- &+\sum_{\substack{j:m\in F_j\\v-p_{jm}^{\mathrm{occ}}\in T_{jm}}}
- x_{jm,v-p_{jm}^{\mathrm{occ}}}\\
- &=y_{mv}+\sum_{\substack{j:m\in F_j\\v\in T_{jm}}}x_{jmv}
- \end{aligned}
- &&\substack{m\in M,\\v\in T},\label{eq:model-flow}\\
- &x_{jmt}\in\{0,1\}
- &&\substack{j\in J,\ m\in F_j,\\t\in T_{jm}},\\
- &y_{mt}\in\{0,\ldots,N_m\}
- &&\substack{m\in M,\\t\in T\setminus\{H\}}.
+&\sum_{m\in F_j}\sum_{t\in T_{jm}}x_{jmt}=1
+&&\forall j\in J,
+\label{eq:model-assignment}\\
+&\begin{aligned}
+y_{m,v-1}
+&+\sum_{\substack{j:m\in F_j\\
+v-p_{jm}^{\mathrm{occ}}\in T_{jm}}}
+q_j x_{jm,v-p_{jm}^{\mathrm{occ}}}\\
+&=y_{mv}
++\sum_{\substack{j:m\in F_j\\v\in T_{jm}}}
+q_j x_{jmv}
+\end{aligned}
+&&\substack{\forall m\in M,\\v\in T},
+\label{eq:model-flow}\\
+&x_{jmt}\in\{0,1\}
+&&\substack{\forall j\in J,\ m\in F_j,\\
+t\in T_{jm}},\\
+&0\leq y_{mt}\leq N_m
+&&\substack{\forall m\in M,\\
+t\in T\setminus\{H\}}.
 \end{align}
-Constraint~\eqref{eq:model-assignment} executes each job exactly once. Constraint~\eqref{eq:model-flow} conserves instance flow at every time node. Integral flow decomposes into $N_m$ paths, each corresponding to one instance; hence overlapping jobs cannot exceed available capacity. The upper bound on $y_{mt}$ is implied by nonnegative flow and the boundary values and is retained as an explicit variable bound.
+
+Constraint~\eqref{eq:model-assignment} assigns each job to
+exactly one instance type and start time.
+Constraint~\eqref{eq:model-flow} conserves capacity at each
+time node: a processing arc consumes $q_j$ instances when
+job $j$ starts and releases them upon completion.
+
+Summing the flow equations through time slot $u$ yields
+\begin{equation}
+\label{eq:idle-capacity}
+y_{mu}
+=N_m-
+\sum_{j:m\in F_j}q_j
+\sum_{\substack{t\in T_{jm}\\
+t\leq u<t+p_{jm}^{\mathrm{occ}}}}
+x_{jmt}.
+\end{equation}
+Thus, $y_{mu}\geq0$ is equivalent to requiring that the
+total instance demand of overlapping jobs does not
+exceed $N_m$. Since $N_m$, $q_j$, and $x_{jmt}$ are
+integer, $y_{mu}$ is automatically integer.
+Its integrality need not be enforced explicitly.
+
 
 \subsection{Objectives and scalarization}
 
-Let $X$ denote the feasible set above, including both $x$ and $y$. The objectives are priority-weighted turnaround and total monetary cost:
+The two objectives have different units and scales.
+We normalize them using the lexicographic extremes of
+the feasible set $X$.
+
+The time-first extreme is defined by
 \begin{align}
- f_1(x)&=\sum_{j\in J}\sum_{m\in F_j}\sum_{t\in T_{jm}}
- w_j(t+p_{jm}^{\mathrm{occ}}-a_j)x_{jmt},\\
- f_2(x)&=\sum_{j\in J}\sum_{m\in F_j}\sum_{t\in T_{jm}}
- c_{jm}^{\mathrm{proc}}x_{jmt}.
+f_1^{\mathrm{lex}}
+&=\min_{(x,y)\in X}f_1(x),\\
+f_2^{\mathrm{lex}}
+&=\min\bigl\{
+f_2(x):(x,y)\in X,\,
+f_1(x)=f_1^{\mathrm{lex}}
+\bigr\}.
 \end{align}
-Physical weighted turnaround is $\Delta f_1$, so the constant time conversion does not affect its minimizers. Idle flow incurs no monetary cost.
-
-Assume that a zero-cost schedule exists within $H$, as is the case when on-premises capacity alone can complete all jobs. Auxiliary optimization problems define the time-first lexicographic extreme and the best zero-cost turnaround:
+Similarly, the cost-first extreme is
 \begin{align}
- f_1^{\mathrm{lex}}&=\min_{(x,y)\in X}f_1(x),\\
- f_2^{\mathrm{lex}}&=\min\{f_2(x):(x,y)\in X,\ f_1(x)=f_1^{\mathrm{lex}}\},\\
- f_1^0&=\min\{f_1(x):(x,y)\in X,\ f_2(x)=0\}.
+f_2^0
+&=\min_{(x,y)\in X}f_2(x),\\
+f_1^0
+&=\min\bigl\{
+f_1(x):(x,y)\in X,\,
+f_2(x)=f_2^0
+\bigr\}.
 \end{align}
-The lexicographic extreme minimizes cost among minimum-turnaround schedules. Every positive-cost schedule with $f_1\geq f_1^0$ is dominated by the best zero-cost schedule, so the restriction $f_1\leq f_1^0$ preserves all Pareto-optimal objective vectors.
 
-When $f_1^0>f_1^{\mathrm{lex}}$ and $f_2^{\mathrm{lex}}>0$, define
-\begin{equation}
- \widehat f_1=\frac{f_1-f_1^{\mathrm{lex}}}{f_1^0-f_1^{\mathrm{lex}}},
- \qquad \widehat f_2=\frac{f_2}{f_2^{\mathrm{lex}}}.
-\end{equation}
-For a preference parameter $\lambda\in[0,1]$, solve
-\begin{equation}
- \min_{(x,y)\in X}\ \lambda\widehat f_1+(1-\lambda)\widehat f_2
- \quad\text{s.t.}\quad f_1(x)\leq f_1^0.
-\end{equation}
-Increasing $\lambda$ favors turnaround. These reference values scale the objectives; they do not bound $\widehat f_2$ by one for every feasible schedule. Exact reference solves justify the stated extremes; heuristic estimates alone do not certify them or the dominance-based restriction.
+The objective vectors of these two solutions are
+$(f_1^{\mathrm{lex}},f_2^{\mathrm{lex}})$
+and $(f_1^0,f_2^0)$, respectively.
 
-Under zero-cost feasibility, $f_1^0=f_1^{\mathrm{lex}}$ if and only if $f_2^{\mathrm{lex}}=0$. In this degenerate case, a zero-cost minimum-turnaround schedule optimizes both objectives and normalization is unnecessary. Otherwise, strictly positive scalarization weights yield supported Pareto-optimal solutions; endpoint weights require tie-breaking by the other objective to exclude dominated ties. Unsupported Pareto points are not recovered by weighted sums and can instead be sought with an $\epsilon$-constraint method.
+Since $f_2^0$ is the minimum attainable cost,
+the cost-first solution dominates every feasible schedule
+with $f_1>f_1^0$. Therefore, the restriction
+$f_1\leq f_1^0$ preserves all Pareto-optimal
+objective vectors.
+
+When the two extremes differ, define
+\begin{equation}
+\label{eq:normalization}
+\widehat f_1
+=\frac{f_1-f_1^{\mathrm{lex}}}
+{f_1^0-f_1^{\mathrm{lex}}},
+\qquad
+\widehat f_2
+=\frac{f_2-f_2^0}
+{f_2^{\mathrm{lex}}-f_2^0}.
+\end{equation}
+
+For $\lambda\in[0,1]$, the scalarized model is
+\begin{equation}
+\label{eq:scalarization}
+\begin{aligned}
+\min_{(x,y)\in X}\quad&
+\lambda\widehat f_1+(1-\lambda)\widehat f_2\\
+\text{s.t.}\quad&
+f_1(x)\leq f_1^0.
+\end{aligned}
+\end{equation}
+
+Increasing $\lambda$ gives greater weight to turnaround.
+The normalization maps the time-first extreme to
+$(0,1)$ and the cost-first extreme to $(1,0)$.
+
+By construction,
+$f_1^0=f_1^{\mathrm{lex}}$ if and only if
+$f_2^{\mathrm{lex}}=f_2^0$.
+In this degenerate case, a feasible schedule minimizes
+both objectives simultaneously, and normalization is
+unnecessary. Otherwise, both denominators in
+\eqref{eq:normalization} are strictly positive.
 
 \section{Proposed Solutions}
 \label{sec:solutions}
@@ -262,20 +337,36 @@ The fitness of an individual is computed on the schedule $S$ obtained by decodin
 \end{equation}
 which we describe in turn.
 
-\emph{Objective term.} Expanding the normalized objectives of Section~\ref{sec:model} gives
-\begin{equation*}
- \lambda\widehat f_1+(1-\lambda)\widehat f_2=\alpha_1f_1+\alpha_2f_2-\alpha_1f_1^{\mathrm{lex}},
-\end{equation*}
-with the constants
+Expanding the normalized weighted-sum objective of
+Section~\ref{sec:model} gives
 \begin{equation}
- \alpha_1=\frac{\lambda}{f_1^0-f_1^{\mathrm{lex}}},\qquad
- \alpha_2=\frac{1-\lambda}{f_2^{\mathrm{lex}}}.
+\begin{aligned}
+\lambda\widehat f_1+(1-\lambda)\widehat f_2
+={}&\alpha_1f_1+\alpha_2f_2\\
+&-\alpha_1f_1^{\mathrm{lex}}-\alpha_2f_2^0,
+\end{aligned}
 \end{equation}
-The last term does not depend on the schedule, so it can be dropped without changing which individual is better, and the objective term is
+where
 \begin{equation}
- Z(S)=\alpha_1f_1(S)+\alpha_2f_2(S).
+\label{eq:ga-weights}
+\alpha_1=
+\frac{\lambda}{f_1^0-f_1^{\mathrm{lex}}},
+\qquad
+\alpha_2=
+\frac{1-\lambda}{f_2^{\mathrm{lex}}-f_2^0}.
 \end{equation}
-Intuitively, $\alpha_1$ is the price, in fitness units, of one unit of weighted turnaround, and $\alpha_2$ is the price of one unit of money.
+
+The subtracted terms are independent of the schedule
+and therefore do not affect the ordering of solutions.
+Consequently, the GA minimizes the equivalent objective
+\begin{equation}
+\label{eq:ga-objective}
+Z(S)=\alpha_1f_1(S)+\alpha_2f_2(S).
+\end{equation}
+
+The coefficients $\alpha_1$ and $\alpha_2$ convert
+weighted turnaround and monetary cost, respectively,
+into the normalized scalar objective.
 
 \emph{Cap penalty.} The model only searches schedules with $f_1\leq f_1^0$. The decoder cannot guarantee this bound, so it is imposed as a soft constraint:
 \begin{equation}
@@ -379,7 +470,7 @@ Offspring are generated independently, so the body of a generation is parallel. 
  \end{tabular}
 \end{table}
 \begin{algorithm}[t]
-  \caption{Genetic Algortihm}
+  \caption{Genetic Algorithm}
   \label{alg:memetic-search}
   \small
   \begin{algorithmic}[1]
@@ -432,9 +523,8 @@ Offspring are generated independently, so the body of a generation is parallel. 
 \section{Experimental Setup}
 \label{sec:experimental_setup}
 
-To evaluate both solutions we employ both a trace-driven simulation of a realistic HPC cluster with access to a commercial public cloud and offline benchmark instances generated from the same trace job characteristics and varying state of cluster size, load and data moving characteristics.
-All online experiments are simulated with Batsim~5~\cite{batsim_jsspp16}, a SimGrid-based simulator of resource and job management systems. Batsim owns the simulation: the clock, job submissions, job execution on the simulated platform and the output traces. Scheduling decisions are not taken by Batsim
-but by an External Decision Component (EDC) that Batsim queries over its message protocol. We wrote a bespoke EDC that calls the correct strategy(Gurobi, Metaheuristic or others) together with a wrapper that exports the platform and the workload to Batsim's input formats, launches Batsim and collects the metrics. 
+To evaluate both solutions we employ both a trace-driven simulation of a realistic HPC cluster with access to a commercial public cloud and offline benchmark instances generated from the same trace job characteristics and varying state of cluster size, load and data moving characteristics. Both the clusters infrastructure and the jobs came from a production clusters of the Brazilian energy company Petrobras.
+All online experiments are simulated with Batsim~5~\cite{batsim_jsspp16}, a SimGrid-based simulator of resource and job management systems. Batsim owns the simulation: the clock, job submissions, job execution on the simulated platform and the output traces. Scheduling decisions are not taken by Batsim but by an External Decision Component (EDC) that Batsim queries over its message protocol. We wrote a bespoke EDC that calls the correct strategy(Gurobi, Metaheuristic or others) together with a wrapper that exports the platform and the workload to Batsim's input formats, launches Batsim and collects the metrics. 
 
 The on-premises side is a production cluster dedicated to reservoir simulation. It is modeled from its Slurm node definitions four homogeneous node groups of two-socket Intel Xeon nodes,
 $1{,}654$ nodes and $76{,}912$ cores. The cloud side is one partition with 12 AWS EC2 on-demand instance types, priced at their us-east-1 Linux list prices. Each on-premises node type has a curated list of compatible cloud types, chosen to have at least its physical core count and clock frequency and a CPU generation that is not older. An offloaded job may use only types compatible with the node type it requests. We assume that all types run jobs at the same
@@ -502,14 +592,12 @@ memory cover the on-prem node. Azure has no 128-vCPU Dsv5, so the 64-core node m
 to D128s\_v6. Prices are Linux on-demand list prices (AWS us-east-1, Azure eastus), converted to a cost per slot. All types run at $P_m=1$ with no
 deployment delay, and every cloud type has unlimited capacity.
 
-Cloud jobs pay internet egress
-$\kappa IO_m$ = \$0.09/GB (AWS) or \$0.08/GB (Azure),
-both at the first paid tier, North America. The transfer rate is bound by the cloud VM's included disk throughput, which gives $\tau IO_m$ = \SI{7.63}{s/GB} (AWS, gp3 at 125\,MiB/s) and \SI{8.0}{s/GB} (Azure, Premium SSD v2 at
-125\,MB/s). Azure is therefore cheaper but slightly slower to egress, which is a trade-off rather than a dominance. 
+All jobs originate at the on-premises site $h$ and need no input staging ($o_j=d_j=h$, $\iota_j^{\mathrm{in}}=0$). Each cloud provider is a site, and cloud jobs bring their results home through internet egress, priced at
+$\kappa_{\sigma(m)h}$ = \$0.09/GB (AWS) or \$0.08/GB (Azure),
+both at the first paid tier, North America. The transfer rate is bound by the cloud VM's included disk throughput, which gives $\theta_{\sigma(m)h}^{\mathrm{raw}}$ = 7.63\,s/GB (AWS, gp3 at 125\,MiB/s) and 8.0\,s/GB (Azure, Premium SSD v2 at
+125\,MB/s). Azure is therefore cheaper but slightly slower to egress, which is a trade-off rather than a dominance.
 Every factor takes one level for the whole instance (\ref{tab:factors}). The
 full factorial has $2\times3\times3\times3=54$ instances per class and 108 in all.
-An instance is named by its factors, e.g.\ \code{B\_W2\_n300\_lE\_iM} for class~B,
-the \code{W2} workload, $N=300$, load E and io level M.
 
 \begin{table}[ht]
 \centering\small
@@ -520,7 +608,7 @@ the \code{W2} workload, $N=300$, load E and io level M.
 Factor & Levels & Meaning \\
 \midrule
 Class & A, B & machine list\\
-Workload & W1, W2 & job set (\cref{sec:workloads}) \\
+Workload & W1, W2 & job set (Table~\ref{tab:workloads}) \\
 Node count $N$ & 100, 300, 500 & nodes of every on-prem type \\
 Load & F, H, E & jobs running at $t=0$ on each on-prem type: 0 (free),
   $\lfloor N/2\rfloor$ (half) or $N$ (entirely full) \\
@@ -529,7 +617,7 @@ io level & L, M, H & IO size of each job \\
 \end{tabularx}
 \end{table}
 
-\section{Results}
+\section{Results and Conclusion}
 \label{sec:results}
 
 \begin{table*}[t]
@@ -570,9 +658,9 @@ Class & Wkl. & $N$ & $\bar g$ & Gap (\%) & \#BKS & $t$ & $\bar g$ & Gap (\%) & \
 \end{tabular}
 \end{table*}
 
-The table \ref{tab:ga-vs-gurobi} shows the  aggregated results between three different weights (0.25, 0.5 and 0.75) and three different I/O levels, their weighted-sum objective value and time of each solve, there is a clear trend of Gurobi taking the longest but always encountering the best solution, with the GA having a mean gap of 4.36\% to the Gurobi solution while being on average 17 times faster.  While threshold bursting is the fastest it is also the worse in terms of quality having a mean gap of 257\% to the best solution.  In terms of absolute time to solution Gurobi solves on average on 71 seconds, the GA  5.5 seconds and threshold 8.5 miliseconds.  
-
-
+The table \ref{tab:ga-vs-gurobi} shows the aggregated results between three different weights (0.25, 0.5 and 0.75) and three different I/O levels on the offline synthetic instances, their weighted-sum objective value and time of each solve, there is a clear trend of Gurobi taking the longest but always encountering the best solution, with the GA having a mean gap of 4.36\% to the Gurobi solution while taking less than 6 seconds.
+In the online simulations shown on table \ref{tab:no-cloud-slurm-baselines} MOSPACE, using Gurobi to solve the MILP, provides better turnaround time, waiting time and average bounded slowdown than both multi-cluster and federated SLURM environments even when no cloud partition is available on both workloads examined. When simulating with cloud partitions as shown on table \ref{tab:cloud-slurm-baselines} in workload 1 MOSPACE achieved a mean waiting time of less than a minute expending 1186.6 dollars while while federated Slurm spent 2240.4 and multi-cluster Slurm spent 1688.1 to achieve the same results. On workload 2 it took MOSPACE 6471.2 dollars to achieve a 1 minute mean waiting time while both multi-cluster and federated Slurm spent more than 10000 dollars without achieving the same results. Even if in multi-objective optimization the concept of pareto dominance apply only when a solution is worse in all objectives MOSPACE generally presented a better tradeoff of turnaround per dollar spent with a $\lambda=0.25$.
+These results show that there is significant space for improving the scheduling of HPC jobs across federated environments  specially cloud enabled ones when trying to minimize expenditure together with other objectives, even if Slurm do provide both a multi-cluster and a federated configuration. We also defend that the arc-flow formulation proposed in this work provides a optimal schedule in a reasonable time, while the GA provides a good schedule faster. Even with these advancements the current work do have several limitations that leave open future work:  technical problems.
 
 \begin{table*}[htbp]
 \centering
@@ -614,43 +702,43 @@ MOSPACE & \textbf{14{,}513.2} & \textbf{949.6} & \textbf{3{,}594.2} & \textbf{23
 \begin{table*}[htbp]
 \centering
 \small
-\caption{Turnaround and waiting time of the window jobs with cloud offloading enabled. MOSPACE is swept over $\alpha$; the Slurm baselines over the size of the cloud cluster, each offloaded job on the cheapest VM type that fits. BSLD: mean bounded slowdown $\max(1, (w + r)/\max(r, 10\,\mathrm{s}))$.}
+\caption{Turnaround and waiting time of the window jobs with cloud offloading enabled. MOSPACE is swept over $\alpha$; the Slurm baselines over the size of the cloud cluster, each offloaded job on the cheapest VM type that fits.  BSLD: mean bounded slowdown $\max(1, (w + r)/\max(r, 10\,\mathrm{s}))$. Jobs per cluster: window jobs run on each on-premises cluster (C1--C4; Workload 1 has two) and on the cloud.}
 \label{tab:cloud-slurm-baselines}
 \resizebox{\textwidth}{!}{%
-\begin{tabular}{llrrrrrrrrrr}
+\begin{tabular}{llrrrrrrrrrrrrrr}
 \hline
-Policy & Setting & \multicolumn{2}{c}{Turnaround} & \multicolumn{5}{c}{Wait} & BSLD & Offloaded & Cloud cost \\
- & & Total (job-h) & Mean (min) & Total (job-h) & Mean (min) & Median (min) & P95 (min) & Max (h) & & (jobs) & (\$) \\
+Policy & Setting & \multicolumn{2}{c}{Turnaround} & \multicolumn{5}{c}{Wait} & BSLD & \multicolumn{5}{c}{Jobs per cluster} & Cloud cost \\
+ & & Total (job-h) & Mean (min) & Total (job-h) & Mean (min) & Median (min) & P95 (min) & Max (h) & & C1 & C2 & C3 & C4 & Cloud & (\$) \\
 \hline
-\multicolumn{12}{l}{\textit{Workload 1 (964 jobs)}} \\
-MOSPACE & $\alpha=0.25$ & 1{,}705.4 & 106.1 & 4.7 & 0.3 & 0.0 & 0.0 & 1.44 & 1.00 & 580 & 1{,}186.6 \\
- & $\alpha=0.50$ & 1{,}702.1 & 105.9 & 1.4 & 0.1 & 0.0 & 0.0 & 1.40 & 1.00 & 583 & 1{,}669.5 \\
- & $\alpha=0.75$ & 1{,}700.7 & 105.9 & 0.0 & 0.0 & 0.0 & 0.0 & 0.00 & 1.00 & 583 & 1{,}688.1 \\
-\cline{2-12}
-Federated Slurm & 50 nodes & 2{,}463.7 & 153.3 & 763.0 & 47.5 & 44.8 & 77.5 & 1.30 & 4.29 & 210 & 1{,}023.4 \\
- & 100 nodes & 2{,}202.5 & 137.1 & 501.8 & 31.2 & 27.6 & 67.1 & 1.16 & 3.43 & 404 & 2{,}099.5 \\
- & 200 nodes & 1{,}843.8 & 114.8 & 143.1 & 8.9 & 0.3 & 29.5 & 0.51 & 1.86 & 616 & 2{,}086.6 \\
- & 400 nodes & 1{,}701.2 & 105.9 & 0.5 & 0.0 & 0.0 & 0.1 & 0.01 & 1.00 & 617 & 2{,}240.4 \\
-\cline{2-12}
-Multi-cluster Slurm & 50 nodes & 2{,}571.6 & 160.1 & 870.9 & 54.2 & 51.8 & 114.7 & 1.99 & 4.80 & 276 & 1{,}889.3 \\
- & 100 nodes & 2{,}254.7 & 140.3 & 554.1 & 34.5 & 30.1 & 93.0 & 1.82 & 3.50 & 397 & 1{,}625.2 \\
- & 200 nodes & 1{,}853.3 & 115.4 & 152.6 & 9.5 & 0.0 & 39.6 & 1.25 & 1.92 & 578 & 1{,}775.7 \\
- & 400 nodes & 1{,}700.7 & 105.9 & 0.0 & 0.0 & 0.0 & 0.0 & 0.00 & 1.00 & 583 & 1{,}688.1 \\
+\multicolumn{16}{l}{\textit{Workload 1 (964 jobs)}} \\
+MOSPACE & $\alpha=0.25$ & 1{,}705.4 & 106.1 & 4.7 & 0.3 & 0.0 & 0.0 & 1.44 & 1.00 & 244 & 140 & -- & -- & 580 & 1{,}186.6 \\
+ & $\alpha=0.50$ & 1{,}702.1 & 105.9 & 1.4 & 0.1 & 0.0 & 0.0 & 1.40 & 1.00 & 240 & 141 & -- & -- & 583 & 1{,}669.5 \\
+ & $\alpha=0.75$ & 1{,}700.7 & 105.9 & 0.0 & 0.0 & 0.0 & 0.0 & 0.00 & 1.00 & 240 & 141 & -- & -- & 583 & 1{,}688.1 \\
+\cline{2-16}
+Federated Slurm & 50 nodes & 2{,}463.7 & 153.3 & 763.0 & 47.5 & 44.8 & 77.5 & 1.30 & 4.29 & 422 & 332 & -- & -- & 210 & 1{,}023.4 \\
+ & 100 nodes & 2{,}202.5 & 137.1 & 501.8 & 31.2 & 27.6 & 67.1 & 1.16 & 3.43 & 313 & 247 & -- & -- & 404 & 2{,}099.5 \\
+ & 200 nodes & 1{,}843.8 & 114.8 & 143.1 & 8.9 & 0.3 & 29.5 & 0.51 & 1.86 & 198 & 150 & -- & -- & 616 & 2{,}086.6 \\
+ & 400 nodes & 1{,}701.2 & 105.9 & 0.5 & 0.0 & 0.0 & 0.1 & 0.01 & 1.00 & 200 & 147 & -- & -- & 617 & 2{,}240.4 \\
+\cline{2-16}
+Multi-cluster Slurm & 50 nodes & 2{,}571.6 & 160.1 & 870.9 & 54.2 & 51.8 & 114.7 & 1.99 & 4.80 & 531 & 157 & -- & -- & 276 & 1{,}889.3 \\
+ & 100 nodes & 2{,}254.7 & 140.3 & 554.1 & 34.5 & 30.1 & 93.0 & 1.82 & 3.50 & 422 & 145 & -- & -- & 397 & 1{,}625.2 \\
+ & 200 nodes & 1{,}853.3 & 115.4 & 152.6 & 9.5 & 0.0 & 39.6 & 1.25 & 1.92 & 231 & 155 & -- & -- & 578 & 1{,}775.7 \\
+ & 400 nodes & 1{,}700.7 & 105.9 & 0.0 & 0.0 & 0.0 & 0.0 & 0.00 & 1.00 & 234 & 147 & -- & -- & 583 & 1{,}688.1 \\
 \hline
-\multicolumn{12}{l}{\textit{Workload 2 (3349 jobs)}} \\
-MOSPACE & $\alpha=0.25$ & 8{,}047.6 & 144.2 & 57.9 & 1.0 & 0.0 & 6.2 & 1.35 & 1.01 & 1667 & 6{,}471.2 \\
- & $\alpha=0.50$ & 7{,}990.6 & 143.2 & 0.9 & 0.0 & 0.0 & 0.1 & 0.27 & 1.00 & 1585 & 12{,}347.9 \\
- & $\alpha=0.75$ & 7{,}989.7 & 143.1 & 0.0 & 0.0 & 0.0 & 0.0 & 0.00 & 1.00 & 1538 & 12{,}635.0 \\
-\cline{2-12}
-Federated Slurm & 50 nodes & 11{,}363.3 & 203.6 & 3{,}373.6 & 60.4 & 72.6 & 95.2 & 1.62 & 7.99 & 293 & 2{,}042.3 \\
- & 100 nodes & 10{,}698.0 & 191.7 & 2{,}708.4 & 48.5 & 59.0 & 79.4 & 1.35 & 6.63 & 514 & 4{,}577.4 \\
- & 200 nodes & 9{,}676.9 & 173.4 & 1{,}687.3 & 30.2 & 33.9 & 60.5 & 1.03 & 4.50 & 815 & 8{,}456.8 \\
- & 400 nodes & 8{,}453.8 & 151.5 & 464.2 & 8.3 & 0.1 & 28.1 & 0.49 & 1.77 & 1409 & 12{,}221.9 \\
-\cline{2-12}
-Multi-cluster Slurm & 50 nodes & 11{,}435.6 & 204.9 & 3{,}445.9 & 61.7 & 62.2 & 137.0 & 2.49 & 7.76 & 294 & 2{,}657.6 \\
- & 100 nodes & 10{,}752.6 & 192.6 & 2{,}763.0 & 49.5 & 38.8 & 138.7 & 2.69 & 7.32 & 517 & 3{,}467.6 \\
- & 200 nodes & 9{,}684.3 & 173.5 & 1{,}694.6 & 30.4 & 22.0 & 86.3 & 1.96 & 4.11 & 830 & 7{,}211.2 \\
- & 400 nodes & 8{,}460.5 & 151.6 & 470.8 & 8.4 & 0.0 & 34.4 & 0.91 & 1.81 & 1315 & 11{,}206.1 \\
+\multicolumn{16}{l}{\textit{Workload 2 (3349 jobs)}} \\
+MOSPACE & $\alpha=0.25$ & 8{,}047.6 & 144.2 & 57.9 & 1.0 & 0.0 & 6.2 & 1.35 & 1.01 & 952 & 495 & 233 & 2 & 1{,}667 & 6{,}471.2 \\
+ & $\alpha=0.50$ & 7{,}990.6 & 143.2 & 0.9 & 0.0 & 0.0 & 0.1 & 0.27 & 1.00 & 1{,}003 & 486 & 275 & 0 & 1{,}585 & 12{,}347.9 \\
+ & $\alpha=0.75$ & 7{,}989.7 & 143.1 & 0.0 & 0.0 & 0.0 & 0.0 & 0.00 & 1.00 & 1{,}040 & 482 & 289 & 0 & 1{,}538 & 12{,}635.0 \\
+\cline{2-16}
+Federated Slurm & 50 nodes & 11{,}363.3 & 203.6 & 3{,}373.6 & 60.4 & 72.6 & 95.2 & 1.62 & 7.99 & 1{,}963 & 701 & 386 & 6 & 293 & 2{,}042.3 \\
+ & 100 nodes & 10{,}698.0 & 191.7 & 2{,}708.4 & 48.5 & 59.0 & 79.4 & 1.35 & 6.63 & 1{,}816 & 674 & 342 & 3 & 514 & 4{,}577.4 \\
+ & 200 nodes & 9{,}676.9 & 173.4 & 1{,}687.3 & 30.2 & 33.9 & 60.5 & 1.03 & 4.50 & 1{,}445 & 708 & 376 & 5 & 815 & 8{,}456.8 \\
+ & 400 nodes & 8{,}453.8 & 151.5 & 464.2 & 8.3 & 0.1 & 28.1 & 0.49 & 1.77 & 908 & 617 & 415 & 0 & 1{,}409 & 12{,}221.9 \\
+\cline{2-16}
+Multi-cluster Slurm & 50 nodes & 11{,}435.6 & 204.9 & 3{,}445.9 & 61.7 & 62.2 & 137.0 & 2.49 & 7.76 & 1{,}936 & 721 & 396 & 2 & 294 & 2{,}657.6 \\
+ & 100 nodes & 10{,}752.6 & 192.6 & 2{,}763.0 & 49.5 & 38.8 & 138.7 & 2.69 & 7.32 & 1{,}795 & 668 & 367 & 2 & 517 & 3{,}467.6 \\
+ & 200 nodes & 9{,}684.3 & 173.5 & 1{,}694.6 & 30.4 & 22.0 & 86.3 & 1.96 & 4.11 & 1{,}528 & 677 & 312 & 2 & 830 & 7{,}211.2 \\
+ & 400 nodes & 8{,}460.5 & 151.6 & 470.8 & 8.4 & 0.0 & 34.4 & 0.91 & 1.81 & 1{,}135 & 565 & 332 & 2 & 1{,}315 & 11{,}206.1 \\
 \hline
 \end{tabular}%
 }

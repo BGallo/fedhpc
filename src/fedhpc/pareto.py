@@ -17,6 +17,7 @@ from .model import (
     _apply_params,
     _extract,
     certify_params,
+    grid_floor,
     is_certified,
     objective_step,
     set_mip_start,
@@ -177,6 +178,7 @@ def _make_engine_lexmin_bounded(
     per_solve_time_limit: float | None,
     n_seed_retries: int,
     engine: str,
+    lpfirst_options=None,
 ):
     """Dispatch to the requested solve engine's ``lexmin_bounded`` factory.
 
@@ -200,7 +202,8 @@ def _make_engine_lexmin_bounded(
         return bpc.make_bpc_lexmin_bounded(inst, time_limit=per_solve_time_limit)
     if engine == "lpfirst":
         from . import lpfirst
-        return lpfirst.make_lpfirst_lexmin_bounded(inst, time_limit=per_solve_time_limit)
+        return lpfirst.make_lpfirst_lexmin_bounded(inst, time_limit=per_solve_time_limit,
+                                                   options=lpfirst_options)
     if engine != "gurobi":
         raise ValueError(f"unknown engine {engine!r} (expected 'gurobi', 'bpc' or 'lpfirst')")
     fmt = formulation or SpaceTimeFormulation()
@@ -275,6 +278,10 @@ def weighted_sum_reference(
     inst: Instance,
     formulation: Formulation | None = None,
     min_cost_reference: bool = False,
+    *,
+    engine: str = "gurobi",
+    lpfirst_options=None,
+    time_limit: float | None = None,
     **params,
 ) -> tuple[tuple[float, float, float, float], Solution | None]:
     """The weighted-sum reference points (f1_T, f2_T, f1_0, f2_0), and the
@@ -292,7 +299,27 @@ def weighted_sum_reference(
     minimum-cost schedule (always, unless some data are negative). It is then a schedule with
     f1 <= f1_0 and minimum cost, i.e., an optimum of the degenerate weighted
     sum (min f2 s.t. f1 <= f1_0), found by the reference solves themselves.
+
+    ``engine="lpfirst"`` solves the same phases with
+    :func:`fedhpc.lpfirst.reference_points_lpfirst` (``lpfirst_options``,
+    by default HiGHS, which needs no Gurobi licence). ``time_limit`` caps that
+    call; the Gurobi engine takes Gurobi's ``TimeLimit`` in ``params``
+    instead. Either engine raises RuntimeError unless every value is proven;
+    ``reference_points_lpfirst(require_certified=False)`` accepts an
+    unproven f1_0 (an upper bound) and reports its lower bound.
     """
+    if engine == "lpfirst":
+        from . import lpfirst
+        if formulation is not None or params:
+            raise ValueError("engine='lpfirst' takes no formulation or Gurobi params")
+        r = lpfirst.reference_points_lpfirst(
+            inst, min_cost_reference=min_cost_reference, time_limit=time_limit,
+            options=lpfirst_options)
+        return r.refs, r.ideal
+    if engine != "gurobi":
+        raise ValueError(f"unknown engine {engine!r} (expected 'gurobi' or 'lpfirst')")
+    if time_limit is not None:
+        params = {**params, "TimeLimit": time_limit}
     return _weighted_sum_reference(inst, formulation, params, min_cost_reference, want_ideal=True)
 
 
@@ -449,13 +476,15 @@ def true_pareto_frontier(
     n_seed_retries: int = 3,
     checkpoint_path: str | None = None,
     engine: str = "gurobi",
+    lpfirst_options=None,
     **params,
 ) -> list[Solution]:
     """Enumerate the complete true Pareto front via exact box (rectangle) splitting.
 
     ``engine`` — ``"gurobi"`` (default, the compact ``SpaceTimeFormulation``
     MIP), ``"bpc"`` (the exact branch-and-price engine in ``fedhpc.bpc``) or
-    ``"lpfirst"`` (``fedhpc.lpfirst``, for large near-integral instances).
+    ``"lpfirst"`` (``fedhpc.lpfirst``, for large near-integral instances;
+    ``lpfirst_options`` passes its :class:`~fedhpc.lpfirst.LPFirstOptions`).
     Selecting ``"bpc"`` changes nothing about this function's algorithm —
     see ``_make_engine_lexmin_bounded`` — only which engine resolves each
     box's lex-min-bounded sub-solve. BPC currently has no equivalent of
@@ -615,7 +644,8 @@ def true_pareto_frontier(
     half1, half2 = objective_step(inst, "f1") / 2, objective_step(inst, "f2") / 2
 
     _lexmin_bounded, _counters = _make_engine_lexmin_bounded(
-        inst, formulation, params, per_solve_time_limit, n_seed_retries, engine
+        inst, formulation, params, per_solve_time_limit, n_seed_retries, engine,
+        lpfirst_options,
     )
 
     f1_of, f2_of = "f1", "f2"
@@ -1294,3 +1324,626 @@ def hybrid_frontier(
             file=sys.stderr, flush=True,
         )
     return result
+
+
+# ── Parallel exact front (box splitting on independent boxes) ────────────────
+
+_WORKER_ENGINE = None
+
+
+def _parallel_worker_init(inst: Instance, engine: str, per_solve_time_limit, lpfirst_options):
+    global _WORKER_ENGINE
+    if engine == "lpfirst":
+        from . import lpfirst
+        _WORKER_ENGINE, _ = lpfirst.make_lpfirst_lexmin_bounded(
+            inst, per_solve_time_limit, options=lpfirst_options)
+    else:
+        _WORKER_ENGINE, _ = _make_engine_lexmin_bounded(
+            inst, None, {"IntFeasTol": 1e-9} if engine == "gurobi" else {},
+            per_solve_time_limit, 3, engine)
+
+
+def _parallel_worker_solve(args):
+    primary, secondary, bound, bound_value, start = args
+    t0 = _time.perf_counter()
+    sol = _WORKER_ENGINE(primary, secondary, bound, bound_value, start=start)
+    return sol, _time.perf_counter() - t0
+
+
+def _parallel_anchors(pool: "_SolvePool", st: dict):
+    """Both lexicographic anchors, solved concurrently. A killed anchor comes
+    back as an inconclusive Solution."""
+    pool.submit(("f1", "f2", None, None, None), "A")
+    pool.submit(("f2", "f1", None, None, None), "B")
+    got: dict = {}
+    while len(got) < 2:
+        for tag, res in pool.wait():
+            st["n_solves"] += 1
+            if res is None:
+                got[tag] = Solution(status="time_limit", objective=None, f1=None, f2=None,
+                                    assignment={}, completion={})
+            else:
+                got[tag] = res[0]
+                st["solve_time"] += res[1]
+    return got["A"], got["B"]
+
+
+class _SolvePool:
+    """A spawn process pool for box solves with a *hard* time limit.
+
+    Solver time limits are not always honoured: on the 964-job trace some
+    HiGHS-backed lpfirst solves ran for hours past a 300 s cap, which left a
+    parallel search waiting on one box forever. A solve that has run longer
+    than ``hard_limit`` seconds gets every worker process killed, and the
+    pool is rebuilt. Its tag comes back with result ``None`` (the caller marks
+    the box unresolved), and the other in-flight solves are resubmitted."""
+
+    def __init__(self, n_workers: int, initargs: tuple, hard_limit: float | None):
+        self.n, self.initargs, self.hard_limit = n_workers, initargs, hard_limit
+        self.jobs: dict = {}          # future -> (args, tag, start time)
+        self.n_restarts = 0
+        self.on_restart = None
+        self._start()
+
+    def _start(self) -> None:
+        import concurrent.futures as cf
+        import multiprocessing as mp
+        self.pool = cf.ProcessPoolExecutor(self.n, mp_context=mp.get_context("spawn"),
+                                           initializer=_parallel_worker_init,
+                                           initargs=self.initargs)
+
+    def __len__(self) -> int:
+        return len(self.jobs)
+
+    def submit(self, args: tuple, tag) -> None:
+        self.jobs[self.pool.submit(_parallel_worker_solve, args)] = (args, tag, _time.perf_counter())
+
+    def wait(self) -> list[tuple]:
+        """Block until a solve finishes or one overruns. Returns
+        ``[(tag, (sol, dt) | None), ...]`` with ``None`` for killed solves."""
+        import concurrent.futures as cf
+        while True:
+            timeout = None
+            if self.hard_limit is not None:
+                oldest = min(t for _a, _g, t in self.jobs.values())
+                timeout = max(min(1.0, self.hard_limit),
+                              oldest + self.hard_limit - _time.perf_counter())
+            done, _ = cf.wait(self.jobs, timeout=timeout, return_when=cf.FIRST_COMPLETED)
+            if done:
+                return [(self.jobs.pop(f)[1], f.result()) for f in done]
+            now = _time.perf_counter()
+            if any(now - t > self.hard_limit for _a, _g, t in self.jobs.values()):
+                return self._restart(now)
+
+    def _restart(self, now: float) -> list[tuple]:
+        out, keep = [], []
+        for f, (args, tag, t) in self.jobs.items():
+            if f.done() and f.exception() is None:
+                out.append((tag, f.result()))
+            elif now - t > self.hard_limit:
+                out.append((tag, None))
+            else:
+                keep.append((args, tag))
+        for p in list(getattr(self.pool, "_processes", {}).values()):
+            p.kill()
+        self.pool.shutdown(wait=False, cancel_futures=True)
+        self.jobs = {}
+        self.n_restarts += 1
+        if self.on_restart is not None:
+            self.on_restart(self.n_restarts)
+        self._start()
+        for args, tag in keep:
+            self.submit(args, tag)
+        return out
+
+    def shutdown(self) -> None:
+        if self.jobs:   # abandoned solves: do not wait for them
+            for p in list(getattr(self.pool, "_processes", {}).values()):
+                p.kill()
+        self.pool.shutdown(wait=not self.jobs, cancel_futures=True)
+
+
+def parallel_pareto_frontier(
+    inst: Instance,
+    n_workers: int | None = None,
+    *,
+    engine: str = "lpfirst",
+    lpfirst_options=None,
+    per_solve_time_limit: float | None = None,
+    time_budget: float | None = None,
+    hard_time_limit: float | None = None,
+    min_split_width: float = 2.0,
+    verbose: bool = False,
+    stats: dict | None = None,
+    on_point=None,
+) -> list[Solution]:
+    """The complete exact Pareto front, with box solves run in parallel.
+
+    Same sub-solves and certificates as :func:`true_pareto_frontier`, but the
+    open boxes are worked on concurrently by ``n_workers`` processes (each
+    with its own engine, built once). The serial search is a single chain of
+    boxes, so this function also *splits* boxes to make parallel work, as the
+    balanced box method does (Boland, Charkhgard & Savelsbergh 2015):
+
+    - **split** a box (L, R) at an f1 level ``mid`` strictly between L.f1 and
+      R.f1: ``M = lexmin(f2, f1 | f1 <= mid)``. M is Pareto-optimal and the
+      rightmost point with f1 <= mid, so the box becomes (L, M) and (M, R),
+      both open (or only (L, R), now known to be clear up to ``mid``, if
+      M is L);
+    - **grow** a box from one end, exactly as the serial search: from L,
+      ``lexmin(f1, f2 | f2 <= L.f2 - δ)``; from R,
+      ``lexmin(f2, f1 | f1 <= R.f1 - 1)``. The result is the end's
+      neighbour on the front, or proves the box empty.
+
+    A box is split while fewer boxes are open than workers and it is at
+    least ``min_split_width`` f1 levels wide (and not already known clear
+    past its midpoint); otherwise it is grown, alternating ends. Each box
+    has at most one solve in flight. Every solve is seeded with a box end
+    that is feasible for it (R for a left growth, L otherwise).
+
+    ``engine`` — ``"lpfirst"`` (default; ``lpfirst_options`` passes an
+    :class:`fedhpc.lpfirst.LPFirstOptions`, e.g. ``backend="highs"``),
+    ``"bpc"`` or ``"gurobi"``. ``time_budget`` stops submitting new solves
+    once that many seconds have passed; open boxes and dropped
+    (inconclusive) boxes make the front partial, with the same warning as
+    the serial search. ``stats`` receives counters. ``on_point`` — called
+    with each proven Pareto-optimal point as soon as it is found (to stream
+    a long search's results). ``hard_time_limit`` — wall seconds after which
+    a solve is killed (its worker processes restarted) and its box counted
+    unresolved; default ``2 * per_solve_time_limit + 60`` (two phases), none
+    without a per-solve limit.
+    """
+    n_workers = n_workers or max(1, (os.cpu_count() or 2) - 1)
+    half1, half2 = objective_step(inst, "f1") / 2, objective_step(inst, "f2") / 2
+    st = stats if stats is not None else {}
+    st.update(n_solves=0, n_split=0, n_grow=0, n_empty=0, n_unresolved=0, solve_time=0.0)
+    t0 = _time.perf_counter()
+    if hard_time_limit is None and per_solve_time_limit is not None:
+        hard_time_limit = 2 * per_solve_time_limit + 60
+
+    pool = _SolvePool(n_workers, (inst, engine, per_solve_time_limit, lpfirst_options),
+                      hard_time_limit)
+    st["n_restarts"] = 0
+    pool.on_restart = lambda n: st.__setitem__("n_restarts", n)
+    boxes: list[list] = []
+    truncated = False
+    try:
+        a, b = _parallel_anchors(pool, st)
+        if a.status not in ("optimal", "infeasible") or a.f1 is None:
+            print(f"parallel-pareto: WARNING — anchor A inconclusive ({a.status})",
+                  file=sys.stderr, flush=True)
+            return []
+        if b.status not in ("optimal", "infeasible") or b.f1 is None:
+            print(f"parallel-pareto: WARNING — anchor B inconclusive ({b.status})",
+                  file=sys.stderr, flush=True)
+            return [a]
+        def found(sol) -> None:
+            solutions.append(sol)
+            if on_point is not None:
+                on_point(sol)
+
+        solutions: list[Solution] = []
+        found(a)
+        if abs(a.f1 - b.f1) < half1 and abs(a.f2 - b.f2) < half2:
+            return solutions
+        found(b)
+
+        # box: [L, R, clear_to, side]; clear_to — no Pareto point has f1 in
+        # (L.f1, clear_to]; side — the end the next growth starts from
+        boxes = [[a, b, a.f1, "left"]]
+
+        def width(bx) -> float:
+            return bx[1].f1 - max(bx[0].f1, bx[2])
+
+        def submit(bx) -> None:
+            L, R, clear_to, side = bx
+            mid = grid_floor(inst, "f1", (max(L.f1, clear_to) + R.f1) / 2)
+            if (len(boxes) + len(pool) < n_workers and width(bx) >= min_split_width
+                    and max(L.f1, clear_to) + half1 < mid < R.f1 - half1):
+                op = ("split", mid)
+                args = ("f2", "f1", "f1", mid, L)
+                st["n_split"] += 1
+            elif side == "left":
+                op = ("left",)
+                args = ("f1", "f2", "f2", L.f2 - half2, R)
+                st["n_grow"] += 1
+            else:
+                op = ("right",)
+                args = ("f2", "f1", "f1", R.f1 - half1, L)
+                st["n_grow"] += 1
+            pool.submit(args, (bx, op))
+
+        while boxes or len(pool):
+            if time_budget is not None and _time.perf_counter() - t0 >= time_budget:
+                truncated = True
+            # no f1 grid level (or f2 one) strictly inside: empty without a solve
+            for bx in [bx for bx in boxes if width(bx) < 1 + half1
+                       or bx[0].f2 - bx[1].f2 < 3 * half2]:
+                boxes.remove(bx)
+                st["n_empty"] += 1
+            while boxes and not truncated and len(pool) < n_workers:
+                boxes.sort(key=width)
+                submit(boxes.pop())
+            if not len(pool):
+                break
+            for ((L, R, clear_to, side), op), res in pool.wait():
+                st["n_solves"] += 1
+                sol, dt = res if res is not None else (None, hard_time_limit)
+                st["solve_time"] += dt
+                if sol is None or sol.status not in ("optimal", "infeasible"):
+                    st["n_unresolved"] += 1
+                    if verbose:
+                        print(f"parallel-pareto: box [{L.f1:.2f},{R.f1:.2f}] {op[0]} "
+                              f"INCONCLUSIVE ({sol.status if sol else 'killed'}), dropped",
+                              file=sys.stderr, flush=True)
+                    continue
+                if op[0] == "split":
+                    if sol.f1 is None or sol.f1 < L.f1 + half1:     # M is L: clear up to mid
+                        boxes.append([L, R, op[1], side])
+                    else:
+                        found(sol)
+                        boxes.append([L, sol, L.f1, "left"])
+                        boxes.append([sol, R, sol.f1, "right"])
+                    continue
+                if op[0] == "left":
+                    empty = sol.f1 is None or sol.f1 >= R.f1 - half1
+                else:
+                    empty = sol.f1 is None or sol.f2 >= L.f2 - half2
+                if empty:
+                    st["n_empty"] += 1
+                    continue
+                found(sol)
+                if op[0] == "left":
+                    boxes.append([sol, R, sol.f1, "right"])
+                else:
+                    boxes.append([L, sol, clear_to, "left"])
+                if verbose:
+                    print(f"parallel-pareto: {op[0]} → f1={sol.f1:.2f} f2={sol.f2:.6g} "
+                          f"({dt:.1f}s; {len(solutions)} pts, {len(boxes)} open)",
+                          file=sys.stderr, flush=True)
+    finally:
+        pool.shutdown()
+
+    st["wall"] = _time.perf_counter() - t0
+    st["open_boxes"] = len(boxes)
+    if truncated or st["n_unresolved"]:
+        print(f"parallel-pareto: WARNING — "
+              f"{'time budget exhausted' if truncated else 'per-solve time limit hit'}; "
+              f"returning a PARTIAL front ({len(solutions)} points, {len(boxes)} box(es) open, "
+              f"{st['n_unresolved']} dropped).", file=sys.stderr, flush=True)
+    return _filter_dominated(solutions)
+
+
+
+class _Pt:
+    """A known point of :func:`parallel_epsilon_frontier`: a schedule ``sol``
+    and what is proven about it. ``ex1``: some Pareto point has f1 = sol.f1
+    and f2 <= sol.f2 (from ``Q``). ``ex2``: some Pareto point has
+    f2 = sol.f2 and f1 <= sol.f1 (from ``M``). Both: sol is that Pareto
+    point."""
+    __slots__ = ("sol", "ex1", "ex2", "reported")
+
+    def __init__(self, sol: Solution, ex1: bool, ex2: bool):
+        self.sol, self.ex1, self.ex2, self.reported = sol, ex1, ex2, False
+
+    @property
+    def f1(self) -> float:
+        return self.sol.f1
+
+    @property
+    def f2(self) -> float:
+        return self.sol.f2
+
+
+def parallel_epsilon_frontier(
+    inst: Instance,
+    n_workers: int | None = None,
+    *,
+    direction: str = "adaptive",
+    lpfirst_options=None,
+    per_solve_time_limit: float | None = None,
+    time_budget: float | None = None,
+    hard_time_limit: float | None = None,
+    verbose: bool = False,
+    stats: dict | None = None,
+    on_point=None,
+) -> list[Solution]:
+    """The complete exact Pareto front from *single-phase* ε-constraint
+    solves, run in parallel (``engine="lpfirst"``):
+
+    - ``Q(c) = min f1 s.t. f2 <= c``, proven, with any schedule attaining it.
+      Some Pareto point then has f1 = Q(c) and f2 <= that schedule's cost;
+    - ``M(b) = min f2 s.t. f1 <= b``, the mirror image.
+
+    The box searches (:func:`true_pareto_frontier`,
+    :func:`parallel_pareto_frontier`) pay one solve of *each* kind per point,
+    and which kind is expensive depends on where the point sits. On the
+    964-job trace, M costs 2-4 s against 6-8 s for Q at the high-cost end,
+    while at the cost-minimal end Q costs ~20 s against 50-165 s for M. Here
+    each point costs about one solve, of the kind that is cheap in its
+    region. A point known from one kind of solve only is kept as a
+    candidate (:class:`_Pt`). It is confirmed lazily by the next solve from
+    it (``Q(f2 - δ) > f1``, or ``M(f1 - 1) > f2``) or replaced by that
+    solve's better schedule.
+
+    Box ``[P, N, lo, hi]`` between consecutive known points (P.f1 < N.f1):
+    no schedule with f2 <= ``lo`` has f1 < N.f1, and no schedule with
+    f1 <= ``hi`` has f2 < P.f2. So every unknown Pareto point in it has
+    f1 in (max(P.f1, hi), N.f1) and f2 in (max(N.f2, lo), P.f2). The box
+    also has to settle P if P is a Q-candidate and N if N is an M-candidate.
+    While fewer boxes are open than workers, a box is split with a Q or M
+    solve at the midpoint of its f2 or f1 range; otherwise it is grown from
+    P (``Q(P.f2 - δ)``) or from N (``M(N.f1 - 1)``).
+
+    ``direction`` — ``"adaptive"`` (default) picks Q or M per box by the
+    median time of the three nearest (in f1) solves of each kind, trying
+    each kind at least three times. It also decides, per candidate, whether
+    to grow lazily from it or to settle it first with one solve of the
+    other kind (``M(P.f1)`` for a Q-candidate, seeded with its schedule).
+    A lazy growth is a replacement with the observed probability ``p``
+    (the front's own schedule was not cost-minimal at its f1), so it costs
+    ``t_grow / (1 - p)`` per point against ``t_settle + t_grow``. ``"f1"`` always uses Q, ``"f2"``
+    always M, ``"random"`` picks at random (to test the bookkeeping). Other arguments as for :func:`parallel_pareto_frontier`
+    (``hard_time_limit`` defaults to ``2 * per_solve_time_limit + 60``,
+    since the two anchors are two-phase solves).
+    """
+    if direction not in ("adaptive", "f1", "f2", "random"):
+        raise ValueError(f"direction must be 'adaptive', 'f1', 'f2' or 'random', "
+                         f"not {direction!r}")
+    import random as _random
+    rng = _random.Random(0)
+    n_workers = n_workers or max(1, (os.cpu_count() or 2) - 1)
+    step1, step2 = objective_step(inst, "f1"), objective_step(inst, "f2")
+    half1, half2 = step1 / 2, step2 / 2
+    st = stats if stats is not None else {}
+    st.update(n_solves=0, n_q=0, n_m=0, n_split=0, n_grow=0, n_settle=0, n_replaced=0,
+              n_wasted=0, n_unresolved=0, solve_time=0.0)
+    t0 = _time.perf_counter()
+    if hard_time_limit is None and per_solve_time_limit is not None:
+        hard_time_limit = 2 * per_solve_time_limit + 60
+
+    pool = _SolvePool(n_workers, (inst, "lpfirst", per_solve_time_limit, lpfirst_options),
+                      hard_time_limit)
+    st["n_restarts"] = 0
+    pool.on_restart = lambda n: st.__setitem__("n_restarts", n)
+    solutions: list[Solution] = []
+    # solve times, (f1 at the box centre, seconds), per label: "Q"/"M" for
+    # splits and growths, "SM"/"SQ" for M(P.f1)/Q(N.f2) settling a candidate
+    obs: dict[str, list] = {"Q": [], "M": [], "SM": [], "SQ": []}
+    # lazy growths from a candidate of the same kind: [replaced, total]
+    rep = {"Q": [0, 0], "M": [0, 0]}
+    boxes: list[list] = []
+    truncated = False
+
+    def confirm(pt: _Pt) -> None:
+        if pt.ex1 and pt.ex2 and not pt.reported:
+            pt.reported = True
+            solutions.append(pt.sol)
+            if on_point is not None:
+                on_point(pt.sol)
+
+    def est(label: str, x: float):
+        o = obs[label]
+        if len(o) < 3:
+            return None
+        return sorted(r[1] for r in sorted(o, key=lambda r: abs(r[0] - x))[:3])[1]
+
+    def kind_for(bx) -> str:
+        if direction == "random":
+            return rng.choice("QM")
+        if direction != "adaptive":
+            return "Q" if direction == "f1" else "M"
+        x = (bx[0].f1 + bx[1].f1) / 2
+        eq, em = est("Q", x), est("M", x)
+        if eq is None or em is None:
+            return "Q" if eq is None else "M"      # explore
+        return "Q" if eq <= em else "M"
+
+    def settle_first(bx, k: str) -> bool:
+        """Settle the candidate end with the other kind of solve (M(P.f1)
+        for a Q-candidate P), instead of growing lazily from it: a lazy
+        growth is replaced with probability p, so it costs t/(1-p) per point
+        against t_settle + t."""
+        if direction == "random":
+            return rng.random() < 0.5
+        if direction != "adaptive":
+            return False
+        x = (bx[0].f1 + bx[1].f1) / 2
+        e_grow, e_settle = est(k, x), est("SM" if k == "Q" else "SQ", x)
+        if e_settle is None:
+            return len(obs["SM" if k == "Q" else "SQ"]) < 3   # explore
+        if e_grow is None:
+            return False
+        r, n = rep[k]
+        p = (r + 1) / (n + 2)
+        return e_settle < e_grow * p / (1 - p)
+
+    def interior_empty(bx) -> bool:
+        P, N, lo, hi = bx
+        return (N.f1 - max(P.f1, hi) < 3 * half1) or (P.f2 - max(N.f2, lo) < 3 * half2)
+
+    def settle_by_grid(bx) -> None:
+        P, N, lo, hi = bx
+        if P.ex1 and not P.ex2 and P.f2 - lo < 3 * half2:
+            P.ex2 = True        # a cheaper schedule at f1 = P.f1 would have f2 <= lo
+        if N.ex2 and not N.ex1 and N.f1 - hi < 3 * half1:
+            N.ex1 = True        # a faster schedule at f2 = N.f2 would have f1 <= hi
+        confirm(P)
+        confirm(N)
+
+    def submit(bx) -> None:
+        P, N, lo, hi = bx
+        k = kind_for(bx)
+        need_p = P.ex1 and not P.ex2
+        need_n = N.ex2 and not N.ex1
+        # op: (kind, level, timing label, lazy growth from a same-kind candidate)
+        grow_q = ("Q", grid_floor(inst, "f2", P.f2 - half2), "Q", need_p)
+        grow_m = ("M", grid_floor(inst, "f1", N.f1 - half1), "M", need_n)
+        settle_p = ("M", P.f1, "SM", False)
+        settle_n = ("Q", N.f2, "SQ", False)
+        if interior_empty(bx):
+            st["n_settle"] += 1
+            if need_p:
+                op = grow_q if k == "Q" else settle_p
+            else:
+                op = grow_m if k == "M" else settle_n
+        else:
+            op = None
+            if len(boxes) + len(pool) < n_workers:
+                if k == "Q":
+                    c = grid_floor(inst, "f2", (max(N.f2, lo) + P.f2) / 2)
+                    if max(N.f2, lo) + half2 < c < P.f2 - 3 * half2:
+                        op = ("Q", c, "Q", False)
+                else:
+                    b = grid_floor(inst, "f1", (max(P.f1, hi) + N.f1) / 2)
+                    if max(P.f1, hi) + half1 < b < N.f1 - 3 * half1:
+                        op = ("M", b, "M", False)
+            if op is not None:
+                st["n_split"] += 1
+            elif k == "Q" and need_p and settle_first(bx, "Q"):
+                st["n_settle"] += 1
+                op = settle_p
+            elif k == "M" and need_n and settle_first(bx, "M"):
+                st["n_settle"] += 1
+                op = settle_n
+            else:
+                st["n_grow"] += 1
+                op = grow_q if k == "Q" else grow_m
+        # both ends as seeds: one is feasible (an incumbent), the other is
+        # next to the answer of a growth (the right columns)
+        if op[0] == "Q":
+            args = ("f1", None, "f2", op[1], [P.sol, N.sol])
+        else:
+            args = ("f2", None, "f1", op[1], [N.sol, P.sol])
+        pool.submit(args, (bx, op))
+
+    def on_q(bx, c, sol) -> None:
+        P, N, lo, hi = bx
+        a, s = sol.f1, sol.f2
+        grow = c >= P.f2 - 3 * half2          # c == P.f2 - δ
+        if a >= N.f1 - half1:                  # nothing with f2 <= c left of N
+            if N.ex2 and not N.ex1:
+                N.ex1 = True
+            elif N.ex1 and not N.ex2 and s < N.f2 - half2:
+                N.sol = sol
+            if grow and P.ex1:
+                P.ex2 = True
+            boxes.append([P, N, max(lo, c), hi])
+        elif a <= P.f1 + half1:                # same f1 as P, cheaper: P was not optimal
+            if not (P.ex1 and not P.ex2) or s >= P.f2 - half2:
+                raise RuntimeError(f"Q({c}) = ({a}, {s}) contradicts P = ({P.f1}, {P.f2})")
+            st["n_replaced"] += 1
+            st["n_wasted"] += 1
+            P.sol = sol
+            boxes.append([P, N, lo, hi])
+        else:
+            if grow and P.ex1:
+                P.ex2 = True
+            if s <= N.f2 + half2:              # N's Pareto point, found at its true f1
+                if not (N.ex2 and not N.ex1):
+                    raise RuntimeError(f"Q({c}) = ({a}, {s}) contradicts N = ({N.f1}, {N.f2})")
+                st["n_replaced"] += 1
+                N.sol, N.ex1 = sol, True
+                boxes.append([P, N, max(lo, c), hi])
+            else:
+                X = _Pt(sol, True, False)
+                boxes.append([P, X, c, hi])
+                boxes.append([X, N, lo, hi])
+        confirm(P)
+        confirm(N)
+
+    def on_m(bx, b, sol) -> None:
+        P, N, lo, hi = bx
+        a, s = sol.f1, sol.f2
+        grow = b >= N.f1 - 3 * half1           # b == N.f1 - 1
+        if s >= P.f2 - half2:                  # nothing with f1 <= b cheaper than P
+            if P.ex1 and not P.ex2:
+                P.ex2 = True
+            elif P.ex2 and not P.ex1 and a < P.f1 - half1:
+                P.sol = sol
+            if grow and N.ex2:
+                N.ex1 = True
+            boxes.append([P, N, lo, max(hi, b)])
+        elif s <= N.f2 + half2:                # same f2 as N, faster: N was not optimal
+            if not (N.ex2 and not N.ex1) or a >= N.f1 - half1:
+                raise RuntimeError(f"M({b}) = ({a}, {s}) contradicts N = ({N.f1}, {N.f2})")
+            st["n_replaced"] += 1
+            st["n_wasted"] += 1
+            N.sol = sol
+            boxes.append([P, N, lo, hi])
+        else:
+            if grow and N.ex2:
+                N.ex1 = True
+            if a <= P.f1 + half1:              # P's Pareto point, found at its true f2
+                if not (P.ex1 and not P.ex2):
+                    raise RuntimeError(f"M({b}) = ({a}, {s}) contradicts P = ({P.f1}, {P.f2})")
+                st["n_replaced"] += 1
+                P.sol, P.ex2 = sol, True
+                boxes.append([P, N, lo, max(hi, b)])
+            else:
+                Y = _Pt(sol, False, True)
+                boxes.append([P, Y, lo, hi])
+                boxes.append([Y, N, lo, b])
+        confirm(P)
+        confirm(N)
+
+    try:
+        a, b = _parallel_anchors(pool, st)
+        for name, x in (("A", a), ("B", b)):
+            if x.status != "optimal" or x.f1 is None:
+                print(f"parallel-epsilon: WARNING — anchor {name} inconclusive ({x.status})",
+                      file=sys.stderr, flush=True)
+                return [y for y in (a, b) if y.status == "optimal"]
+        A, B = _Pt(a, True, True), _Pt(b, True, True)
+        confirm(A)
+        if abs(a.f1 - b.f1) < half1 and abs(a.f2 - b.f2) < half2:
+            return solutions
+        confirm(B)
+        boxes = [[A, B, b.f2, a.f1]]
+
+        while boxes or len(pool):
+            if time_budget is not None and _time.perf_counter() - t0 >= time_budget:
+                truncated = True
+            for bx in list(boxes):
+                settle_by_grid(bx)
+                P, N = bx[0], bx[1]
+                if interior_empty(bx) and not (P.ex1 and not P.ex2) and not (N.ex2 and not N.ex1):
+                    boxes.remove(bx)
+            while boxes and not truncated and len(pool) < n_workers:
+                boxes.sort(key=lambda bx: bx[1].f1 - bx[0].f1)
+                submit(boxes.pop())
+            if not len(pool):
+                break
+            for (bx, (kind, level, label, lazy)), res in pool.wait():
+                st["n_solves"] += 1
+                st["n_q" if kind == "Q" else "n_m"] += 1
+                sol, dt = res if res is not None else (None, hard_time_limit)
+                st["solve_time"] += dt
+                obs[label].append(((bx[0].f1 + bx[1].f1) / 2, dt))
+                if sol is None or sol.status != "optimal" or sol.f1 is None:
+                    st["n_unresolved"] += 1
+                    print(f"parallel-epsilon: box [{bx[0].f1:.2f},{bx[1].f1:.2f}] "
+                          f"{label}({level:.6g}) INCONCLUSIVE "
+                          f"({sol.status if sol else 'killed'}), dropped",
+                          file=sys.stderr, flush=True)
+                    continue
+                n_rep = st["n_wasted"]
+                (on_q if kind == "Q" else on_m)(bx, level, sol)
+                if lazy:
+                    rep[kind][1] += 1
+                    rep[kind][0] += st["n_wasted"] > n_rep
+                if verbose:
+                    print(f"parallel-epsilon: {kind}({level:.6g}) → f1={sol.f1:.2f} "
+                          f"f2={sol.f2:.6g} ({dt:.1f}s; {len(solutions)} pts, "
+                          f"{len(boxes)} open)", file=sys.stderr, flush=True)
+    finally:
+        pool.shutdown()
+
+    st["wall"] = _time.perf_counter() - t0
+    st["open_boxes"] = len(boxes)
+    if truncated or st["n_unresolved"]:
+        print(f"parallel-epsilon: WARNING — "
+              f"{'time budget exhausted' if truncated else 'per-solve time limit hit'}; "
+              f"returning a PARTIAL front ({len(solutions)} points, {len(boxes)} box(es) open, "
+              f"{st['n_unresolved']} dropped).", file=sys.stderr, flush=True)
+    return _filter_dominated(solutions)

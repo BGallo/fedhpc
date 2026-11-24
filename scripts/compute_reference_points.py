@@ -3,8 +3,10 @@ store them, with each file's sha256 and cost resolution, in
 data/reference_points.json (read by fedhpc.data.reference_points). The
 reference solves are certified exact (fedhpc.model.certify_params).
 
-Usage: uv run python scripts/compute_reference_points.py [INSTANCE.json ...]
-(default: every instance already in the table).
+Usage: uv run python scripts/compute_reference_points.py [--engine gurobi|highs]
+[INSTANCE.json ...] (default: every instance already in the table).
+``--engine highs`` solves them with fedhpc.lpfirst on HiGHS (no Gurobi
+licence); both engines store only proven values.
 """
 from __future__ import annotations
 
@@ -21,21 +23,33 @@ from fedhpc.pareto import weighted_sum_reference
 
 
 def main() -> None:
+    args = sys.argv[1:]
+    engine = "gurobi"
+    if args[:1] == ["--engine"]:
+        engine, args = args[1], args[2:]
+    if engine not in ("gurobi", "highs"):
+        sys.exit(f"unknown engine {engine!r} (gurobi, highs)")
     table = json.loads(REFERENCE_POINTS.read_text())
-    paths = [Path(p) for p in sys.argv[1:]] or [
+    paths = [Path(p) for p in args] or [
         REFERENCE_POINTS.parent / f"{stem}.json" for stem in table if not stem.startswith("_")
     ]
-    configure_env()
+    if engine == "gurobi":
+        configure_env()
     for path in paths:
         t0 = time.perf_counter()
         inst = Instance.from_file(path)
-        (f1_T, f2_T, f1_0, f2_0), _ = weighted_sum_reference(
-            inst, min_cost_reference=True)
+        if engine == "highs":
+            (f1_T, f2_T, f1_0, f2_0), _ = weighted_sum_reference(
+                inst, min_cost_reference=True, engine="lpfirst")
+        else:
+            (f1_T, f2_T, f1_0, f2_0), _ = weighted_sum_reference(
+                inst, min_cost_reference=True)
         table[path.stem] = dict(
             f1_T=f1_T, f2_T=f2_T, f1_0=f1_0, f2_0=f2_0,
             cost_resolution=inst.cost_resolution,
             sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
             computed=date.today().isoformat(),
+            engine=engine,
         )
         print(f"{path.stem}: f1_T={f1_T:.4f} f2_T={f2_T:.6f} f1_0={f1_0:.4f} "
               f"f2_0={f2_0:.6f} ({time.perf_counter() - t0:.1f}s)")

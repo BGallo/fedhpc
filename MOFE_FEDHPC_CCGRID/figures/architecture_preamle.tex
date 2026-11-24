@@ -1,0 +1,26 @@
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,fit,backgrounds}
+\definecolor{archaccent}{RGB}{0,84,147}
+\definecolor{archbroker}{RGB}{235,242,250}
+\definecolor{archsite}{RGB}{244,244,244}
+\definecolor{archcloud}{RGB}{253,243,230}
+\definecolor{archcloudln}{RGB}{190,105,0}
+\definecolor{archbusy}{RGB}{150,150,150}
+\definecolor{archpred}{RGB}{233,245,233}
+% \archpool{x}{y}{#busy of 5}{label}: a pool of identical on-premises nodes
+\newcommand{\archpool}[4]{%
+  \foreach \i in {0,...,4}{%
+    \ifnum\i<#3\relax\def\archf{archbusy}\else\def\archf{white}\fi
+    \draw[line width=0.4pt, fill=\archf] ({#1+\i*0.27},{#2}) rectangle ++(0.21,0.21);}
+  \node[anchor=west, inner sep=1pt] at ({#1+1.36},{#2+0.105}) {#4};}
+% \archvm{x}{y}{#running of 5}{label}: a cloud VM type; VMs exist only while used
+\newcommand{\archvm}[4]{%
+  \foreach \i in {0,...,4}{%
+    \ifnum\i<#3\relax
+      \draw[line width=0.4pt, draw=archcloudln, fill=archcloudln!45] ({#1+\i*0.27},{#2}) rectangle ++(0.21,0.21);
+    \else
+      \draw[line width=0.4pt, draw=archcloudln!70, dash pattern=on 1pt off 0.8pt] ({#1+\i*0.27},{#2}) rectangle ++(0.21,0.21);
+    \fi}
+  \node[anchor=west, inner sep=1pt] at ({#1+1.36},{#2+0.105}) {#4};}
+% Author-facing notes; redefine as \newcommand{\revnote}[1]{} to hide them.
+\providecommand{\revnote}[1]{{\color{red!70!black}\footnotesize[\textbf{TODO:} #1]}}

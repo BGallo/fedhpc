@@ -183,6 +183,15 @@ class HighsBackend:
         self.h.setOptionValue("solver", "simplex")
         self.h.run()
         st = self._status()
+        if st != "optimal" and self.h.getModelStatus() in (
+                self.hs.HighsModelStatus.kNotset, self.hs.HighsModelStatus.kSolveError,
+                self.hs.HighsModelStatus.kUnknown):
+            # A warm-started run on a badly scaled master (big-M artificials
+            # next to costs scaled to 1e4 per unit) sometimes ends in kError;
+            # from scratch it solves (B_fedhpc_n100_lE_iH, f2 at f1_T).
+            self.h.clearSolver()
+            self.h.run()
+            st = self._status()
         self.last_status = self.h.modelStatusToString(self.h.getModelStatus())
         return "optimal" if st == "optimal" else "other"
 

@@ -152,6 +152,35 @@ B_pos_n100_lE_iM master (4.5 k rows, 141 k columns, 4 threads): the LP from
 scratch takes 15.5 s with HiGHS and 6.5 s with Gurobi. At 180 s the MIP has
 the same dual bound (108210.67) but a worse incumbent (108221.67 vs
 108213.67).
+
+Reference points (:func:`reference_points_lpfirst`)
+---------------------------------------------------
+The weighted-sum reference points of ``pareto.weighted_sum_reference``,
+licence-free on HiGHS (``engine="lpfirst"`` there). Each phase runs on the
+placements its optima can use: the lex-min (f1, f2) phases drop every
+placement completing after the job's earliest uncapacitated completion
+(:meth:`_TI.lex_f1_mask`, 2-8 % of the placements remain), and the f1_0
+phase keeps only free ones (:meth:`_TI.free_mask`). Without the cloud,
+identical jobs abound (3340 jobs in 730 classes on the pos instances), so
+:data:`REFERENCE_OPTIONS` also runs column generation on the
+class-aggregated master (``aggregate_lp``, :meth:`_TI.aggregated`) and skips
+LNS, whose sweeps cost more than the proof steps they spare. Measured
+2026-11-23 (HiGHS, all four points proven):
+
+==========================  ==========  =================  ===============
+Instance                    Gurobi      lpfirst/HiGHS,     this path
+                            (compact)   unrestricted
+==========================  ==========  =================  ===============
+fedhpc_known (964 jobs)     12.6 s      4.2 s              1.1 s
+A_fedhpc_n100_lE_iM         8.0 s       3.9 s              0.6 s
+B_pos_n100_lH_iM (3340)     > 13 min    f1_0 unproven      45-59 s
+                                        after 600 s
+==========================  ==========  =================  ===============
+
+On B_pos the f1_0 phase dominates: the aggregated LP takes 5 s (32 s
+unaggregated), the rest is HiGHS MIPs. The incumbent entering the eligible
+MIP matters most: one f1 unit worse (no restricted-master MIP) and that
+MIP takes 229 s instead of 11 s.
 """
 from __future__ import annotations
 
@@ -170,7 +199,8 @@ from .data import Instance
 from .model import Solution, grid_floor, weighted_sum_scale
 
 __all__ = ["LPFirstOptions", "LPFirstResult", "solve_lpfirst", "solve_weighted_sum_lpfirst",
-           "solve_f1_lpfirst", "solve_f2_lpfirst", "make_lpfirst_lexmin_bounded"]
+           "solve_f1_lpfirst", "solve_f2_lpfirst", "make_lpfirst_lexmin_bounded",
+           "ReferencePoints", "REFERENCE_OPTIONS", "reference_points_lpfirst"]
 
 
 @dataclass(frozen=True)
@@ -200,6 +230,12 @@ class LPFirstOptions:
 
     ``backend`` — LP/MIP solver for every master and MIP: ``"gurobi"`` or
     ``"highs"`` (:mod:`fedhpc.lp_backend`).
+
+    ``aggregate_lp`` — run column generation on the class-aggregated master
+    (:meth:`_TI.aggregated`) when identical jobs cut the job count by at
+    least a fifth, then map its duals and solution back to the jobs. Exact:
+    the aggregated LP has the same value and its duals, spread over a class,
+    are optimal for the full LP.
     """
     smoothing: float = 0.5
     per_job: int = 3
@@ -218,6 +254,7 @@ class LPFirstOptions:
     lns_sweeps: int = 2
     tree: bool = True
     backend: str = "gurobi"
+    aggregate_lp: bool = False
     node_eligible: int = 60_000
     node_mip_time: float = 60.0
 
@@ -300,12 +337,134 @@ class _TI:
         for k, m in enumerate(self.types):
             for r, cnt in prep.releases[m].items():
                 self.N[k, min(max(r, 0), H):] += cnt
-        # slots some placement can occupy (only those need a row)
-        used = np.zeros((len(self.types), H + 1), dtype=np.int64)
+        self._rows_needed()
+
+    def _rows_needed(self) -> None:
+        """Slots some placement can occupy (only those need a capacity row)."""
+        used = np.zeros((len(self.types), self.H + 1), dtype=np.int64)
         kc, tc, pc = self.K[self.capped], self.T[self.capped], self.P[self.capped]
         np.add.at(used, (kc, tc), 1)
         np.add.at(used, (kc, tc + pc), -1)
-        self.row_needed = np.cumsum(used, axis=1)[:, :H] > 0
+        self.row_needed = np.cumsum(used, axis=1)[:, :self.H] > 0
+
+    def restrict(self, keep: np.ndarray) -> "_TI":
+        """A copy holding only the placements ``keep`` marks (a boolean mask
+        over this one's). Each job must keep at least one; capacities and
+        capacity rows stay those of the full instance, so the restricted LP is
+        the full one with the dropped columns fixed to 0."""
+        keep = np.asarray(keep, dtype=bool)
+        new = object.__new__(_TI)
+        new.__dict__.update({k: v for k, v in self.__dict__.items()
+                             if k not in ("_classes", "class_rep", "class_offset")})
+        for name in ("J", "K", "T", "P", "MID", "Q", "C1", "C2"):
+            setattr(new, name, getattr(self, name)[keep])
+        new.n_arcs = int(keep.sum())
+        new.first = np.searchsorted(new.J, np.arange(len(new.jobs)))
+        if np.any(np.diff(np.append(new.first, new.n_arcs)) == 0):
+            raise ValueError("some job has no placement")
+        new.capped = new.K >= 0
+        new._rows_needed()
+        new.pair = {}
+        # runs of equal (job, type) are contiguous: the arrays are sorted by job, then type
+        if new.n_arcs:
+            brk = np.nonzero((np.diff(new.J) != 0) | (np.diff(new.MID) != 0))[0] + 1
+            for lo, hi in zip(np.r_[0, brk].tolist(), np.r_[brk, new.n_arcs].tolist()):
+                new.pair[new.jobs[new.J[lo]], int(new.MID[lo])] = (lo, new.T[lo:hi])
+        return new
+
+    def lex_f1_mask(self) -> np.ndarray:
+        """Placements that can occur in a minimum-f1 schedule: for a job of
+        weight > 0 with an uncapacitated placement, none completing after its
+        earliest uncapacitated completion ``e_j``. Swapping such a placement
+        for the one completing at ``e_j`` frees capacity and lowers f1, so
+        every f1-optimal schedule, and hence the lex-min (f1, f2) one and any
+        schedule with f1 <= f1_T, avoids them (the lex deadlines of
+        ``SpaceTimeFormulation``). Requires nonnegative weights."""
+        comp = self.T + self.P
+        e = np.full(len(self.jobs), np.inf)
+        np.minimum.at(e, self.J[~self.capped], comp[~self.capped])
+        wt = np.array([j.weight for j in self.inst.jobs], dtype=float)
+        pos = np.array([self.jpos[j.id] for j in self.inst.jobs])
+        w = np.empty(len(self.jobs))
+        w[pos] = wt
+        return (comp <= e[self.J]) | (w[self.J] <= 0)
+
+    def free_mask(self) -> np.ndarray:
+        """Placements that cost nothing: with nonnegative costs, the only ones a
+        schedule with f2 <= 0 can use."""
+        return self.C2 <= 0
+
+    def representable(self, assignment: dict[int, tuple[int, int]]) -> bool:
+        """Whether every placement of a complete schedule is one of ours."""
+        return len(assignment) == len(self.jobs) and len(self.arcs_of(assignment)) == len(assignment)
+
+    def aggregated(self) -> "_TI":
+        """The class-aggregated placement set (Phase 8 applied to the master):
+        one job per class (its representative, :meth:`classes`), with
+        ``mult`` (the class size) as its coverage right-hand side. Extra
+        attributes map it back: ``full`` — the full set this came from;
+        ``cls`` — each full job position's class; ``agg_of`` — each full
+        placement's counterpart here; ``offset`` — each full job's ``C1``
+        minus its representative's at the same placement."""
+        cls, canon = self.classes()
+        reps = self.class_rep
+        keep = np.zeros(self.n_arcs, dtype=bool)
+        is_rep = np.zeros(len(self.jobs), dtype=bool)
+        is_rep[reps] = True
+        keep[is_rep[self.J]] = True
+        new = object.__new__(_TI)
+        new.__dict__.update({k: v for k, v in self.__dict__.items()
+                             if k not in ("_classes", "class_rep", "class_offset")})
+        new.jobs = [self.jobs[r] for r in reps.tolist()]
+        new.jpos = {jid: i for i, jid in enumerate(new.jobs)}
+        for name in ("K", "T", "P", "MID", "Q", "C1", "C2"):
+            setattr(new, name, getattr(self, name)[keep])
+        new.J = cls[self.J[keep]]
+        new.n_arcs = int(keep.sum())
+        new.first = np.searchsorted(new.J, np.arange(len(new.jobs)))
+        new.capped = new.K >= 0
+        new._rows_needed()
+        new.pair = {}
+        brk = np.nonzero((np.diff(new.J) != 0) | (np.diff(new.MID) != 0))[0] + 1
+        for lo, hi in zip(np.r_[0, brk].tolist(), np.r_[brk, new.n_arcs].tolist()):
+            new.pair[new.jobs[new.J[lo]], int(new.MID[lo])] = (lo, new.T[lo:hi])
+        new.mult = np.bincount(cls, minlength=len(reps)).astype(float)
+        new.class_rep_full = reps
+        new.full, new.cls, new.offset = self, cls, self.class_offset
+        new.full_index = np.nonzero(keep)[0]
+        new.agg_of = np.searchsorted(new.full_index, canon)
+        return new
+
+    def disaggregate(self, x_agg: np.ndarray) -> np.ndarray:
+        """An aggregated solution as one over the full placements (of
+        ``self.full``) with the same capacity use and objective: each class's
+        mass, in start order, fills its members one unit at a time, so a
+        member is integral wherever the class's mass allows."""
+        full = self.full
+        x = np.zeros(full.n_arcs)
+        nz = np.nonzero(x_agg > 1e-12)[0]
+        if not len(nz):
+            return x
+        nz = nz[np.lexsort((self.T[nz], self.J[nz]))]
+        members = np.argsort(self.cls, kind="stable")
+        mstart = np.r_[0, np.cumsum(self.mult.astype(np.int64))]
+        brk = np.r_[0, np.nonzero(np.diff(self.J[nz]))[0] + 1, len(nz)]
+        for lo, hi in zip(brk[:-1].tolist(), brk[1:].tolist()):
+            idx = nz[lo:hi]
+            k = int(self.J[idx[0]])
+            mem = members[mstart[k]:mstart[k + 1]]
+            v = x_agg[idx]
+            cum = np.r_[0.0, np.cumsum(v)]
+            i = np.arange(len(mem), dtype=float)[:, None]
+            share = np.clip(np.minimum(i + 1, cum[None, 1:]) - np.maximum(i, cum[None, :-1]),
+                            0.0, None)                         # members x placements
+            # member j's copy of the representative's placement
+            rep_arc = self.full_index[idx]
+            rep_first = full.first[self.class_rep_full[k]]
+            arcs = full.first[mem][:, None] + (rep_arc - rep_first)[None, :]
+            m = share > 1e-12
+            x[arcs[m]] += share[m]
+        return x
 
     def classes(self) -> tuple[np.ndarray, np.ndarray]:
         """``(cls, canon)``: each job position's class and each placement's
@@ -536,7 +695,8 @@ def _lagrangian(ti: _TI, d: _D, rc: np.ndarray, b1: float | None, b2: float | No
                 ) -> tuple[float, np.ndarray]:
     """``(L, min_j)``: the bound at ``d`` and each job's least ``rc + σ_j``."""
     mins = np.minimum.reduceat(rc + d.sigma[ti.J], ti.first)
-    L = float(mins.sum() + (d.pi * ti.N).sum())
+    mult = getattr(ti, "mult", None)
+    L = float((mins.sum() if mult is None else mins @ mult) + (d.pi * ti.N).sum())
     if b1 is not None:
         L += d.nu1 * b1
     if b2 is not None:
@@ -926,6 +1086,70 @@ def _cg(ti: _TI, master: "_Master", w1, w2, b1, b2, opts: LPFirstOptions,
         master.add(pick)
 
 
+class _AggMaster:
+    """The full-placement view of an aggregated master's solution, with the
+    attributes :func:`solve_lpfirst` reads after column generation."""
+
+    def __init__(self, ti: _TI, agg: _TI, inner: "_Master"):
+        self.inner = inner
+        self._xfull = agg.disaggregate(inner.x())
+        self.has = inner.has[agg.agg_of]
+        self.arcs = np.nonzero(self.has)[0].tolist()
+        self.n_art = inner.n_art
+        self.be = inner.be
+        self._art = inner.artificial()
+
+    def x(self) -> np.ndarray:
+        return self._xfull
+
+    def arc_values(self) -> np.ndarray:
+        return self._xfull[np.asarray(self.arcs, dtype=np.int64)]
+
+    def artificial(self) -> float:
+        return self._art
+
+
+def _cg_aggregated(ti: _TI, agg: _TI, full_master: "_Master", w1, w2, b1, b2, big_m,
+                   opts: LPFirstOptions, deadline, certified, st) -> tuple[_CGOut, _AggMaster]:
+    """Column generation on the aggregated master, mapped back to ``ti``.
+
+    A member's placement costs ``w1·offset_j`` more than its representative's
+    (``C1`` differs by a constant, ``C2`` not at all), so with the class dual
+    ``σ_k`` the member dual ``σ_k + (w1 - ν1)·offset_j`` gives every member
+    placement its representative's reduced cost. Those duals are feasible
+    and optimal for the full LP, and the Lagrangian bound is recomputed from
+    them on the full placement set. The f1 bound row moves by the summed
+    offsets."""
+    off = agg.offset
+    off_sum = float(off.sum())
+    b1a = None if b1 is None else b1 - off_sum
+    m = _Master(agg, w1, w2, b1a, b2, big_m, cover_rhs=agg.mult, backend=opts.backend,
+                threads=opts.lp_threads)
+    seed = set(agg.agg_of[np.asarray(full_master.arcs, dtype=np.int64)].tolist())
+    m.add(sorted(seed))
+    full_master.be = None   # never solved: drop the full model
+
+    def to_full(d: _D) -> _D:
+        return _D(d.sigma[agg.cls] + (w1 - d.nu1) * off, d.pi, d.nu1, d.nu2)
+
+    def stop(L_agg: float) -> bool:
+        # the bound of the aggregated problem, in full units
+        # L_full = L_agg + (w1 - ν1)·Σoff + ν1·Σoff (the shifted f1 row)
+        return certified(L_agg + w1 * off_sum)
+
+    cg = _cg(agg, m, w1, w2, b1a, b2, opts, deadline, None, stop, st)
+    if cg.center is None:
+        return _CGOut(cg.status, -math.inf, None, None, math.inf), _AggMaster(ti, agg, m)
+    center = to_full(cg.center)
+    center_rc = _price(ti, center, w1, w2)
+    L, _ = _lagrangian(ti, center, center_rc, b1, b2)
+    status = cg.status
+    if status == "certified" and not certified(L):
+        status = "converged"
+    rmp = cg.rmp + w1 * off_sum if math.isfinite(cg.rmp) else cg.rmp
+    return _CGOut(status, L, center, center_rc, rmp), _AggMaster(ti, agg, m)
+
+
 class _Tree:
     """Branch and price over placements (BPC plan, Phase 9).
 
@@ -1138,7 +1362,16 @@ def solve_lpfirst(
     master.add(sorted(seed))
 
     # --- column generation, stopped by the certificate when possible
-    cg = _cg(ti, master, w1, w2, b1, b2, opts, deadline, None, certified, st)
+    agg = None
+    if opts.aggregate_lp:
+        cand = ti.aggregated()
+        if len(cand.jobs) <= 0.8 * len(ti.jobs):
+            agg = cand
+    if agg is not None:
+        cg, master = _cg_aggregated(ti, agg, master, w1, w2, b1, b2, big_m, opts, deadline,
+                                    certified, st)
+    else:
+        cg = _cg(ti, master, w1, w2, b1, b2, opts, deadline, None, certified, st)
     best_L, center, center_rc, rmp = cg.L, cg.center, cg.center_rc, cg.rmp
     if cg.status == "time":
         return result("feasible", "", best_L)
@@ -1197,6 +1430,12 @@ def solve_lpfirst(
     if not math.isfinite(ub):
         if not opts.tree or left() <= 0:
             return result("feasible", "", best_L)
+        if agg is not None:   # the placement tree needs the full master
+            return solve_lpfirst(inst, weight1, weight2, bound1_value, bound2_value,
+                                 time_limit=left() if deadline is not None else None,
+                                 options=replace(opts, aggregate_lp=False), ti=ti,
+                                 seed_schedules=seed_schedules, column_pool=column_pool,
+                                 stats=st)
         # no incumbent: every placement is eligible, so search the tree
         tr = _Tree(ti, inst, w1, w2, b1, b2, big_m, opts, step, proves, st)
         ub, best, L_open, done = tr.run(ub, best, np.ones(ti.n_arcs, dtype=bool), master, cg,
@@ -1213,6 +1452,12 @@ def solve_lpfirst(
     eligible = np.nonzero(center_rc + center.sigma[ti.J] - mins[ti.J]
                           < gap + 1e-7 * max(1.0, abs(ub)))[0]
     st["eligible"] = int(len(eligible))
+    if agg is not None and opts.tree and len(eligible) > opts.max_eligible and left() > 0:
+        return solve_lpfirst(inst, weight1, weight2, bound1_value, bound2_value,
+                             time_limit=left() if deadline is not None else None,
+                             options=replace(opts, aggregate_lp=False), ti=ti,
+                             seed_schedules=[best, *seed_schedules], column_pool=column_pool,
+                             stats=st)
     if opts.tree and len(eligible) > opts.max_eligible and left() > 0:
         # --- step 3': branch and price over placements (Phase 9)
         allowed = np.zeros(ti.n_arcs, dtype=bool)
@@ -1298,6 +1543,136 @@ def solve_f2_lpfirst(inst: Instance, **kw) -> Solution:
     return _lexmin(inst, "f2", **kw)
 
 
+#: :func:`reference_points_lpfirst`'s default: HiGHS, no LNS (the proof steps
+#: are cheaper than the sweeps on every measured instance) and the aggregated
+#: master (identical jobs abound once the cloud placements are gone).
+REFERENCE_OPTIONS = LPFirstOptions(backend="highs", lns_sweeps=0, aggregate_lp=True)
+
+
+@dataclass
+class ReferencePoints:
+    """The weighted-sum reference points from :func:`reference_points_lpfirst`.
+
+    ``refs`` — ``(f1_T, f2_T, f1_0, f2_0)``, as
+    ``pareto.weighted_sum_reference``. ``certified`` — every value proven
+    optimal. f1_T and f2_T always are (the call raises otherwise); f1_0 may
+    be the best schedule found when ``require_certified=False``, an upper
+    bound, which keeps the f1 <= f1_0 cut of ``model.solve_weighted_sum``
+    valid. ``f1_0_bound`` — a proven lower bound on f1_0 (f1_0 itself when
+    certified). ``ideal`` — the degenerate weighted sum's optimum, as
+    ``pareto.weighted_sum_reference``'s second item. ``stats`` — per phase
+    seconds and solver statistics."""
+    refs: tuple[float, float, float, float]
+    certified: bool
+    f1_0_bound: float
+    ideal: Solution | None = None
+    stats: dict = field(default_factory=dict)
+
+
+def reference_points_lpfirst(
+    inst: Instance, *, min_cost_reference: bool = True, time_limit: float | None = None,
+    options: LPFirstOptions | None = None, require_certified: bool = True,
+    ea_seeds: bool = False,
+) -> ReferencePoints:
+    """``pareto.weighted_sum_reference`` on the LP-first engine, so with
+    ``options.backend="highs"`` no Gurobi model is built.
+
+    Phases: lex-min (f1, f2) gives (f1_T, f2_T); min f1 s.t. f2 <= 0 gives
+    f1_0 (f2_0 = 0); when no schedule is free and ``min_cost_reference``,
+    lex-min (f2, f1) gives (f1_0, f2_0) instead. With nonnegative data each
+    phase runs on the placements its optima can use (:meth:`_TI.lex_f1_mask`,
+    :meth:`_TI.free_mask`), which is exact and much smaller: on the f1_0
+    phase every cloud placement goes.
+
+    ``options`` defaults to :data:`REFERENCE_OPTIONS` (HiGHS).
+    ``time_limit`` caps the whole call. ``ea_seeds`` adds an NSGA-II front to
+    the seed schedules (:func:`fedhpc.bpc.heuristic_schedules`).
+    """
+    from .formulations import nonnegative_data
+    from .model import weighted_sum_degenerate
+
+    opts = options or REFERENCE_OPTIONS
+    t0 = time.perf_counter()
+    deadline = None if time_limit is None else t0 + time_limit
+    stats: dict = {}
+
+    def left() -> float | None:
+        return None if deadline is None else max(0.0, deadline - time.perf_counter())
+
+    ti = _TI(inst, bpc._prepare(inst))
+    seeds = bpc.heuristic_schedules(inst, ea=ea_seeds)
+    nonneg = nonnegative_data(inst)
+    stats["setup_s"] = time.perf_counter() - t0
+
+    def run(name, sub, w1, w2, b1=None, b2=None, extra=()):
+        tp = time.perf_counter()
+        own = [a for a in (*extra, *seeds) if sub.representable(a)]
+        st: dict = {}
+        res = solve_lpfirst(inst, w1, w2, b1, b2, time_limit=left(), options=opts, ti=sub,
+                            seed_schedules=own, stats=st)
+        if res.assignment is not None:
+            seeds.insert(0, res.assignment)
+        stats[name] = {"time_s": time.perf_counter() - tp, "status": res.status, "how": res.how,
+                       "placements": sub.n_arcs, **{k: v for k, v in st.items()
+                                                    if isinstance(v, (int, float, str))}}
+        return res
+
+    def proven(res, what):
+        if res.status != "optimal":
+            raise RuntimeError(f"lpfirst: {what} not proven optimal (status {res.status}); "
+                               "raise the time limit")
+        return _solution(inst, res)
+
+    # Phases 1-2: lex-min (f1, f2)
+    ti_T = ti.restrict(ti.lex_f1_mask()) if nonneg else ti
+    s1 = proven(run("f1_T", ti_T, 1.0, 0.0), "min f1")
+    s2 = proven(run("f2_T", ti_T, 0.0, 1.0, b1=s1.f1, extra=[s1.assignment]), "min f2 at f1_T")
+    f1_T, f2_T = s1.f1, s2.f2
+    stats["total_s"] = time.perf_counter() - t0
+    if nonneg and f2_T <= 1e-8:
+        return ReferencePoints((f1_T, f2_T, f1_T, 0.0), True, f1_T, s2, stats)
+
+    # Phase 3: f1_0 = min f1 s.t. f2 <= 0
+    s3, f2_0, bound, certified = None, 0.0, -math.inf, True
+    zero_cost_infeasible = False
+    if nonneg:
+        try:
+            ti_0 = ti.restrict(ti.free_mask())   # all free: the f2 <= 0 row is implied
+            b2 = None
+        except ValueError:   # some job has no free placement
+            ti_0, zero_cost_infeasible = None, True
+    else:
+        ti_0, b2 = ti, 0.0
+    if ti_0 is not None:
+        r3 = run("f1_0", ti_0, 1.0, 0.0, b2=b2)
+        if r3.status == "infeasible":
+            zero_cost_infeasible = True
+        elif r3.status == "optimal" or (r3.assignment is not None and not require_certified):
+            s3 = _solution(inst, r3)
+            certified = r3.status == "optimal"
+            bound = s3.f1 if certified else r3.bound
+        else:
+            raise RuntimeError(f"lpfirst: min f1 at zero cost not proven optimal (best "
+                               f"{r3.objective}, bound {r3.bound}); raise the time limit or "
+                               "pass require_certified=False")
+    if zero_cost_infeasible:
+        if not min_cost_reference:
+            raise RuntimeError("No zero-cost schedule exists; pass min_cost_reference=True.")
+        r = run("f2_0", ti, 0.0, 1.0)
+        s = proven(r, "min f2")
+        s3 = proven(run("f1_0", ti, 1.0, 0.0, b2=s.f2, extra=[s.assignment]),
+                    "min f1 at minimum cost")
+        f2_0, bound = s3.f2, s3.f1
+    f1_0 = s3.f1
+    stats["total_s"] = time.perf_counter() - t0
+
+    ideal = None
+    if (zero_cost_infeasible or nonneg) and certified \
+            and weighted_sum_degenerate(f1_T, f2_T, f1_0, f2_0):
+        ideal = replace(s3, objective=s3.f2)
+    return ReferencePoints((f1_T, f2_T, f1_0, f2_0), certified, bound, ideal, stats)
+
+
 def make_lpfirst_lexmin_bounded(inst: Instance, time_limit: float | None = None,
                                 options: LPFirstOptions | None = None, ea_seeds: bool = True):
     """A ``lexmin_bounded`` closure for ``pareto.true_pareto_frontier`` /
@@ -1325,8 +1700,13 @@ def make_lpfirst_lexmin_bounded(inst: Instance, time_limit: float | None = None,
     def lexmin_bounded(primary: str, secondary: str, bound: str | None = None,
                        bound_value: float | None = None, *, start: Solution | None = None
                        ) -> Solution:
-        if start is not None and start.assignment and len(start.assignment) == len(inst.jobs):
-            schedules.insert(0, dict(start.assignment))
+        """``secondary=None`` — the first phase only (status ``"optimal"``
+        then means only the primary is proven; for
+        pareto.parallel_epsilon_frontier). ``start`` — a Solution or a list
+        of them, used as seeds (incumbent if feasible, columns either way)."""
+        for x in (start if isinstance(start, (list, tuple)) else [start]):
+            if x is not None and x.assignment and len(x.assignment) == len(inst.jobs):
+                schedules.insert(0, dict(x.assignment))
         b1 = grid_floor(inst, "f1", bound_value) if bound == "f1" else None
         b2 = grid_floor(inst, "f2", bound_value) if bound == "f2" else None
         w = (1.0, 0.0) if primary == "f1" else (0.0, 1.0)
@@ -1336,6 +1716,8 @@ def make_lpfirst_lexmin_bounded(inst: Instance, time_limit: float | None = None,
         if first.status != "optimal":
             return _solution(inst, first, "feasible")
         sol1 = _solution(inst, first)
+        if secondary is None:
+            return sol1
         if primary == "f1":
             b1 = min(b1, sol1.f1) if b1 is not None else sol1.f1
         else:
