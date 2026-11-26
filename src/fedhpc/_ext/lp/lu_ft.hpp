@@ -114,6 +114,23 @@ public:
         }
         for (int c = 0; c < m; ++c)
             for (auto [p, x] : ucol_[c]) urow_[p].push_back({c, x});
+        rowcol_.assign(m, -1);
+        for (int c = 0; c < m; ++c) rowcol_[prow_[c]] = c;
+        if ((int)mark_.size() != m) mark_.assign(m, 0);
+        // L by rows (the etas each row is an off-diagonal entry of), for
+        // the scatter-form L' in a hyper-sparse BTRAN
+        lrstart_.assign(m + 1, 0);
+        for (int i : lidx_) ++lrstart_[i + 1];
+        for (int i = 0; i < m; ++i) lrstart_[i + 1] += lrstart_[i];
+        lrk_.resize(lidx_.size()), lrval_.resize(lidx_.size());
+        {
+            std::vector<int> fill(lrstart_.begin(), lrstart_.end() - 1);
+            for (int k = 0, ne = (int)lpiv_.size(); k < ne; ++k)
+                for (int e = lstart_[k], f = lstart_[k + 1]; e < f; ++e) {
+                    const int at = fill[lidx_[e]]++;
+                    lrk_[at] = k, lrval_[at] = lval_[e];
+                }
+        }
         updates_ = 0;
         return true;
     }
@@ -130,19 +147,57 @@ public:
             if (!seenf_[ix[k]]) seenf_[ix[k]] = 1, nzf_.push_back(ix[k]);
         }
         apply_L_sparse(v.data(), nzf_, seenf_);
+        apply_R_pattern(v.data(), nzf_, seenf_);
         for (int i : nzf_) seenf_[i] = 0;
-        apply_R(v.data());
         // keep the spike (M a_j) for update(); solve U into out
         std::copy(v.begin(), v.end(), tmp_.begin());
         out_nz_.clear();
-        solve_U(tmp_.data(), out, &out_nz_);
+        if (hyper() && (int)nzf_.size() * kSparseU < m_) {
+            std::fill(out, out + m_, 0.0);
+            solve_U_sparse(tmp_.data(), out, nzf_, out_nz_);
+        } else {
+            solve_U(tmp_.data(), out, &out_nz_);
+        }
         have_spike_ = true;
     }
     void ftran_inplace(double* x) override {
+        nzf_.clear();
+        for (int i = 0; i < m_; ++i)
+            if (x[i] != 0.0) nzf_.push_back(i);
+        ftran_pattern(x);
+    }
+    // x's nonzeros are within nz (DSE's rho, the flips' rows): no scan
+    void ftran_inplace(double* x, const std::vector<int>& nz) override {
+        nzf_.assign(nz.begin(), nz.end());
+        ftran_pattern(x);
+    }
+    // a sparse right-hand side takes only the L etas it reaches and the U
+    // columns it reaches; nzf_ holds x's pattern on entry
+    void ftran_pattern(double* x) {
+        if ((int)seenf_.size() != m_) seenf_.assign(m_, 0);
+        if (hyper() && (int)nzf_.size() * kSparse < m_) {
+            for (int i : nzf_) seenf_[i] = 1;
+            apply_L_sparse(x, nzf_, seenf_);
+            apply_R_pattern(x, nzf_, seenf_);
+            for (int i : nzf_) seenf_[i] = 0;
+            if ((int)nzf_.size() * kSparseU < m_) {
+                std::copy(x, x + m_, tmp_.begin());
+                std::fill(x, x + m_, 0.0);
+                inplace_nz_.clear();
+                solve_U_sparse(tmp_.data(), x, nzf_, inplace_nz_);
+                inplace_valid_ = true;
+                return;
+            }
+            std::copy(x, x + m_, tmp_.begin());
+            solve_U(tmp_.data(), x);
+            inplace_valid_ = false;
+            return;
+        }
         apply_L(x);
         apply_R(x);
         std::copy(x, x + m_, tmp_.begin());
         solve_U(tmp_.data(), x);
+        inplace_valid_ = false;
     }
     void btran_inplace(double* y) override {
         // y is indexed by position: z' U = y', then z' M
@@ -150,6 +205,40 @@ public:
         // the later columns (urow_), skipping zeros
         std::vector<double>& z = tmp_;
         std::fill(z.begin(), z.end(), 0.0);
+        if ((int)seenf_.size() != m_) seenf_.assign(m_, 0);
+        if (!startb_given_) {
+            startb_.clear();
+            for (int c = 0; c < m_; ++c)
+                if (y[c] != 0.0) startb_.push_back(c);
+        }
+        startb_given_ = false;
+        row_valid_ = false;
+        if (hyper() && (int)startb_.size() * 10 < m_) {
+            // hyper-sparse: U' over the reach of y's columns, then R' and
+            // L' over the rows reached
+            reach(startb_, true, topo_);
+            nzb_.clear();
+            for (int c : topo_) {
+                const double zc = y[c] / diag_[c];
+                y[c] = 0.0;
+                if (zc == 0.0) continue;
+                const int p = prow_[c];
+                z[p] = zc;
+                nzb_.push_back(p), seenf_[p] = 1;
+                for (auto [c2, x] : urow_[p]) y[c2] -= x * zc;
+            }
+            apply_Rt_pattern(z.data(), nzb_, seenf_);
+            if ((int)nzb_.size() * 10 < m_) {
+                apply_Lt_sparse(z.data());   // appends the pivot rows it reaches
+                for (int i : nzb_) seenf_[i] = 0;
+                row_valid_ = true;
+            } else {
+                for (int i : nzb_) seenf_[i] = 0;
+                apply_Lt(z.data());
+            }
+            std::copy(z.begin(), z.end(), y);
+            return;
+        }
         for (int c : ord_) {
             const double zc = y[c] / diag_[c];
             z[prow_[c]] = zc;
@@ -157,12 +246,57 @@ public:
             for (auto [c2, x] : urow_[prow_[c]]) y[c2] -= x * zc;
         }
         apply_Rt(z.data());
-        apply_Lt(z.data());
+        nzb_.clear();
+        if (!hyper()) {
+            apply_Lt(z.data());
+            std::copy(z.begin(), z.end(), y);
+            return;
+        }
+        for (int i = 0; i < m_; ++i)
+            if (z[i] != 0.0) nzb_.push_back(i);
+        if ((int)nzb_.size() * 10 < m_) {
+            for (int i : nzb_) seenf_[i] = 1;
+            apply_Lt_sparse(z.data());
+            for (int i : nzb_) seenf_[i] = 0;
+            row_valid_ = true;
+        } else {
+            apply_Lt(z.data());
+        }
         std::copy(z.begin(), z.end(), y);
+    }
+
+    // L' in scatter form over the etas reached: popped in decreasing eta
+    // order, a pivot row's value is final (its contributors are rows
+    // pivoted later), and it is pushed into the etas it is an entry of
+    void apply_Lt_sparse(double* z) {
+        std::vector<int>& heap = lheap_;   // a max-heap of eta indices
+        heap.clear();
+        if ((int)seenf_.size() != m_) seenf_.assign(m_, 0);
+        for (int i : nzb_)
+            if (eta_of_row_[i] >= 0) heap.push_back(eta_of_row_[i]);
+        std::make_heap(heap.begin(), heap.end());
+        int last = -1;
+        while (!heap.empty()) {
+            std::pop_heap(heap.begin(), heap.end());
+            const int k = heap.back();
+            heap.pop_back();
+            if (k == last) continue;
+            last = k;
+            const int p = lpiv_[k];
+            const double zp = z[p];
+            if (!seenf_[p]) seenf_[p] = 1, nzb_.push_back(p);
+            if (zp == 0.0) continue;
+            for (int e = lrstart_[p], f = lrstart_[p + 1]; e < f; ++e) {
+                const int k2 = lrk_[e];
+                z[lpiv_[k2]] -= lrval_[e] * zp;
+                heap.push_back(k2), std::push_heap(heap.begin(), heap.end());
+            }
+        }
     }
     const double* row(int r) override {
         std::fill(rowbuf_.begin(), rowbuf_.end(), 0.0);
         rowbuf_[r] = 1.0;
+        startb_.assign(1, r), startb_given_ = true;   // e_r: no scan
         btran_inplace(rowbuf_.data());
         return rowbuf_.data();
     }
@@ -181,7 +315,8 @@ public:
         for (auto [p, x] : ucol_[c]) erase_from(urow_[p], c);
         ucol_[c].clear();
         // 2. gather pivot row pk (now last) into w, by position
-        std::vector<int> wnz;
+        std::vector<int>& wnz = wnz_;
+        wnz.clear();
         for (auto [c2, x] : urow_[pk]) {
             w_[c2] = x;
             wnz.push_back(c2);
@@ -235,6 +370,8 @@ public:
     }
     const char* name() const override { return "lu"; }
     const std::vector<int>* last_nz() const override { return &out_nz_; }
+    const std::vector<int>* inplace_nz() const override { return inplace_valid_ ? &inplace_nz_ : nullptr; }
+    const std::vector<int>* row_nz() const override { return row_valid_ ? &nzb_ : nullptr; }
     int updates() const { return updates_; }
 
 private:
@@ -252,18 +389,39 @@ private:
     std::vector<int> eta_of_row_, nzf_;   // L eta pivoting on each row; ftran's pattern
     std::vector<int> out_nz_;             // last ftran(M, j, out)'s nonzero positions
     std::vector<char> seenf_;
+    std::vector<int> lrstart_, lrk_, nzb_;   // L by rows; btran's pattern
+    std::vector<int> rowcol_, startf_, startb_, topo_, inplace_nz_;
+    std::vector<std::pair<int, int>> stk_;
+    std::vector<char> mark_;
+    mutable std::vector<int> lheap_;
+    std::vector<int> wnz_;
+    bool inplace_valid_ = false, row_valid_ = false, startb_given_ = false;
+    // sparse paths below these densities (1/k of m): L and R by pattern,
+    // U by its reach (DFS) - which pays off to about a quarter of m
+    static constexpr int kSparse = 4, kSparseU = 4;
+    // below this many rows the dense loops win (the reach DFS, heaps and
+    // pattern upkeep cost more than they skip): masters of a few hundred
+    // rows keep the plain solves, and their pivot paths
+    static constexpr int kSparseMinRows = 1000;
+    bool hyper() const { return m_ >= kSparseMinRows; }
+    std::vector<double> lrval_;
 
     // L applied to a sparse v whose pattern is nz (seen marks it): only the
     // etas of the touched pivot rows, in eta order (a fill row is always
     // pivoted later than the eta that fills it, so a min-heap keeps order).
     void apply_L_sparse(double* v, std::vector<int>& nz, std::vector<char>& seen) const {
-        std::priority_queue<int, std::vector<int>, std::greater<int>> heap;
+        // a min-heap of eta indices in a reused buffer (no allocation)
+        std::vector<int>& heap = lheap_;
+        heap.clear();
+        auto push = [&](int k) { heap.push_back(k), std::push_heap(heap.begin(), heap.end(), std::greater<int>()); };
         for (int i : nz)
-            if (eta_of_row_[i] >= 0) heap.push(eta_of_row_[i]);
+            if (eta_of_row_[i] >= 0) heap.push_back(eta_of_row_[i]);
+        std::make_heap(heap.begin(), heap.end(), std::greater<int>());
         int last = -1;
         while (!heap.empty()) {
-            const int k = heap.top();
-            heap.pop();
+            std::pop_heap(heap.begin(), heap.end(), std::greater<int>());
+            const int k = heap.back();
+            heap.pop_back();
             if (k == last) continue;
             last = k;
             const double vp = v[lpiv_[k]];
@@ -273,7 +431,7 @@ private:
                 v[i] -= lval_[e] * vp;
                 if (!seen[i]) {
                     seen[i] = 1, nz.push_back(i);
-                    if (eta_of_row_[i] > k) heap.push(eta_of_row_[i]);
+                    if (eta_of_row_[i] > k) push(eta_of_row_[i]);
                 }
             }
         }
@@ -322,6 +480,78 @@ private:
             for (int e = rstart_[k], f = rstart_[k + 1]; e < f; ++e) z[ridx_[e]] -= rval_[e] * zt;
         }
     }
+    // R applied with v's pattern kept (seen marks it)
+    void apply_R_pattern(double* v, std::vector<int>& nz, std::vector<char>& seen) const {
+        for (size_t k = 0; k < rtarget_.size(); ++k) {
+            double s = 0.0;
+            for (int e = rstart_[k], f = rstart_[k + 1]; e < f; ++e) s += rval_[e] * v[ridx_[e]];
+            if (s == 0.0) continue;
+            const int t = rtarget_[k];
+            v[t] -= s;
+            if (!seen[t]) seen[t] = 1, nz.push_back(t);
+        }
+    }
+    void apply_Rt_pattern(double* z, std::vector<int>& nz, std::vector<char>& seen) const {
+        for (int k = (int)rtarget_.size() - 1; k >= 0; --k) {
+            const double zt = z[rtarget_[k]];
+            if (zt == 0.0) continue;
+            for (int e = rstart_[k], f = rstart_[k + 1]; e < f; ++e) {
+                const int i = ridx_[e];
+                z[i] -= rval_[e] * zt;
+                if (!seen[i]) seen[i] = 1, nz.push_back(i);
+            }
+        }
+    }
+    // The columns of U reachable from start, each before every column it
+    // updates (reverse DFS postorder; Gilbert & Peierls 1988). FTRAN's
+    // graph: c -> the columns pivoting on c's U rows; BTRAN's: c -> the
+    // columns in c's pivot row.
+    void reach(const std::vector<int>& start, bool transposed, std::vector<int>& topo) {
+        topo.clear();
+        for (int s0 : start) {
+            if (mark_[s0]) continue;
+            mark_[s0] = 1;
+            stk_.push_back({s0, 0});
+            while (!stk_.empty()) {
+                const int c = stk_.back().first;
+                int& e = stk_.back().second;
+                const auto& E = transposed ? urow_[prow_[c]] : ucol_[c];
+                int nxt = -1;
+                while (e < (int)E.size()) {
+                    const int t = transposed ? E[e].first : rowcol_[E[e].first];
+                    ++e;
+                    if (!mark_[t]) {
+                        nxt = t;
+                        break;
+                    }
+                }
+                if (nxt >= 0) {
+                    mark_[nxt] = 1;
+                    stk_.push_back({nxt, 0});
+                } else {
+                    topo.push_back(c);
+                    stk_.pop_back();
+                }
+            }
+        }
+        for (int c : topo) mark_[c] = 0;
+        std::reverse(topo.begin(), topo.end());
+    }
+    // U x = v over the reach of v's rows (rows); x zero on entry
+    void solve_U_sparse(double* v, double* x, const std::vector<int>& rows, std::vector<int>& nz) {
+        startf_.clear();
+        for (int p : rows)
+            if (v[p] != 0.0) startf_.push_back(rowcol_[p]);
+        reach(startf_, false, topo_);
+        for (int c : topo_) {
+            const double xc = v[prow_[c]] / diag_[c];
+            if (xc == 0.0) continue;
+            x[c] = xc;
+            nz.push_back(c);
+            for (auto [p, u] : ucol_[c]) v[p] -= u * xc;
+        }
+    }
+
     // U x = v (v by rows, consumed), x by position; nz collects x's pattern
     void solve_U(double* v, double* x, std::vector<int>* nz = nullptr) const {
         for (int i = (int)ord_.size() - 1; i >= 0; --i) {

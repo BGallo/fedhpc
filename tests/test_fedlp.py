@@ -271,6 +271,7 @@ def test_dual_flip_start_on_boxed_lps(seed, bfrt):
     m, n = rng.randint(4, 25), rng.randint(5, 60)
     M = _random_lp(rng, m, n)
     M.lp.options.dual_flip = True
+    M.lp.options.dual_flip_min_rows = 0   # these LPs are small
     M.lp.options.bfrt = bfrt
     for k, (c, lb, ub, idx, val) in enumerate(list(M.cols)):   # box everything
         if ub == INF:
@@ -288,3 +289,53 @@ def test_dual_flip_start_on_boxed_lps(seed, bfrt):
             M.add(rng.uniform(-2, 2), 0.0, rng.uniform(0.5, 3), idx, [rng.uniform(-2, 3) for _ in idx])
         M.check()
     assert M.lp.stats()["dual_iterations"] >= 0
+
+
+@pytest.mark.parametrize("seed", range(2))
+def test_large_boxed_master_hyper_sparse_dual(seed, factor):
+    """An lpfirst-like master past the LU's hyper-sparse threshold (1000
+    rows) and the dual flip-start's (3000 rows): job rows (= count) with
+    big-M artificials, capacity rows, placement columns bounded by their
+    job's count. An objective switch and column-generation rounds re-solve
+    through the bound-flipping dual with exact DSE weights and the
+    hyper-sparse FTRAN/BTRAN; each solve must match Gurobi."""
+    if factor != 3:
+        pytest.skip("dense and product-form factors at 3000+ rows are slow")
+    rng = random.Random(7000 + seed)
+    nj, ns = 2600, 500
+    count = [float(rng.choice([1, 1, 1, 2, 3])) for _ in range(nj)]
+    cap = [float(rng.randint(3, 8)) for _ in range(ns)]
+    M = Mirror(["="] * nj + ["<"] * ns, count + cap)
+    assert M.lp.options.dual_flip_min_rows <= nj + ns
+    for j in range(nj):
+        M.add(1e5, 0.0, INF, [j], [1.0])
+
+    def placement():
+        j = rng.randrange(nj)
+        t0 = rng.randrange(ns - 3)
+        slots = list(range(t0, t0 + rng.randint(1, 3)))
+        return [j] + [nj + t for t in slots], [1.0] + [float(rng.randint(1, 2)) for _ in slots], count[j]
+
+    def add_batch(k, obj):
+        for _ in range(k):
+            idx, val, ub = placement()
+            c1, c2 = float(rng.randint(1, 50)), float(rng.randint(0, 20))
+            M.add(c1 if obj == 1 else c2, 0.0, ub, idx, val)
+            costs.append((c1, c2))
+
+    costs = [(1e5, 1e5)] * nj
+    add_batch(3 * nj, 1)
+    M.check()
+    # the second objective: every placement's cost changes (lexmin stage 2)
+    ks = list(range(nj, len(M.cols)))
+    M.lp.set_costs(ks, [costs[k][1] for k in ks])
+    for k in ks:
+        c, lb, ub, idx, val = M.cols[k]
+        M.vars[k].Obj = costs[k][1]
+        M.cols[k] = (costs[k][1], lb, ub, idx, val)
+    M.check()
+    for _ in range(3):   # column generation rounds
+        add_batch(400, 2)
+        M.check()
+    st = M.lp.stats()
+    assert st["dual_flips"] > 0 and st["dual_iterations"] > 0

@@ -51,8 +51,18 @@ struct ScopeTimer {
 #define FEDLP_CAT2(a, b) a##b
 #define FEDLP_CAT(a, b) FEDLP_CAT2(a, b)
 #define FEDLP_TIME(field) ScopeTimer FEDLP_CAT(fedlp_timer_, __LINE__)(stats_.field)
+// lap timers: the time since the previous lap goes to field
+#define FEDLP_LAP_START auto fedlp_lap_ = std::chrono::steady_clock::now()
+#define FEDLP_LAP(field)                                                                  \
+    do {                                                                                  \
+        const auto fedlp_now_ = std::chrono::steady_clock::now();                         \
+        stats_.field += std::chrono::duration<double>(fedlp_now_ - fedlp_lap_).count();   \
+        fedlp_lap_ = fedlp_now_;                                                          \
+    } while (0)
 #else
 #define FEDLP_TIME(field) (void)0
+#define FEDLP_LAP_START (void)0
+#define FEDLP_LAP(field) (void)0
 #endif
 
 enum class Status : int { Optimal = 0, Infeasible = 1, Unbounded = 2, IterationLimit = 3, Numerical = 5 };
@@ -108,12 +118,32 @@ struct Options {
     int dual_pricing = 1;
     // Dual phase 1 by bound flipping: a start that is dual infeasible only
     // in boxed columns has them moved to their opposite bound, then the dual
-    // simplex runs (Koberstein 2005; HiGHS on boxed LPs). Off: primal.
-    bool dual_flip = false;
+    // simplex runs (Koberstein 2005; HiGHS on boxed LPs), on masters of at
+    // least dual_flip_min_rows rows. lpfirst's columns are bounded by their
+    // job counts: pos_congestion (4.5 k rows) re-solves 9.5 -> 3.1 s; on the
+    // 964-job trace (2.4 k rows) the primal's working set keeps its pivots
+    // cheap and the dual lost the bench (0.87 vs 0.53 s). Branch and price's
+    // columns are unbounded, so its masters keep the primal regardless.
+    bool dual_flip = true;
+    int dual_flip_min_rows = 3000;
     // the dual ratio test passes breakpoints of boxed columns by flipping them
     bool bfrt = true;
     // the dual simplex perturbs costs against dual degeneracy
     bool dual_perturb = true;
+    // exact initial DSE weights when the dual starts from a basis it did
+    // not build (else unit weights)
+    bool dse_exact = true;
+    // the dual prices only the sifting working set (every dual-infeasible
+    // column joins it first); the final optimality check over all columns
+    // hands anything else to the primal
+    // Off: on pos_congestion the restricted dual left columns that matter
+    // to a long primal clean-up (3.1 -> 6.3 s); on the 964-job trace it
+    // brought the dual level with the primal (0.87 -> 0.56 vs 0.53 s).
+    bool dual_sift = false;
+    // LU updates between the dual's refactorisations (pos_congestion's
+    // lpfirst masters: 3.54 s at 100, 3.24 s at 200, 3.19 s at 400 with
+    // FTRAN's R etas growing)
+    int dual_refactor_interval = 200;
     double dual_perturb_scale = 1e-6;
     int work_min = 500;
     double work_per_row = 3.0;
@@ -130,6 +160,10 @@ struct Stats {
     long long dual_flips = 0, bfrt_flips = 0;
     double t_select = 0, t_ftran = 0, t_ratio = 0, t_pivot = 0, t_refactor = 0, t_sift = 0;
     double t_btran = 0, t_rowwise = 0, t_colwise = 0, t_fupdate = 0;
+    // dual phase: row choice, BTRAN, PRICE, ratio test, FTRANs (alpha, DSE
+    // tau, flips), updates, factor update + refactorisation
+    double t_dseinit = 0, t_dchuzr = 0, t_dbtran = 0, t_dprice = 0, t_dratio = 0, t_dftran = 0, t_dupdate = 0, t_dfactor = 0;
+    long long d_rho_nnz = 0, d_row_nnz = 0, d_breaks = 0, d_alpha_nnz = 0, d_tau_nnz = 0;   // dual pivot rows' sizes, summed
     double seconds = 0.0;
 };
 
@@ -217,8 +251,13 @@ private:
     std::vector<double> alpha_, rho_, acc_;
     std::vector<int> anz_, rnz_;   // nonzero positions of alpha_ and rho_
     std::vector<double> dse_, tau_;   // dual steepest-edge weights per basis position
+    std::vector<double> wcol_;        // the weights by column, across a refactorisation
+    bool dse_exact_ = false;          // dse_ = ||e_i' B^-1||^2, kept by dual pivots only
     std::vector<std::pair<double, int>> brk_;   // the dual ratio test's breakpoints
     std::vector<double> flipv_;
+    std::vector<int> flipped_, fnz_;
+    std::vector<double> infeas_;   // the dual's primal infeasibility by position
+    std::vector<std::pair<double, int>> harris_;
     std::vector<int> touched_;
     std::vector<char> in_touched_;
     // sifting working set: columns pivots and pricing look at (logicals,
@@ -259,10 +298,24 @@ private:
         return opt.dual_tol * (1.0 + std::fabs(M_.obj(j))) + 1e-14 * ymax_ * (1.0 + M_.col_nnz(j));
     }
     double ymax_ = 0.0;   // |y|_inf, kept current with y
+    int yarg_ = -1;       // where it is attained
     void update_ymax() {
         double v = 0.0;
-        for (double x : y_) v = std::max(v, std::fabs(x));
-        ymax_ = v;
+        int a = -1;
+        for (int k = 0, n = (int)y_.size(); k < n; ++k)
+            if (std::fabs(y_[k]) > v) v = std::fabs(y_[k]), a = k;
+        ymax_ = v, yarg_ = a;
+    }
+    // exact after y changed only on nz: a full pass only when the entry
+    // holding the maximum shrank
+    void update_ymax(const std::vector<int>& nz) {
+        bool lost = false;
+        for (int k : nz) {
+            const double v = std::fabs(y_[k]);
+            if (v > ymax_) ymax_ = v, yarg_ = k;
+            else if (k == yarg_ && v < ymax_) lost = true;
+        }
+        if (lost) update_ymax();
     }
 
     // value a nonbasic variable rests at, for a status
@@ -322,6 +375,14 @@ private:
     }
     void rho_pattern() {
         rnz_.clear();
+        if (const std::vector<int>* nz = fac_->row_nz()) {   // the factor's pattern
+            for (int k : *nz)
+                if (std::fabs(rho_[k]) >= 1e-14) rnz_.push_back(k);
+            // ascending, as a scan gives: pivot rows then sum in a fixed
+            // order and break ties the same way whatever the factor did
+            std::sort(rnz_.begin(), rnz_.end());
+            return;
+        }
         for (int k = 0, m = M_.rows(); k < m; ++k)
             if (std::fabs(rho_[k]) >= 1e-14) rnz_.push_back(k);
     }
@@ -339,6 +400,7 @@ private:
     // singleton column with a positive coefficient when there is one (the
     // master's artificials and null columns) — usually a feasible start.
     void crash() {
+        dse_exact_ = false;
         const int m = M_.rows(), n = M_.cols();
         for (int j = 0; j < n; ++j) {
             if (st_[j] == DEAD) continue;
@@ -392,8 +454,20 @@ private:
         FEDLP_TIME(t_refactor);
         ++stats_.refactors;
         since_refactor_ = 0;
-        if (!fac_->factorize(M_, head_)) return false;
-        if (std::string(fac_->name()) == "sparse") dse_.clear();   // the product form reorders positions
+        // DSE weights belong to basic columns: carry them through the
+        // factor's reordering of positions
+        const int m = M_.rows();
+        const bool keep_w = (int)dse_.size() == m;
+        if (keep_w) {
+            if ((int)wcol_.size() < M_.cols()) wcol_.resize(M_.cols());
+            for (int i = 0; i < m; ++i) wcol_[head_[i]] = dse_[i];
+        }
+        if (!fac_->factorize(M_, head_)) {
+            dse_exact_ = false;
+            return false;
+        }
+        if (keep_w)
+            for (int i = 0; i < m; ++i) dse_[i] = wcol_[head_[i]];
         for (int i = 0; i < M_.rows(); ++i) pos_[head_[i]] = i;   // the factor may reorder
         compute_xb();
         compute_y();
@@ -637,6 +711,7 @@ private:
     // through the row-wise pivot row (phase 2); otherwise they are
     // recomputed later (phase 1). Returns false on numerical failure.
     bool pivot(int q, int r, double dir, double theta, bool maintain, bool to_upper) {
+        dse_exact_ = false;   // a basis change the DSE weights do not follow
         const bool partial = maintain && partial_;
         const bool multi = maintain && multi_;
         const int m = M_.rows();
@@ -732,24 +807,35 @@ private:
                 arq_row = M_.dot(rho_.data(), q);
                 // one column's share: its pivot-row entry, reduced cost,
                 // Devex weight and candidacy (columns are independent)
-                auto pass = [&](size_t lo, size_t hi, double& lbest, int& lbq, double& lwmax) {
+                // locals, written back once: through the reference
+                // parameters the compiler must assume they alias d_ / w_
+                auto pass = [&](size_t lo, size_t hi, double& obest, int& obq, double& owmax) {
+                    double lbest = obest, lwmax = owmax;
+                    int lbq = obq;
+                    const double* rho = rho_.data();
+                    double* d = d_.data();
+                    double* w = w_.data();
+                    const char* st = st_.data();
+                    const int* wk = work_.data();
                     for (size_t k = lo; k < hi; ++k) {
-                        const int j = work_[k];
-                        const char sj = st_[j];
+                        const int j = wk[k];
+                        const char sj = st[j];
                         if (sj == BASIC || sj == DEAD || j == l || j == q) continue;
-                        const double a = M_.dot(rho_.data(), j);
+                        const double a = M_.dot(rho, j);
                         if (a != 0.0) {
-                            d_[j] -= td * a;
-                            w_[j] = std::max(w_[j], a * a * inv2 * wq);
-                            lwmax = std::max(lwmax, w_[j]);
+                            d[j] -= td * a;
+                            const double nw2 = a * a * inv2 * wq;
+                            if (nw2 > w[j]) w[j] = nw2;
+                            if (w[j] > lwmax) lwmax = w[j];
                         }
                         if (eligible(j)) {
                             // ties to the lowest index: the same choice
                             // however the pass is split across threads
-                            const double sc = d_[j] * d_[j] / w_[j];
+                            const double sc = d[j] * d[j] / w[j];
                             if (sc > lbest || (sc == lbest && sc > 0.0 && j < lbq)) lbest = sc, lbq = j;
                         }
                     }
+                    obest = lbest, obq = lbq, owmax = lwmax;
                 };
                 const size_t nw = work_.size();
                 if (opt.threads > 1 && work_nnz() > opt.parallel_min_nnz) {
@@ -778,7 +864,7 @@ private:
             // exact: a stale (only growing) |y|_inf loosens the tolerance
             // and stops solves early (on rm_M8N40_1 the CG went 137 -> 542
             // iterations)
-            update_ymax();
+            update_ymax(rnz_);
             if (wmax > 1e8) {   // reset the reference framework
                 std::fill(w_.begin(), w_.end(), 1.0);
                 next_valid_ = false;
@@ -1056,8 +1142,27 @@ private:
         return st;
     }
 
+    // primal infeasibility of basis position i (0 when within tolerance;
+    // negative below the lower bound): the dual's row choice scans this
+    double infeas_of(int i) const {
+        const int j = head_[i];
+        const double l = lbw(j), u = ubw(j), x = xb_[i];
+        if (x < l - opt.primal_tol * (1.0 + std::fabs(l))) return x - l;
+        if (x > u + opt.primal_tol * (1.0 + std::fabs(u))) return x - u;
+        return 0.0;
+    }
+    void all_infeas() {
+        const int m = M_.rows();
+        infeas_.resize(m);
+        for (int i = 0; i < m; ++i) infeas_[i] = infeas_of(i);
+    }
+
+    bool dual_ws() const { return opt.dual_sift && opt.sifting; }
+
     Status dual_phase_core() {
         const int m = M_.rows(), n = M_.cols();
+        const bool ws = dual_ws();
+        all_infeas();
         std::vector<double> arow(n, 0.0);
         std::vector<int> nzj;
         std::vector<char> inz(n, 0);
@@ -1065,44 +1170,65 @@ private:
         cand_valid_ = false;
         while (true) {
             if (stats_.iterations >= opt.max_iter) return Status::IterationLimit;
+            FEDLP_LAP_START;
             // leaving row: the largest violation^2 / beta_i (dual steepest
             // edge, beta_i ~ |e_i' B^-1|^2) or the largest violation
             const bool dse = opt.dual_pricing == 1;
-            if (dse && (int)dse_.size() != m) dse_.assign(m, 1.0);
+            if (dse && ((int)dse_.size() != m || (!dse_exact_ && opt.dse_exact))) {
+                // exact weights (one BTRAN per row) for a basis the dual did
+                // not build: unit weights are right only for a slack basis,
+                // and wrong ones pick rows with dense e_r' B^-1
+                dse_.assign(m, 1.0);
+                if (opt.dse_exact) {
+                    FEDLP_TIME(t_dseinit);
+                    for (int i = 0; i < m; ++i) {
+                        const double* rr = fac_->row(i);
+                        double w = 0.0;
+                        for (int k = 0; k < m; ++k) w += rr[k] * rr[k];
+                        dse_[i] = std::max(w, 1e-6);
+                    }
+                }
+                dse_exact_ = opt.dse_exact;
+            }
             int r = -1;
             double worst = 0.0, best = 0.0;
             bool below = false;
-            for (int i = 0; i < m; ++i) {
-                const int j = head_[i];
-                const double l = lbw(j), u = ubw(j);
-                double viol = 0.0;
-                bool lo = false;
-                if (xb_[i] < l - opt.primal_tol * (1.0 + std::fabs(l))) viol = l - xb_[i], lo = true;
-                else if (xb_[i] > u + opt.primal_tol * (1.0 + std::fabs(u))) viol = xb_[i] - u;
-                else continue;
-                const double sc = dse ? viol * viol / dse_[i] : viol;
-                if (sc > best) best = sc, worst = viol, r = i, below = lo;
+            {
+                const double* inf = infeas_.data();
+                const double* w = dse_.data();
+                for (int i = 0; i < m; ++i) {
+                    const double v = inf[i];
+                    if (v == 0.0) continue;
+                    const double sc = dse ? v * v / w[i] : std::fabs(v);
+                    if (sc > best) best = sc, worst = std::fabs(v), r = i, below = v < 0;
+                }
             }
             if (r < 0) return Status::Optimal;
+            FEDLP_LAP(t_dchuzr);
             // pivot row over the nonbasic columns
             {
                 const double* rr = fac_->row(r);
                 rho_.assign(rr, rr + m);
                 rho_pattern();
             }
+            FEDLP_LAP(t_dbtran);
             long long rowcost = 0;
-            for (int k = 0; k < m; ++k)
-                if (std::fabs(rho_[k]) >= 1e-14) rowcost += (long long)M_.row(k).size();
-            if (3 * rowcost < M_.nnz()) {
-                for (int k = 0; k < m; ++k) {
+            for (int k : rnz_) rowcost += (long long)M_.row(k).size();
+            if (3 * rowcost < (ws ? work_nnz() : M_.nnz())) {
+                for (int k : rnz_) {
                     const double rk = rho_[k];
-                    if (std::fabs(rk) < 1e-14) continue;
                     for (const auto& e : M_.row(k)) {
                         const int j = e.col;
-                        if (st_[j] == BASIC || st_[j] == DEAD) continue;
+                        if (st_[j] == BASIC || st_[j] == DEAD || (ws && !in_work_[j])) continue;
                         if (!inz[j]) inz[j] = 1, nzj.push_back(j), arow[j] = 0.0;
                         arow[j] += rk * e.val;
                     }
+                }
+            } else if (ws) {
+                for (int j : work_) {
+                    if (st_[j] == BASIC || st_[j] == DEAD) continue;
+                    const double a = M_.dot(rho_.data(), j);
+                    if (a != 0.0) inz[j] = 1, nzj.push_back(j), arow[j] = a;
                 }
             } else {
                 for (int j = 0; j < n; ++j) {
@@ -1111,6 +1237,8 @@ private:
                     if (a != 0.0) inz[j] = 1, nzj.push_back(j), arow[j] = a;
                 }
             }
+            stats_.d_rho_nnz += (long long)rnz_.size(), stats_.d_row_nnz += (long long)nzj.size();
+            FEDLP_LAP(t_dprice);
             // Bound-flipping (long-step) dual ratio test (Fourer 1994; Maros
             // 2003, ch. 10; Koberstein 2005). The breakpoints t_j, ascending:
             // passing one changes d_j's sign, which a boxed column absorbs by
@@ -1133,56 +1261,83 @@ private:
                 const double bound = below ? lbw(l) : ubw(l);
                 if (worst <= opt.feas_accept * (1.0 + std::fabs(bound))) {
                     xb_[r] = bound;   // rounding no pivot can fix: accept it
+                    infeas_[r] = 0.0;
                     nzj.clear();
                     continue;
                 }
                 // dual unbounded: the primal phase 1 proves infeasibility
                 return Status::Numerical;
             }
-            std::sort(brk_.begin(), brk_.end(),
-                      [](const auto& x, const auto& y) { return x.first < y.first || (x.first == y.first && x.second < y.second); });
-            size_t k0 = 0;   // brk_[0, k0) flip
+            // a min-heap: only the breakpoints passed, and the Harris group
+            // after them, are ever put in order (O(n + k log n))
+            auto later = [](const std::pair<double, int>& x, const std::pair<double, int>& y) {
+                return x.first > y.first || (x.first == y.first && x.second > y.second);
+            };
+            std::make_heap(brk_.begin(), brk_.end(), later);
+            auto pop = [&]() {
+                std::pop_heap(brk_.begin(), brk_.end(), later);
+                const auto e = brk_.back();
+                brk_.pop_back();
+                return e;
+            };
+            flipped_.clear();
             if (opt.bfrt) {
                 double slope = worst;
-                for (; k0 + 1 < brk_.size(); ++k0) {
-                    const int j = brk_[k0].second;
+                while (brk_.size() > 1) {
+                    const int j = brk_.front().second;
                     const double range = ubw(j) - lbw(j);
                     if (!std::isfinite(range)) break;
                     const double ns = slope - std::fabs(arow[j]) * range;
                     if (ns <= 0.0) break;
                     slope = ns;
+                    flipped_.push_back(pop().second);
                 }
             }
+            const size_t k0 = flipped_.size();
             double tmax = kInf;
-            for (size_t k = k0; k < brk_.size(); ++k) {
-                const int j = brk_[k].second;
-                const double fa = std::fabs(arow[j]);
-                tmax = std::min(tmax, (st_[j] == AT_LB ? d_[j] + dtol(j) : dtol(j) - d_[j]) / fa);
-                if (brk_[k].first > tmax) break;   // later breakpoints only grow
-            }
             int q = -1;
             double bestpiv = 0.0;
-            for (size_t k = k0; k < brk_.size() && brk_[k].first <= tmax; ++k) {
-                const int j = brk_[k].second;
+            // Harris over what is left: pop in order while within the
+            // relaxed bound, which only shrinks
+            harris_.clear();
+            while (!brk_.empty() && brk_.front().first <= tmax) {
+                const auto e = pop();
+                harris_.push_back(e);
+                const int j = e.second;
                 const double fa = std::fabs(arow[j]);
-                if (fa > bestpiv) bestpiv = fa, q = j;
+                tmax = std::min(tmax, (st_[j] == AT_LB ? d_[j] + dtol(j) : dtol(j) - d_[j]) / fa);
             }
-            if (q < 0) q = brk_[k0].second;
+            for (const auto& e : harris_) {
+                if (e.first > tmax) break;   // popped in order
+                const double fa = std::fabs(arow[e.second]);
+                if (fa > bestpiv) bestpiv = fa, q = e.second;
+            }
+            if (q < 0) q = harris_.front().second;
+            stats_.d_breaks += (long long)brk_.size();
+            FEDLP_LAP(t_dratio);
             if (k0 > 0) {
                 // the flips' effect on x_B: one FTRAN of their combined column
                 flipv_.assign(m, 0.0);
-                for (size_t k = 0; k < k0; ++k) {
-                    const int j = brk_[k].second;
+                fnz_.clear();
+                for (const int j : flipped_) {
                     const double nx = st_[j] == AT_LB ? ubw(j) : lbw(j);
                     const double dx = nx - x_[j];
                     st_[j] = st_[j] == AT_LB ? AT_UB : AT_LB;
                     x_[j] = nx;
                     const int* ix = M_.col_idx(j);
                     const double* v = M_.col_val(j);
-                    for (int e = 0, nz = M_.col_nnz(j); e < nz; ++e) flipv_[ix[e]] += v[e] * dx;
+                    for (int e = 0, nz = M_.col_nnz(j); e < nz; ++e) {
+                        if (flipv_[ix[e]] == 0.0) fnz_.push_back(ix[e]);
+                        flipv_[ix[e]] += v[e] * dx;
+                    }
                 }
-                fac_->ftran_inplace(flipv_.data());
-                for (int i = 0; i < m; ++i) xb_[i] -= flipv_[i];
+                fac_->ftran_inplace(flipv_.data(), fnz_);
+                if (const std::vector<int>* nz = fac_->inplace_nz()) {
+                    for (int i : *nz) xb_[i] -= flipv_[i], infeas_[i] = infeas_of(i);
+                } else {
+                    for (int i = 0; i < m; ++i) xb_[i] -= flipv_[i];
+                    all_infeas();
+                }
                 stats_.bfrt_flips += (long long)k0;
             }
             ftran_alpha(q);
@@ -1190,14 +1345,18 @@ private:
             const bool stable = std::fabs(arow[q] - arq) <= 1e-9 * (1.0 + std::fabs(arq));
             if (std::fabs(arq) < piv) {
                 for (int j : nzj) inz[j] = 0;
-                if (!refactor()) return Status::Numerical;
+                if (!refactor(!ws)) return Status::Numerical;
+                all_infeas();   // x_B recomputed
                 continue;
             }
             if (dse) {
                 // tau = B^-1 rho_r, then the Forrest-Goldfarb update over
                 // the rows alpha touches
                 tau_.assign(rho_.begin(), rho_.end());
-                fac_->ftran_inplace(tau_.data());
+                fac_->ftran_inplace(tau_.data(), rnz_);
+                stats_.d_alpha_nnz += (long long)anz_.size();
+                stats_.d_tau_nnz += fac_->inplace_nz() ? (long long)fac_->inplace_nz()->size() : (long long)m;
+                FEDLP_LAP(t_dftran);
                 const double br = dse_[r];
                 for (int i : anz_) {
                     if (i == r) continue;
@@ -1223,17 +1382,22 @@ private:
             // exact: a stale (only growing) |y|_inf loosens the tolerance
             // and stops solves early (on rm_M8N40_1 the CG went 137 -> 542
             // iterations)
-            update_ymax();
+            update_ymax(rnz_);
             x_[l] = target, st_[l] = below ? AT_LB : AT_UB, pos_[l] = -1;
             admit(l), admit(q);
+            FEDLP_LAP(t_dupdate);
             bool ok = fac_->update(r, alpha_.data());
             head_[r] = q, pos_[q] = r, st_[q] = BASIC, xb_[r] = xq, d_[q] = 0.0;
+            for (int i : anz_) infeas_[i] = infeas_of(i);
+            infeas_[r] = infeas_of(r);
             ++stats_.iterations, ++stats_.dual_iterations;
-            const int interval = refactor_interval();
+            const int interval = fac_->name()[0] == 'l' ? opt.dual_refactor_interval : refactor_interval();
             if (!stable || !ok) ++stats_.stability_refactors;
             if (!stable || !ok || ++since_refactor_ >= interval) {
-                if (!refactor()) return Status::Numerical;
+                if (!refactor(!ws)) return Status::Numerical;
+                all_infeas();   // x_B recomputed
             }
+            FEDLP_LAP(t_dfactor);
         }
     }
 
@@ -1249,6 +1413,7 @@ private:
         std::vector<int> fl;
         for (int j = 0, n = M_.cols(); j < n; ++j) {
             if (!eligible(j)) continue;
+            if (dual_ws()) admit(j);
             if (!std::isfinite(st_[j] == AT_LB ? ubw(j) : lbw(j))) return false;
             fl.push_back(j);
         }
@@ -1275,10 +1440,11 @@ private:
             if (!basis_valid_) return Status::Numerical;
         }
         // a warm basis that lost only primal feasibility: dual simplex
-        if (opt.dual && (opt.dual_flip || infeasibility() > opt.primal_tol)) {
+        const bool try_flip = opt.dual_flip && M_.rows() >= opt.dual_flip_min_rows;
+        if (opt.dual && (try_flip || infeasibility() > opt.primal_tol)) {
             compute_y(), compute_d();
             bool df = dual_feasible();
-            if (!df && opt.dual_flip) df = flip_to_dual_feasible();
+            if (!df && opt.dual_flip && M_.rows() >= opt.dual_flip_min_rows) df = flip_to_dual_feasible();
             if (df && infeasibility() > opt.primal_tol) {
                 Status s = dual_phase();
                 if (s == Status::Infeasible) return s;

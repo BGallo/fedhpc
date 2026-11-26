@@ -40,6 +40,11 @@ public:
     virtual bool factorize(const Model& M, std::vector<int>& head) = 0;
     virtual void ftran(const Model& M, int j, double* out) = 0;   // out = B^-1 a_j
     virtual void ftran_inplace(double* x) = 0;
+    // the same, with x's nonzeros known to lie within nz
+    virtual void ftran_inplace(double* x, const std::vector<int>& nz) {
+        (void)nz;
+        ftran_inplace(x);
+    }
     virtual void btran_inplace(double* y) = 0;
     virtual const double* row(int r) = 0;                          // e_r' B^-1
     // false: the factor could not absorb the update (refactorise)
@@ -48,6 +53,10 @@ public:
     // nonzero positions of the last ftran(M, j, out), when the factor
     // tracks them (else null: the caller scans)
     virtual const std::vector<int>* last_nz() const { return nullptr; }
+    // the pattern (a superset) of the last ftran_inplace / row() result,
+    // when the factor tracked it (else null)
+    virtual const std::vector<int>* inplace_nz() const { return nullptr; }
+    virtual const std::vector<int>* row_nz() const { return nullptr; }
 };
 
 // The explicit dense inverse behind the interface.

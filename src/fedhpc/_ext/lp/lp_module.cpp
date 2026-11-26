@@ -141,6 +141,11 @@ public:
         d["t_pivot"] = s.t_pivot, d["t_refactor"] = s.t_refactor, d["t_sift"] = s.t_sift;
         d["t_btran"] = s.t_btran, d["t_rowwise"] = s.t_rowwise, d["t_colwise"] = s.t_colwise;
         d["t_fupdate"] = s.t_fupdate;
+        d["t_dchuzr"] = s.t_dchuzr, d["t_dbtran"] = s.t_dbtran, d["t_dprice"] = s.t_dprice;
+        d["t_dratio"] = s.t_dratio, d["t_dftran"] = s.t_dftran, d["t_dupdate"] = s.t_dupdate;
+        d["t_dfactor"] = s.t_dfactor, d["t_dseinit"] = s.t_dseinit;
+        d["d_rho_nnz"] = s.d_rho_nnz, d["d_row_nnz"] = s.d_row_nnz, d["d_breaks"] = s.d_breaks;
+        d["d_alpha_nnz"] = s.d_alpha_nnz, d["d_tau_nnz"] = s.d_tau_nnz;
         return d;
     }
     void reset_stats() { S_.reset_stats(); }
@@ -195,7 +200,11 @@ PYBIND11_MODULE(_fedlp, mod) {
         .def_readwrite("dual", &Options::dual)
         .def_readwrite("dual_pricing", &Options::dual_pricing)
         .def_readwrite("dual_flip", &Options::dual_flip)
+        .def_readwrite("dual_flip_min_rows", &Options::dual_flip_min_rows)
+        .def_readwrite("dual_sift", &Options::dual_sift)
         .def_readwrite("bfrt", &Options::bfrt)
+        .def_readwrite("dse_exact", &Options::dse_exact)
+        .def_readwrite("dual_refactor_interval", &Options::dual_refactor_interval)
         .def_readwrite("dual_perturb", &Options::dual_perturb)
         .def_readwrite("dual_perturb_scale", &Options::dual_perturb_scale)
         .def_readwrite("factor", &Options::factor)
