@@ -110,7 +110,22 @@ are active):
   engine under subset-row cuts only.
 - **Objective grid.** Pruning uses the step of ``w1·f1 + w2·f2``
   (:func:`_objective_step`) for any weights on a common grid, not only
-  ``w2 = 0``.
+  ``w2 = 0``. A node's column generation also stops once its bound and
+  RMP value round up to the same grid point (``TREE_DEFAULTS["grid_stop"]``).
+- **Parallel pricing and early break** (2026-11-26). The path types are
+  priced on a thread pool (``PricingOptions.threads``; the extension
+  releases the GIL), and the DP scans its active labels cheapest first,
+  stopping an arc's scan at the first label whose ``cost + arc + g`` fails.
+  ``scripts/bpc_bench.py``: hard tier 103 s -> 32 s (rm_M5N50_1 47 -> 10 s),
+  gap tier 36 -> 18 s, base 8.9 -> 5.5 s; the early break alone is about
+  18 % of the hard tier (``threads=1``: 85 s). Pareto worker processes
+  price with one thread.
+- **RMP heuristic during root column generation**
+  (``TREE_DEFAULTS["root_cg_heuristic"]``): at iterations 10, 20, 40, ...
+  on a copy of the RMP (1 s cap), so the root's Lagrangian bound prunes
+  against a good incumbent early. Together with the grid stop: gap tier
+  18.4 -> 14.8 s (nodes 9 -> 5 on rm_M2N20_3), hard tier neutral — there
+  the bound itself reaches the optimum only near convergence.
 
 Limited-memory subset-row cuts (``PricingOptions.sr_cuts``, off by default)
 --------------------------------------------------------------------------
@@ -572,7 +587,9 @@ from __future__ import annotations
 
 import heapq
 import math
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
 from dataclasses import dataclass, field, replace
 
@@ -1444,6 +1461,10 @@ class PricingOptions:
     edged 10. Smoothing 0.5 is neutral on the base tier but cuts the
     root-bound hard Rm solves by 40-48% (rm_M2N30_1 48 -> 25 s, rm_M5N50_1
     72 -> 42 s; ``--suite hard``).
+
+    ``threads`` — path types priced concurrently (the compiled pricer
+    releases the GIL); 0 picks ``min(path types, CPUs)``, 1 prices them one
+    after another. The columns and bounds do not depend on it.
     """
     engine: str = "cpp"
     ng_size: int | None = 4
@@ -1457,11 +1478,28 @@ class PricingOptions:
     sr_per_round: int = 16
     sr_depth: int = 0
     sr_min_viol: float = 0.05
+    threads: int = 0
 
 
 # Used wherever no ``pricing`` argument is given (e.g. under pareto.py's
 # box search); replace it to change every solve's pricing at once.
 DEFAULT_PRICING = PricingOptions()
+
+
+_EXECUTORS: dict[int, ThreadPoolExecutor] = {}
+
+
+def _pricing_executor(opts: PricingOptions, n_types: int) -> ThreadPoolExecutor | None:
+    """A shared thread pool for pricing ``n_types`` path types under
+    ``opts.threads``, or None to price them sequentially."""
+    n = opts.threads or min(n_types, os.cpu_count() or 1)
+    n = min(n, n_types)
+    if n <= 1:
+        return None
+    ex = _EXECUTORS.get(n)
+    if ex is None:
+        ex = _EXECUTORS[n] = ThreadPoolExecutor(max_workers=n, thread_name_prefix="bpc-price")
+    return ex
 
 
 def _compiled(opts: PricingOptions | None, cuts) -> bool:
@@ -2057,6 +2095,8 @@ def _run_column_generation(
     opts: PricingOptions | None = None,
     cutoff: float = math.inf,
     big_m: float | None = None,
+    step: float = 0.0,
+    incumbent_cb=None,
 ) -> _CGResult:
     """Column generation at one node (or the root): the compiled loop
     (:func:`_run_cg_compiled`) when ``opts.engine == "cpp"``, the extension
@@ -2068,7 +2108,8 @@ def _run_column_generation(
         return _run_cg_compiled(
             mdl, state, inst, weight1, weight2, prep, max_iters, tol,
             forbidden, pinned or {}, differ_pairs, same_pairs, deadline, timers,
-            opts, cutoff, big_m if big_m is not None else _big_m_for(inst))
+            opts, cutoff, big_m if big_m is not None else _big_m_for(inst),
+            step, incumbent_cb)
     it = _run_cg_python(mdl, state, inst, weight1, weight2, prep, max_iters, tol,
                         forbidden, pinned, differ_pairs, same_pairs,
                         use_relaxed_prescreen, deadline, timers)
@@ -2080,7 +2121,7 @@ def _run_cg_compiled(
     prep: _Prep, max_iters: int, tol: float,
     forbidden: frozenset, pinned: dict, differ_pairs: frozenset, same_pairs: frozenset,
     deadline: float | None, timers: dict | None, opts: PricingOptions,
-    cutoff: float, big_m: float,
+    cutoff: float, big_m: float, step: float = 0.0, incumbent_cb=None,
 ) -> _CGResult:
     """Column generation with the compiled pricer.
 
@@ -2100,6 +2141,15 @@ def _run_cg_compiled(
     neighbourhoods grow to forbid that cycle (:func:`_augment_ng`), every
     repeating column leaves the RMP, and generation resumes; it stops when
     the LP is elementary or no neighbourhood can grow.
+
+    ``step`` — the objective grid (:func:`_objective_step`; 0: none). Every
+    integer solution lies on it, so once the bound and the RMP value round
+    up to the same grid point (with the tree's ``1e-3`` margin) more
+    columns cannot change what the node proves, and it stops (``"bound"``).
+
+    ``incumbent_cb(mdl, state)`` — called after the RMP solves at iterations
+    10, 20, 40, ... (the root uses it for the RMP integer heuristic); it
+    returns the search's cutoff, which may have dropped.
     """
     if timers is None:
         timers = {}
@@ -2113,6 +2163,12 @@ def _run_cg_compiled(
     fixed_cost = {m.id: m.fixed_cost for m in inst.instance_types}
     keys = {_column_key(c) for c in state.columns}
     best_lb, center, best_mins = -math.inf, None, None
+    margin = 1e-3 * min(step, 1.0)
+    next_cb = 10
+
+    def same_grid_point(lb: float, ub: float) -> bool:
+        return (step >= 1e-3 and math.isfinite(lb)
+                and math.ceil((lb - margin) / step) >= math.ceil((ub - margin) / step))
 
     def finish(it: int, status: str, objective: float) -> _CGResult:
         fixed = frozenset()
@@ -2125,11 +2181,17 @@ def _run_cg_compiled(
             timers["fixed"] = timers.get("fixed", 0) + len(fixed)
         return _CGResult(it, status, objective, best_lb, fixed)
 
+    executor = _pricing_executor(opts, len(prep.path_types))
+
     def price_all(d: _Duals) -> tuple[float | None, list[Column], dict]:
         t0 = time.perf_counter()
         mins, cols, exact = {}, [], True
-        for mid in prep.path_types:
-            mn, ex, n_labels, cs = pricing.price(mid, d, weight1, weight2, tol)
+        if executor is None:
+            results = [pricing.price(mid, d, weight1, weight2, tol) for mid in prep.path_types]
+        else:
+            results = list(executor.map(
+                lambda mid: pricing.price(mid, d, weight1, weight2, tol), prep.path_types))
+        for mid, (mn, ex, n_labels, cs) in zip(prep.path_types, results):
             mins[mid] = mn
             exact &= ex
             cols += cs
@@ -2153,6 +2215,13 @@ def _run_cg_compiled(
             raise RuntimeError(f"BPC RMP LP not optimal: status={mdl.Status}")
         rmp = mdl.ObjVal
         d = _read_duals(state)
+        if incumbent_cb is not None and it + 1 >= next_cb:
+            next_cb *= 2
+            if sum(v.X for v in state.art.values()) <= 1e-6:
+                cutoff = min(cutoff, incumbent_cb(mdl, state))
+                if best_lb >= cutoff:
+                    timers["lb_pruned"] = timers.get("lb_pruned", 0) + 1
+                    return _CGResult(it + 1, "pruned", best_lb, best_lb)
 
         new: list[Column] = []
         if center is not None and opts.smoothing > 0:
@@ -2176,6 +2245,9 @@ def _run_cg_compiled(
         done = not new
         if not done and best_lb >= rmp - max(tol, 1e-7 * abs(rmp)):
             timers["lb_stops"] = timers.get("lb_stops", 0) + 1
+            done = True
+        elif not done and same_grid_point(best_lb, rmp):
+            timers["grid_stops"] = timers.get("grid_stops", 0) + 1
             done = True
         if done:
             if opts.ng_size is not None and _grow_ng_and_drop(mdl, state, prep, opts):
@@ -2482,6 +2554,25 @@ def _rmp_integer_heuristic(
     return weight1 * f1 + weight2 * f2, assignment
 
 
+def _rmp_heuristic_on_copy(
+    mdl: gp.Model, state: _RmpState, inst: Instance, weight1: float, weight2: float,
+    bound1_value: float | None, bound2_value: float | None, time_limit: float,
+) -> tuple[float, dict[int, tuple[int, int]]] | None:
+    """:func:`_rmp_integer_heuristic` on a copy of the RMP, leaving ``mdl``
+    (and its LP basis) untouched, for use while column generation runs."""
+    mdl.update()
+    h = mdl.copy()
+    try:
+        hv = h.getVars()
+        cp = replace(state, vars=[hv[v.index] for v in state.vars],
+                     z={m: hv[v.index] for m, v in state.z.items()},
+                     art={j: hv[v.index] for j, v in state.art.items()})
+        return _rmp_integer_heuristic(h, cp, inst, weight1, weight2,
+                                      bound1_value, bound2_value, time_limit)
+    finally:
+        h.dispose()
+
+
 def _solve_node(
     inst: Instance,
     weight1: float,
@@ -2509,6 +2600,8 @@ def _solve_node(
     branching: str = "time",
     depth: int = 0,
     lm_cuts: list[_LmCut] | None = None,
+    step: float = 0.0,
+    incumbent_cb=None,
 ) -> _NodeResult:
     """Column generation at one node, then its status and branching choice.
 
@@ -2523,7 +2616,8 @@ def _solve_node(
     pricing regenerates the ones its neighbourhoods still allow.
 
     ``lm_cuts`` — the search's limited-memory subset-row cuts (shared, in
-    order). Every node's master holds all of them; at depth up to
+    order). ``step``/``incumbent_cb`` — see :func:`_run_cg_compiled`.
+    Every node's master holds all of them; at depth up to
     ``opts.sr_depth`` the node separates more (:func:`_separate_lm_src`) and
     appends them, re-running column generation after each round. Rounds
     stop when no cut is violated, the bound gains less than 1 % of the
@@ -2547,7 +2641,7 @@ def _solve_node(
             mdl, state, inst, weight1, weight2, prep, max_iters, tol,
             forbidden, pinned, differ_pairs, same_pairs,
             use_relaxed_prescreen, deadline, timers,
-            opts=opts, cutoff=cutoff, big_m=big_m,
+            opts=opts, cutoff=cutoff, big_m=big_m, step=step, incumbent_cb=incumbent_cb,
         )
 
     try:
@@ -2939,7 +3033,15 @@ def _add_lm_cuts(mdl: gp.Model, state: _RmpState, cuts: list[_LmCut]) -> None:
 _POOL_CAP = 50_000   # columns kept across solves (pool_out)
 
 # _branch_and_price's tree options when not given (as DEFAULT_PRICING).
-TREE_DEFAULTS = {"node_selection": "best", "branching": "time", "heuristic_every": 10}
+# Seconds per RMP integer heuristic run during the root's column generation
+# (see _run_cg_compiled's incumbent_cb); capped by heuristic_time_limit.
+ROOT_CG_HEURISTIC_LIMIT = 1.0
+
+# root_cg_heuristic: run the RMP integer heuristic during the root's column
+# generation; grid_stop: end a node's column generation once its bound and
+# RMP value round to the same objective grid point (see _run_cg_compiled).
+TREE_DEFAULTS = {"node_selection": "best", "branching": "time", "heuristic_every": 10,
+                 "root_cg_heuristic": 1, "grid_stop": 1}
 
 
 def _branch_and_price(
@@ -3122,6 +3224,23 @@ def _branch_and_price(
     n_nodes = 0
     lm_cuts: list[_LmCut] = []   # limited-memory SR cuts, valid in the whole tree
 
+    def root_incumbent(mdl: gp.Model, state: _RmpState) -> float:
+        """The RMP integer heuristic during the root's column generation, so
+        its Lagrangian bound can prune against a good incumbent early."""
+        nonlocal best_obj, best_assignment
+        limit = min(ROOT_CG_HEURISTIC_LIMIT, heuristic_time_limit)
+        if deadline is not None:
+            limit = min(limit, max(0.0, deadline - time.perf_counter()))
+        t0 = time.perf_counter()
+        res = _rmp_heuristic_on_copy(mdl, state, inst, weight1, weight2,
+                                     bound1_value, bound2_value, limit)
+        timers["cg_heur_s"] = timers.get("cg_heur_s", 0.0) + time.perf_counter() - t0
+        timers["cg_heur_runs"] = timers.get("cg_heur_runs", 0) + 1
+        if res is not None and res[0] < best_obj:
+            best_obj, best_assignment = res
+            timers["cg_heur_hits"] = timers.get("cg_heur_hits", 0) + 1
+        return best_obj - prune_gap
+
     while frontier:
         bound, neg_depth, _seq, payload = heapq.heappop(frontier) if best_first else frontier.pop()
         if bound >= best_obj - prune_gap:
@@ -3132,6 +3251,8 @@ def _branch_and_price(
         depth = -neg_depth
         n_nodes += 1
         run_heuristic = heuristic_time_limit > 0 and (n_nodes == 1 or n_nodes % heuristic_every == 0)
+        cb = (root_incumbent if n_nodes == 1 and heuristic_time_limit > 0
+              and TREE_DEFAULTS["root_cg_heuristic"] else None)
 
         try:
             _check_deadline(deadline)
@@ -3144,6 +3265,8 @@ def _branch_and_price(
                 heuristic_time_limit if run_heuristic else None,
                 deadline, timers, pricing, best_obj - prune_gap, branching,
                 depth=depth, lm_cuts=lm_cuts,
+                step=step if step >= 1e-3 and TREE_DEFAULTS["grid_stop"] else 0.0,
+                incumbent_cb=cb,
             )
         except BPCTimeLimit:
             timers["open_bound"] = open_bound(bound)

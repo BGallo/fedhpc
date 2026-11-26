@@ -113,3 +113,31 @@ def test_timeout_reports_a_valid_open_bound(trap_medium):
     else:
         assert stats["open_bound"] == pytest.approx(opt)
     assert not math.isnan(stats.get("open_bound", 0.0))
+
+
+@pytest.mark.parametrize("name", _TRAPS)
+@pytest.mark.parametrize("w", _W)
+def test_threaded_pricing_matches_sequential(name, w):
+    """Pricing the path types concurrently changes neither the columns nor
+    the bound: root column generation follows the same path."""
+    inst = TRAP_INSTANCES[name]()
+    out = []
+    for threads in (1, 4):
+        stats: dict = {}
+        obj, _a = bpc._branch_and_price(inst, *w, stats=stats,
+                                        pricing=bpc.PricingOptions(threads=threads))
+        out.append((obj, stats["cg_iters"], stats["nodes"], stats["root_bound"]))
+    assert out[0] == out[1]
+
+
+@pytest.mark.parametrize("name", _TRAPS)
+@pytest.mark.parametrize("w", _W)
+def test_root_heuristic_and_grid_stop_keep_the_optimum(name, w):
+    """The RMP heuristic during root column generation and the grid stop
+    only change when nodes end, never the optimum."""
+    inst = TRAP_INSTANCES[name]()
+    base, _a = bpc._branch_and_price(inst, *w, heuristic_time_limit=0.0)
+    stats: dict = {}
+    obj, a = bpc._branch_and_price(inst, *w, stats=stats)
+    assert obj == pytest.approx(base, abs=1e-6)
+    assert bpc._schedule_objective(inst, a, *w, None, None) == pytest.approx(obj, abs=1e-6)

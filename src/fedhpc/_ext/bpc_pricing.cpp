@@ -329,14 +329,26 @@ private:
                 }
             }
             if (t == H_ || !exact) break;
+            if (at_[t].empty()) continue;
+            // Cheapest first: an extension costs at least cost + arc + g(t2)
+            // (first_cost and cut costs are >= 0), so the first label whose
+            // optimistic bound fails ends the scan for this arc — that bound
+            // also lower-bounds every later label's, keeping min_lb valid.
+            std::sort(active.begin(), active.end(),
+                      [&](int x, int y) { return L.cost[x] < L.cost[y]; });
             for (int i : at_[t]) {
                 const int t2 = t + p_[i];
                 const double arc = A[i] + B[i] * t;
+                const double rest = arc + g[t2];
                 const u64* ret = &retain_[(size_t)i * NW];
                 const u64* dif = &differ_[(size_t)i * NW];
                 const u64 cS = inS_[i], cM = inM_[i];
                 for (size_t k = 0; k < active.size(); ++k) {
                     int a = active[k];
+                    if (L.cost[a] + rest >= thr) {
+                        pruned_min = std::min(pruned_min, L.cost[a] + rest);
+                        break;
+                    }
                     const u64* ma = L.m(a);
                     if (has_bit(ma, i)) continue;
                     bool clash = false;

@@ -1338,6 +1338,11 @@ def _parallel_worker_init(inst: Instance, engine: str, per_solve_time_limit, lpf
         _WORKER_ENGINE, _ = lpfirst.make_lpfirst_lexmin_bounded(
             inst, per_solve_time_limit, options=lpfirst_options)
     else:
+        if engine == "bpc":
+            # the pool already uses every core: price path types sequentially
+            from dataclasses import replace as _replace
+            from . import bpc
+            bpc.DEFAULT_PRICING = _replace(bpc.DEFAULT_PRICING, threads=1)
         _WORKER_ENGINE, _ = _make_engine_lexmin_bounded(
             inst, None, {"IntFeasTol": 1e-9} if engine == "gurobi" else {},
             per_solve_time_limit, 3, engine)
