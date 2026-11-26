@@ -202,6 +202,7 @@ PYBIND11_MODULE(_fedlp, mod) {
         .def_readwrite("dual_flip", &Options::dual_flip)
         .def_readwrite("dual_flip_min_rows", &Options::dual_flip_min_rows)
         .def_readwrite("dual_sift", &Options::dual_sift)
+        .def_readwrite("dual_row_copy_min_rows", &Options::dual_row_copy_min_rows)
         .def_readwrite("bfrt", &Options::bfrt)
         .def_readwrite("dse_exact", &Options::dse_exact)
         .def_readwrite("dual_refactor_interval", &Options::dual_refactor_interval)

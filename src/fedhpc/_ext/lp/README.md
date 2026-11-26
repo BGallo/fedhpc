@@ -137,10 +137,18 @@ duals, reduced costs and weights carry over.
   4. **No O(m) passes per pivot.** A per-position infeasibility array is
      updated where x_B moves, and |y|_inf is exact and incremental (a full
      pass only when the entry holding the maximum shrinks).
-  5. **`dual_refactor_interval`** = 200 (3.54 s at 100, 3.24 s at 200).
+  5. **`dual_refactor_interval`** = 200 (3.54 s at 100, 3.24 s at 200;
+     300-600 lose: 3.55-4.01 s).
+  6. **A nonbasic-first row copy for PRICE** (`dual_row_copy_min_rows` =
+     1000). Each row's nonbasic entries come first, with a count, so the
+     row-wise pivot row reads no basic or removed columns and tests no
+     statuses. It is built per dual phase (O(nnz)) and kept by swapping a
+     column's entries across each row's boundary when it enters or leaves
+     the basis, as in HiGHS. On the 7-solve recording PRICE fell
+     0.60 -> 0.34 s and the total 3.58 -> 3.32 s, on the same pivot path.
 
-  Results: pos_congestion's re-solves went 9.5 -> 3.1 s, against HiGHS's
-  3.1 s and Gurobi's 1.2 s. Its anchor end to end went 17.8 -> 11.7 s
+  Results: pos_congestion's re-solves went 9.5 -> 3.3 s on its 7-solve
+  recording, against HiGHS's 3.4 s and Gurobi's 1.3 s. Its anchor end to end went 17.8 -> 11.7 s
   total, against Gurobi's 9.6 s. Tested by `test_large_boxed_master_
   hyper_sparse_dual` (3100 rows, against Gurobi) and the boxed tests.
 - **Sparse vectors.** The factor reports the nonzero pattern of
@@ -250,6 +258,13 @@ duals, reduced costs and weights carry over.
 
 ## Tried and rejected
 
+- **Row-indexed R etas in FTRAN.** Each row listed the Forrest-Tomlin row
+  etas it is an entry of, and a sparse FTRAN popped from a min-heap only
+  the etas reading a nonzero. The total did not move (3.62 against 3.58 s
+  without the row copy). R's share of the time doubled (2 -> 4.6 %): with
+  at most `dual_refactor_interval` short etas, the plain pass over all of
+  them costs less than the heap. Longer refactor intervals, which it was
+  meant to enable, still lost. Reverted.
 - **Lazy reduced costs.** Skipping columns by an exact drift bound skipped
   only 10-20 % of updates, since the worst-case bound is loose, and was
   slower overall.
@@ -314,8 +329,16 @@ Each cell is LP time / iterations.
 
 | Sequence | Gurobi | HiGHS (dual) | fedlp |
 |---|---|---|---|
-| pos_congestion anchor (4.5 k rows, 31-35 k columns, 5 solves) | 1.20 s / 27.9 k | 3.13 s / 49.3 k | 3.08 s / 39.1 k (dual) |
-| 964-job trace, five bench solves (2.4 k rows, 45 solves) | 0.83 s / 35.6 k | 0.75 s / 33.7 k | 0.53 s / 8.9 k (primal) |
+| pos_congestion anchor (4.5 k rows, 31-35 k columns, 7 solves) | 1.34 s / 28.5 k | 3.42 s / 56.7 k | 3.32 s / 43.0 k (dual) |
+| 964-job trace, five bench solves (2.4 k rows, 43 solves) | 0.83 s / 35.6 k | 0.75 s / 33.7 k | 0.56 s / 8.9 k (primal) |
+
+Recorded with `scripts/lp_record.py` (fedlp masters during lpfirst;
+`--runs anchor` or `bench`) and replayed with `scripts/lp_replay.py`
+(fedlp with `name=value` options, `highs --strategy`, `gurobi --method`;
+`-v` per solve, `--timers` with a `-DFEDLP_PROFILE` build). The pickles
+go to `results/lp_replay/` (11-17 MB each) and are regenerated in about
+20 s. The table's Gurobi and HiGHS numbers for the 964-job trace come
+from an earlier recording of the same runs.
 
 Before the dual work, fedlp took 9.5-10 s on the pos sequence with its
 primal. Methods forced on pos_congestion's anchor (CG paths differ by
@@ -350,14 +373,21 @@ solver):
 ### Where fedlp is behind, and what would close it
 
 1. **The dual against Gurobi's.** On pos_congestion fedlp's dual is level
-   with HiGHS but takes 2.6x Gurobi's time: 1.4x the pivots (39 k against
-   28 k) at 1.8x the cost (79 against 43 us). Per pivot, the costs are:
-   - three FTRANs at 26 us, each with R-eta dot products over every FT
-     update. A row-indexed R would skip the etas that see no nonzeros;
-   - factor update and refactorisation at 14 us;
-   - PRICE at 13 us. HiGHS's nonbasic-only row copy would skip the basic
-     columns' entries;
-   - the ratio test at 11 us.
+   with HiGHS but takes 2.5x Gurobi's time: 1.5x the pivots (43 k against
+   28.5 k) at 1.6x the cost (77 against 47 us). Per pivot:
+   - three FTRANs at 29 us. The time is spread out, with no hotspot left:
+     - the U solves' DFS, which about doubles a solve's edge work, against
+       HiGHS's density-predicted switch between hyper-sparse and
+       skip-zero loops;
+     - dense fallbacks for the occasional dense rho;
+     - O(m) fills and copies of the work vectors;
+     - the L heaps.
+   - factor update and refactorisation at 15 us;
+   - the ratio test at 14 us, half of it the BFRT heap. Koberstein's
+     grouped passes are the alternative;
+   - PRICE at 8 us, with the row copy.
+
+   The pivot count is now as large a lever as the cost per pivot.
 
    The selection rule (`dual_flip_min_rows`) is coarse. A per-solve
    choice, or a race between the primal and the dual, would serve the
@@ -393,8 +423,10 @@ is ahead" too.
 ## Next steps
 
 - **The dual's remaining cost per pivot and the method choice.** Item 1 of
-  the comparison above: a row-indexed R, a nonbasic row copy for PRICE,
-  and a per-solve primal/dual choice in place of the size gate.
+  the comparison above:
+  - density-predicted U solves and sparse resets of the work vectors;
+  - grouped BFRT passes;
+  - a per-solve primal/dual choice in place of the size gate.
 - **Refactorisation frequency.** Item 2 of the comparison above: about
   25 % of pos_congestion's refactorisations are stability-triggered.
 - **Rows for cuts.** Logicals are columns `0..m-1`, so added rows need a

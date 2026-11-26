@@ -140,6 +140,9 @@ struct Options {
     // to a long primal clean-up (3.1 -> 6.3 s); on the 964-job trace it
     // brought the dual level with the primal (0.87 -> 0.56 vs 0.53 s).
     bool dual_sift = false;
+    // the dual's row-wise PRICE reads a nonbasic-first row copy from this
+    // many rows (its O(nnz) build per dual phase does not pay on small ones)
+    int dual_row_copy_min_rows = 1000;
     // LU updates between the dual's refactorisations (pos_congestion's
     // lpfirst masters: 3.54 s at 100, 3.24 s at 200, 3.19 s at 400 with
     // FTRAN's R etas growing)
@@ -1159,9 +1162,72 @@ private:
 
     bool dual_ws() const { return opt.dual_sift && opt.sifting; }
 
+    // Row-wise copy of the matrix with each row's nonbasic entries first
+    // (HiGHS's partitioned row copy): the dual's row-wise PRICE reads only
+    // those. Built when a dual phase starts, kept by swapping a column's
+    // entries across each row's boundary as it enters or leaves the basis.
+    // rp_t_ is an entry's index within its column, cpos_ (by column entry)
+    // its position here.
+    std::vector<int> rp_start_, rp_nb_, rp_col_, rp_t_, cstart_, cpos_;
+    std::vector<double> rp_val_;
+    void build_nb_rows() {
+        const int m = M_.rows(), n = M_.cols();
+        cstart_.assign(n + 1, 0);
+        for (int j = 0; j < n; ++j) cstart_[j + 1] = cstart_[j] + (st_[j] == DEAD ? 0 : M_.col_nnz(j));
+        std::vector<int> cnt(m, 0), nbc(m, 0);
+        for (int j = 0; j < n; ++j) {
+            if (st_[j] == DEAD) continue;
+            const int* ix = M_.col_idx(j);
+            for (int t = 0, nz = M_.col_nnz(j); t < nz; ++t) {
+                ++cnt[ix[t]];
+                if (st_[j] != BASIC) ++nbc[ix[t]];
+            }
+        }
+        rp_start_.assign(m + 1, 0);
+        for (int k = 0; k < m; ++k) rp_start_[k + 1] = rp_start_[k] + cnt[k];
+        const int nnz = rp_start_[m];
+        rp_col_.resize(nnz), rp_t_.resize(nnz), rp_val_.resize(nnz), cpos_.resize(cstart_[n]);
+        rp_nb_ = nbc;
+        std::vector<int> fn(m), fb(m);
+        for (int k = 0; k < m; ++k) fn[k] = rp_start_[k], fb[k] = rp_start_[k] + nbc[k];
+        for (int j = 0; j < n; ++j) {
+            if (st_[j] == DEAD) continue;
+            const bool nb = st_[j] != BASIC;
+            const int* ix = M_.col_idx(j);
+            const double* v = M_.col_val(j);
+            for (int t = 0, nz = M_.col_nnz(j); t < nz; ++t) {
+                const int k = ix[t], at = nb ? fn[k]++ : fb[k]++;
+                rp_col_[at] = j, rp_t_[at] = t, rp_val_[at] = v[t];
+                cpos_[cstart_[j] + t] = at;
+            }
+        }
+    }
+    void rp_swap(int p, int b) {
+        if (p == b) return;
+        std::swap(rp_col_[p], rp_col_[b]), std::swap(rp_t_[p], rp_t_[b]), std::swap(rp_val_[p], rp_val_[b]);
+        cpos_[cstart_[rp_col_[p]] + rp_t_[p]] = p;
+        cpos_[cstart_[rp_col_[b]] + rp_t_[b]] = b;
+    }
+    void rp_to_basic(int j) {   // j entered the basis
+        const int* ix = M_.col_idx(j);
+        for (int t = 0, nz = M_.col_nnz(j); t < nz; ++t) {
+            const int k = ix[t];
+            rp_swap(cpos_[cstart_[j] + t], rp_start_[k] + --rp_nb_[k]);
+        }
+    }
+    void rp_to_nonbasic(int j) {   // j left it
+        const int* ix = M_.col_idx(j);
+        for (int t = 0, nz = M_.col_nnz(j); t < nz; ++t) {
+            const int k = ix[t];
+            rp_swap(cpos_[cstart_[j] + t], rp_start_[k] + rp_nb_[k]++);
+        }
+    }
+
     Status dual_phase_core() {
         const int m = M_.rows(), n = M_.cols();
         const bool ws = dual_ws();
+        const bool rp = m >= opt.dual_row_copy_min_rows;
+        if (rp) build_nb_rows();
         all_infeas();
         std::vector<double> arow(n, 0.0);
         std::vector<int> nzj;
@@ -1213,8 +1279,20 @@ private:
             }
             FEDLP_LAP(t_dbtran);
             long long rowcost = 0;
-            for (int k : rnz_) rowcost += (long long)M_.row(k).size();
-            if (3 * rowcost < (ws ? work_nnz() : M_.nnz())) {
+            if (rp) for (int k : rnz_) rowcost += rp_nb_[k];
+            else for (int k : rnz_) rowcost += (long long)M_.row(k).size();
+            if (rp && 3 * rowcost < M_.nnz()) {
+                // the nonbasic part of each row only: no status tests
+                for (int k : rnz_) {
+                    const double rk = rho_[k];
+                    for (int e = rp_start_[k], f = e + rp_nb_[k]; e < f; ++e) {
+                        const int j = rp_col_[e];
+                        if (ws && !in_work_[j]) continue;
+                        if (!inz[j]) inz[j] = 1, nzj.push_back(j), arow[j] = 0.0;
+                        arow[j] += rk * rp_val_[e];
+                    }
+                }
+            } else if (3 * rowcost < (ws ? work_nnz() : M_.nnz())) {
                 for (int k : rnz_) {
                     const double rk = rho_[k];
                     for (const auto& e : M_.row(k)) {
@@ -1385,6 +1463,7 @@ private:
             update_ymax(rnz_);
             x_[l] = target, st_[l] = below ? AT_LB : AT_UB, pos_[l] = -1;
             admit(l), admit(q);
+            if (rp) rp_to_basic(q), rp_to_nonbasic(l);
             FEDLP_LAP(t_dupdate);
             bool ok = fac_->update(r, alpha_.data());
             head_[r] = q, pos_[q] = r, st_[q] = BASIC, xb_[r] = xq, d_[q] = 0.0;

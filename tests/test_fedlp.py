@@ -272,6 +272,7 @@ def test_dual_flip_start_on_boxed_lps(seed, bfrt):
     M = _random_lp(rng, m, n)
     M.lp.options.dual_flip = True
     M.lp.options.dual_flip_min_rows = 0   # these LPs are small
+    M.lp.options.dual_row_copy_min_rows = 0
     M.lp.options.bfrt = bfrt
     for k, (c, lb, ub, idx, val) in enumerate(list(M.cols)):   # box everything
         if ub == INF:

@@ -480,7 +480,10 @@ private:
             for (int e = rstart_[k], f = rstart_[k + 1]; e < f; ++e) z[ridx_[e]] -= rval_[e] * zt;
         }
     }
-    // R applied with v's pattern kept (seen marks it)
+    // R applied with v's pattern kept (seen marks it). Every eta is visited:
+    // a row index of the etas, popped from a heap so only those reading a
+    // nonzero were applied, doubled R's share of pos_congestion's dual (2 ->
+    // 4.6 % of the time) - at most dual_refactor_interval short etas.
     void apply_R_pattern(double* v, std::vector<int>& nz, std::vector<char>& seen) const {
         for (size_t k = 0; k < rtarget_.size(); ++k) {
             double s = 0.0;
