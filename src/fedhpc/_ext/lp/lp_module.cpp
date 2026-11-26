@@ -135,6 +135,8 @@ public:
         d["row_pivots"] = s.row_pivots, d["col_pivots"] = s.col_pivots;
         d["sifts"] = s.sifts, d["admitted"] = s.admitted, d["evicted"] = s.evicted;
         d["dual_iterations"] = s.dual_iterations, d["dual_solves"] = s.dual_solves;
+        d["majors"] = s.majors, d["parallel_passes"] = s.parallel_passes;
+        d["dual_flips"] = s.dual_flips, d["bfrt_flips"] = s.bfrt_flips;
         d["t_select"] = s.t_select, d["t_ftran"] = s.t_ftran, d["t_ratio"] = s.t_ratio;
         d["t_pivot"] = s.t_pivot, d["t_refactor"] = s.t_refactor, d["t_sift"] = s.t_sift;
         d["t_btran"] = s.t_btran, d["t_rowwise"] = s.t_rowwise, d["t_colwise"] = s.t_colwise;
@@ -185,8 +187,17 @@ PYBIND11_MODULE(_fedlp, mod) {
         .def_readwrite("max_iter", &Options::max_iter)
         .def_readwrite("sifting", &Options::sifting)
         .def_readwrite("partial_min_cols", &Options::partial_min_cols)
+        .def_readwrite("mp_min_cols", &Options::mp_min_cols)
+        .def_readwrite("mp_candidates", &Options::mp_candidates)
+        .def_readwrite("mp_max_minor", &Options::mp_max_minor)
+        .def_readwrite("threads", &Options::threads)
+        .def_readwrite("parallel_min_nnz", &Options::parallel_min_nnz)
         .def_readwrite("dual", &Options::dual)
         .def_readwrite("dual_pricing", &Options::dual_pricing)
+        .def_readwrite("dual_flip", &Options::dual_flip)
+        .def_readwrite("bfrt", &Options::bfrt)
+        .def_readwrite("dual_perturb", &Options::dual_perturb)
+        .def_readwrite("dual_perturb_scale", &Options::dual_perturb_scale)
         .def_readwrite("factor", &Options::factor)
         .def_readwrite("lu_refactor_interval", &Options::lu_refactor_interval)
         .def_readwrite("dense_max_rows", &Options::dense_max_rows)

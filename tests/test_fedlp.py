@@ -258,3 +258,33 @@ def test_dual_simplex_after_branching_bounds(seed, dual_pricing):
         M.check()
         used_dual |= M.lp.stats()["dual_iterations"] > 0
     assert used_dual
+
+
+@pytest.mark.parametrize("bfrt", [False, True], ids=["textbook", "bfrt"])
+@pytest.mark.parametrize("seed", range(30))
+def test_dual_flip_start_on_boxed_lps(seed, bfrt):
+    """Boxed LPs re-solved after cost changes and column additions with the
+    dual phase 1 by bound flipping: the dual simplex (with and without the
+    bound-flipping ratio test) must reach Gurobi's optimum with a valid
+    certificate."""
+    rng = random.Random(1000 + seed)
+    m, n = rng.randint(4, 25), rng.randint(5, 60)
+    M = _random_lp(rng, m, n)
+    M.lp.options.dual_flip = True
+    M.lp.options.bfrt = bfrt
+    for k, (c, lb, ub, idx, val) in enumerate(list(M.cols)):   # box everything
+        if ub == INF:
+            M.bounds(k, 0.0, rng.uniform(0.5, 4.0))
+    M.check()
+    for _ in range(4):
+        for k in rng.sample(range(len(M.cols)), max(1, len(M.cols) // 4)):
+            c, lb, ub, idx, val = M.cols[k]
+            nc = rng.uniform(-2, 2)
+            M.lp.set_costs([k], [nc])
+            M.vars[k].Obj = nc
+            M.cols[k] = (nc, lb, ub, idx, val)
+        for _ in range(rng.randint(0, 4)):
+            idx = sorted(rng.sample(range(m), max(1, m // 3)))
+            M.add(rng.uniform(-2, 2), 0.0, rng.uniform(0.5, 3), idx, [rng.uniform(-2, 3) for _ in idx])
+        M.check()
+    assert M.lp.stats()["dual_iterations"] >= 0

@@ -72,6 +72,32 @@ duals, reduced costs and weights carry over.
   | M2N30_1 | 0.176 s | 0.103 s |
   | M2N20_3 | 0.107 s | 0.088 s |
 
+- **Bound-flipping dual ratio test** (`Options.bfrt`, on; Fourer 1994,
+  Maros 2003 ch. 10, Koberstein 2005). Breakpoints are sorted. Boxed
+  columns are flipped past while row r's violation, the slope, stays
+  positive. The breakpoint that ends it enters, chosen Harris-style among
+  those not flipped, and the flips reach x_B through one FTRAN. On the
+  boxed tests it cut dual pivots from 721 to 443. Masters have
+  [0, inf) columns, so in branch and price it rarely triggers.
+- **Dual cost perturbation** (`Options.dual_perturb`, on, 1e-6 relative).
+  Before the dual phase, each nonbasic structural's cost moves away from
+  zero in its feasible direction. The true costs, duals and reduced costs
+  come back afterwards, and the primal path cleans up. On 300-step
+  branching dives it gave the same objectives at every step and was:
+  - M5N50_1 2.76 -> 2.05 s, M8N40_1 0.29 -> 0.15 s;
+  - level on M2N30_1 and M2N20_3.
+
+  bpc suites are level cold (hard 6.30, gap 5.05, base 2.83 s). With
+  warm nodes, gap explores 61 nodes instead of 57: a different optimal
+  dual among the degenerate ones steers branching. That gives 5.0-5.16 s
+  against 4.65 s, and warm nodes stay off.
+- **Threaded column-wise pivot row** (`Options.threads` = 4,
+  `parallel_min_nnz` = 100 k; `parallel.hpp`). It runs on a persistent
+  spin-then-sleep pool. Entering-column ties go to the lowest index in
+  serial and parallel alike, so the pivot path does not depend on the
+  thread count. pos_congestion's anchor: column-wise pass 3.9 -> 1.8 s
+  (4 threads) -> 1.2 s (8), total 12.3 -> 10.1 -> 9.5 s. Masters below
+  the threshold, all of branch and price's, never touch the pool.
 - **Sparse vectors.** The factor reports the nonzero pattern of
   alpha = B^-1 a_q (the LU collects it in its back-substitution), and the
   ratio test and x_B updates loop over it. e_r' B^-1's pattern drives the
@@ -199,25 +225,133 @@ duals, reduced costs and weights carry over.
   (Dantzig sections against Devex): 15.1 vs 11.5 s.
 - **Working-set row lists for pivot rows.** On pos_congestion e_r' B^-1 is
   dense, so pivot rows touch most of the working set either way, and the
-  lists made them slower (6.8 vs 5.2 s): reverted. One
-  master for the whole search; each node re-targets its column and `z_m`
-  bounds and continues from the last basis, with phase 1 repairing what
-  branching made infeasible. Exact, but neutral to slightly negative:
-  - hard tier 6.84 -> 7.12 s;
-  - trap_medium's front 1.71 -> 1.83 s.
+  lists made them slower (6.8 vs 5.2 s): reverted.
+- **Multiple pricing** (`Options.mp_min_cols`, off; Orchard-Hays, Maros
+  2003 ch. 9). A major iteration re-prices the working set and keeps the
+  K best by Devex score; minor iterations pivot among those with one dot
+  product each. On pos_congestion's anchor it took 3x the pivots of full
+  Devex (154-161 k against 50 k) for 14.9-18.2 s against 11.6 s, at
+  K = 32/64/128.
+- **Dual simplex for the large lpfirst masters** (`Options.dual_flip`,
+  off). The start is made dual feasible by flipping boxed columns, then
+  the dual runs with DSE, BFRT and cost perturbation. Correct (the boxed
+  tests), but on pos_congestion's anchor, with every column boxed at its
+  implied x <= 1, it took 127 k dual pivots at 938 us against the
+  primal's 54 k at 185 us (119 s against 10 s). Without cost perturbation
+  it stalls outright on the zero reduced costs. See the comparison below
+  for what a competitive dual needs.
 
-  A node master is cheap to rebuild, re-targeting costs about as much, and
-  these trees are 1-15 nodes deep.
+## Compared with free and open-source simplex codes
+
+### Measurements
+
+All runs below used the same LPs on this machine. HiGHS is 1.16 through
+highspy (simplex, presolve off for the replays); Gurobi is 12.
+
+**Branch and price masters: recorded RMP sequences, replayed identically.**
+
+| Master | Solves | Gurobi | HiGHS | fedlp |
+|---|---|---|---|---|
+| M2N30_1 | 361 | 1.008 s / 30.3 k | 1.085 s / 18.8 k | 0.212 s / 17.1 k |
+| M5N50_1 | 99 | 1.132 s / 18.7 k | 1.313 s / 12.3 k | 0.298 s / 12.7 k |
+| M2N20_3 | 646 | 0.872 s / 40.2 k | 0.870 s / 24.2 k | 0.162 s / 17.4 k |
+| M8N40_1 | 156 | 0.506 s / 16.6 k | 0.501 s / 9.0 k | 0.218 s / 11.2 k |
+
+Each cell is LP time / iterations.
+
+**lpfirst masters: pos_congestion's first anchor.** It has 4.5 k rows and
+31-35 k columns over 5-7 large warm re-solves. The column-generation
+paths differ by solver; objectives agree.
+
+| Solver and method | Iterations | us per iteration | LP time |
+|---|---|---|---|
+| Gurobi, auto (dual) | 29 k | 46 | 1.34 s |
+| Gurobi, dual | 27 k | 53 | 1.45 s |
+| Gurobi, primal | 194 k | 42 | 8.27 s |
+| HiGHS, dual (default) | 38 k | 72 | 2.75 s |
+| HiGHS, primal | 117 k | 128 | 14.97 s |
+| fedlp, primal Devex | 54 k | 185 | 10.1 s |
+| fedlp, dual (`dual_flip`, boxed) | 127 k | 938 | 119 s |
+
+On the 964-job trace's anchor all three take 0.13-0.17 s.
+
+### Where fedlp is ahead
+
+- **Per-solve overhead.** A re-solve after a column batch costs fedlp
+  0.3-2 ms; HiGHS's `run()` costs 1.3-13 ms for the same pivots. A live
+  model takes incremental adds, deletions and bound changes, and keeps
+  its factor, weights and working set between solves. There is no
+  presolve, scaling or setup per call, and nothing crosses a modelling
+  layer. Branch and price is thousands of small re-solves, so this is
+  most of the 2.3-5.4x over both.
+- **Primal pivot counts.** Devex, sifting and the crash hint take the
+  fewest pivots of the three primal codes on every workload measured. On
+  pos_congestion that is 54 k against HiGHS's 117 k and Gurobi's 194 k.
+  On B&P masters fedlp's primal is level with HiGHS's dual and under
+  Gurobi's count.
+- **Operations a B&P code needs**:
+  - branching by bound re-targeting with a DSE dual;
+  - crash hints from an incumbent;
+  - batch column adds into the live factor;
+  - results independent of thread count, with deterministic ties.
+
+### Where fedlp is behind, and what would close it
+
+1. **A dual simplex for large masters.** This is the 7x on pos_congestion.
+   HiGHS and Gurobi solve these re-solves with the dual. fedlp's dual is
+   correct but takes 3.3x HiGHS's pivots at 13x the cost per pivot. It
+   would need:
+   - **A dual phase 1 that does not flip everything.** Flipping every
+     dual-infeasible column to x = 1 from a primal-feasible point throws
+     x_B far off. HiGHS and Clp use a composite or artificial-bounding
+     phase 1, or start primal and switch.
+   - **Implied bounds.** Set-partitioning rows give x_j <= 1 for free, but
+     dropping a bound into the model changes duals, so it must stay a
+     working bound with a clean-up.
+   - **Hyper-sparse dual PRICE.** The pivot row is built row-wise over
+     rho's pattern and the row-wise matrix restricted to nonbasics; HiGHS
+     keeps a nonbasic-only row copy. fedlp scans every nonbasic column
+     when rho is dense: 35 k columns per pivot.
+   - **BFRT without a full sort.** Fedlp sorts every breakpoint on every
+     pivot. HiGHS buckets them by Harris groups, Maros and Koberstein use
+     a partial heap, and only the passed prefix is ever ordered.
+   - **Exact initial DSE weights.** Weights start at 1, which is only
+     right for a slack basis. A warm basis needs ||e_i' B^-1||^2 (one
+     BTRAN per row, or HiGHS's cheaper refresh after INVERT).
+2. **Cost per primal iteration.** fedlp's primal takes 185 us against
+   Gurobi primal's 42:
+   - **Refactorisation.** The LU refactorises every ~90 pivots, with
+     about 25 % from stability checks (47 of 186). The update and
+     threshold tolerances need tuning, and Markowitz pivot ordering would
+     replace the sparsest-column-first order, as in HiGHS's HFactor and
+     Clp's CoinFactorization.
+   - **PRICE.** It is two-thirds of a pivot. Gurobi's partial row-wise
+     PRICE and HiGHS's PAMI/SIP parallel PRICE both beat a full Devex row;
+     the threaded column pass recovers part of this.
+3. **Robustness that general codes carry:**
+   - presolve, and geometric or equilibrium scaling (masters are 0/1, so
+     unneeded so far);
+   - Farkas rays for infeasible masters (B&P uses artificials instead);
+   - unboundedness rays;
+   - a fallback chain (HiGHS falls back from dual to primal to IPX).
+4. **Interior point and crossover** for the first solve of a large cold
+   master, which HiGHS has (IPX) and Clp has (barrier). It is irrelevant
+   to warm re-solves.
+
+Clp and SoPlex were not measured here. From their design, Clp has
+primal and dual codes with sifting ("sprint"), the Idiot crash, and
+steepest edge for both. SoPlex can choose a row or column basis
+representation per LP shape, which for 4.5 k x 35 k masters is the
+column form fedlp already uses. Both carry the overheads in "Where fedlp
+is ahead" too.
 
 ## Next steps
 
-- **Pricing on the largest masters.** pos_congestion's lpfirst anchor
-  (4.5 k rows, ~35 k columns) takes 11 s against Gurobi's 1.3 s: 49.8 k
-  Devex pivots against 29 k, at about 230 us each against 46. The time is
-  in the pivot rows and selection over a large working set. This is a
-  pricing problem, not dense vectors: the per-pivot vector work is now
-  sparse. Candidate list sizes, multiple pricing or a dual-simplex re-solve
-  of the CG masters are the levers to try.
+- **The dual for large masters.** Item 1 of the comparison above. Its
+  first parts are the hyper-sparse dual PRICE over a nonbasic row copy
+  and a proper dual phase 1, before revisiting `dual_flip`.
+- **Refactorisation frequency.** Item 2 of the comparison above: about
+  25 % of pos_congestion's refactorisations are stability-triggered.
 - **Rows for cuts.** Logicals are columns `0..m-1`, so added rows need a
   logical-index map. Subset-row cuts are off by default (a negative result
   on the Rm instances), so this waits for a use.
