@@ -39,6 +39,21 @@
 
 namespace fedlp {
 
+// Phase timers, compiled in with -DFEDLP_PROFILE (stats()["t_*"], seconds).
+#ifdef FEDLP_PROFILE
+struct ScopeTimer {
+    double& acc;
+    std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    explicit ScopeTimer(double& a) : acc(a) {}
+    ~ScopeTimer() { acc += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); }
+};
+#define FEDLP_CAT2(a, b) a##b
+#define FEDLP_CAT(a, b) FEDLP_CAT2(a, b)
+#define FEDLP_TIME(field) ScopeTimer FEDLP_CAT(fedlp_timer_, __LINE__)(stats_.field)
+#else
+#define FEDLP_TIME(field) (void)0
+#endif
+
 enum class Status : int { Optimal = 0, Infeasible = 1, Unbounded = 2, IterationLimit = 3, Numerical = 5 };
 
 struct Options {
@@ -64,9 +79,19 @@ struct Options {
     int dense_max_rows = 128;
     int sparse_refactor_interval = 64;   // etas appended before refactorising
     bool sifting = true;
+    // Partial pricing when the working set exceeds partial_min_cols columns:
+    // no pivot row, reduced costs re-priced section by section from the
+    // duals (as primal codes do when columns far outnumber rows); below it,
+    // full Devex with maintained reduced costs. 0 (the default) disables it:
+    // on pos_congestion's lpfirst masters it halved the cost per pivot but
+    // took 2.9x the pivots (Dantzig sections against Devex), 15.1 s vs 11.5 s.
+    int partial_min_cols = 0;
     // Dual simplex when a solve starts primal infeasible but dual feasible
     // (bounds changed, nothing appended: a re-targeted branch-and-price node)
     bool dual = true;
+    // Dual pricing: 1 dual steepest edge (Forrest & Goldfarb 1992), 0 dual
+    // Dantzig (largest violation)
+    int dual_pricing = 1;
     int work_min = 500;
     double work_per_row = 3.0;
 };
@@ -77,6 +102,8 @@ struct Stats {
     long long row_pivots = 0, col_pivots = 0;   // how pivot rows were computed
     long long sifts = 0, admitted = 0, evicted = 0;
     long long dual_iterations = 0, dual_solves = 0;
+    double t_select = 0, t_ftran = 0, t_ratio = 0, t_pivot = 0, t_refactor = 0, t_sift = 0;
+    double t_btran = 0, t_rowwise = 0, t_colwise = 0, t_fupdate = 0;
     double seconds = 0.0;
 };
 
@@ -162,12 +189,15 @@ private:
     std::vector<double> xb_, y_;
     // work buffers
     std::vector<double> alpha_, rho_, acc_;
+    std::vector<int> anz_, rnz_;   // nonzero positions of alpha_ and rho_
+    std::vector<double> dse_, tau_;   // dual steepest-edge weights per basis position
     std::vector<int> touched_;
     std::vector<char> in_touched_;
     // sifting working set: columns pivots and pricing look at (logicals,
     // new and recently attractive columns); in_work_ marks membership
     std::vector<int> work_;
     std::vector<char> in_work_;
+
     std::vector<int> cand_;      // attractive working columns (select_devex)
     std::vector<char> in_cand_;
     bool cand_valid_ = false;
@@ -175,6 +205,9 @@ private:
     int since_refactor_ = 0;
     int degenerate_ = 0;        // degenerate pivots in a row, this solve
     bool refresh_duals_ = false;   // a basic column's cost changed
+    bool maintain_work_only_ = false;   // in phase 2: refactorisations re-price the working set only
+    bool partial_ = false;              // phase 2 is pricing partially
+    size_t ppos_ = 0;                   // partial pricing's position in the working set
     std::vector<int> hint_;        // crash hint (set_hint)
     int next_q_ = -1;           // entering column chosen by the last fused pivot row
     bool next_valid_ = false;
@@ -226,6 +259,28 @@ private:
     void admit(int j) {
         if (!in_work_[j]) in_work_[j] = 1, work_.push_back(j);
         note_attractive(j);
+    }
+
+    // alpha_ = B^-1 a_q and its nonzero positions anz_ (from the factor
+    // when it tracks them, else one scan): the ratio test and the primal
+    // update then touch only those
+    void ftran_alpha(int q) {
+        const int m = M_.rows();
+        alpha_.resize(m);
+        fac_->ftran(M_, q, alpha_.data());
+        const std::vector<int>* nz = fac_->last_nz();
+        if (nz) {
+            anz_ = *nz;
+        } else {
+            anz_.clear();
+            for (int i = 0; i < m; ++i)
+                if (alpha_[i] != 0.0) anz_.push_back(i);
+        }
+    }
+    void rho_pattern() {
+        rnz_.clear();
+        for (int k = 0, m = M_.rows(); k < m; ++k)
+            if (std::fabs(rho_[k]) >= 1e-14) rnz_.push_back(k);
     }
 
     // nonbasic j moved by delta: x_B -= delta B^-1 a_j
@@ -287,15 +342,26 @@ private:
         basis_valid_ = refactor();
     }
 
-    bool refactor() {
+    // all_d: recompute every column's reduced cost; otherwise only the
+    // working set's (primal pivoting looks at no other column, and sifting
+    // re-prices the frozen ones before they are considered)
+    bool refactor(bool all_d = true) {
+        FEDLP_TIME(t_refactor);
         ++stats_.refactors;
         since_refactor_ = 0;
         if (!fac_->factorize(M_, head_)) return false;
+        if (std::string(fac_->name()) == "sparse") dse_.clear();   // the product form reorders positions
         for (int i = 0; i < M_.rows(); ++i) pos_[head_[i]] = i;   // the factor may reorder
         compute_xb();
         compute_y();
-        compute_d();
+        if (all_d || !opt.sifting) compute_d();
+        else compute_d_work();
         return true;
+    }
+    void compute_d_work() {
+        for (int j : work_)
+            d_[j] = st_[j] == BASIC || st_[j] == DEAD ? 0.0 : M_.obj(j) - M_.dot(y_.data(), j);
+        cand_valid_ = false;
     }
 
     void compute_xb() {
@@ -337,10 +403,20 @@ private:
 
     // ------------------------------------------------------------ pricing
     bool eligible(int j) const {
+        // the sign of d_j rejects nearly every column: test it first, the
+        // tolerance and the bounds only for the few left
         const char s = st_[j];
-        if (s == BASIC || s == DEAD || lbw(j) == ubw(j)) return false;
-        const double d = d_[j], t = dtol(j);
-        return (s == AT_LB && d < -t) || (s == AT_UB && d > t);
+        const double d = d_[j];
+        if (s == AT_LB) {
+            if (d >= 0.0) return false;
+        } else if (s == AT_UB) {
+            if (d <= 0.0) return false;
+        } else {
+            return false;   // basic or removed
+        }
+        const double t = dtol(j);
+        if (s == AT_LB ? d >= -t : d <= t) return false;
+        return lbw(j) != ubw(j);
     }
     // Attractive-column list: the working-set columns that price out.
     // Selection scans it (dropping those no longer eligible) instead of the
@@ -358,6 +434,43 @@ private:
             if (!in_cand_[j] && eligible(j)) in_cand_[j] = 1, cand_.push_back(j);
         cand_valid_ = true;
     }
+    // Partial pricing: from a rotating position, re-price sections of the
+    // working set from the current duals and take the best eligible column
+    // of the first section that has one (Dantzig, scaled by 1 + |a_j|^2).
+    int select_partial() {
+        const size_t n = work_.size();
+        if (!n) return -1;
+        const size_t sec = std::max<size_t>(1000, n / 8);
+        size_t scanned = 0, pos = ppos_ % n;
+        while (scanned < n) {
+            const size_t end = std::min(n, pos + sec);
+            int q = -1;
+            double best = 0.0;
+            for (size_t k = pos; k < end; ++k) {
+                const int j = work_[k];
+                const char sj = st_[j];
+                if (sj == BASIC || sj == DEAD) continue;
+                d_[j] = M_.obj(j) - M_.dot(y_.data(), j);
+                if (!eligible(j)) continue;
+                const double sc = d_[j] * d_[j] / cnorm(j);
+                if (sc > best) best = sc, q = j;
+            }
+            scanned += end - pos;
+            pos = end >= n ? 0 : end;
+            if (q >= 0) {
+                ppos_ = pos;
+                return q;
+            }
+        }
+        return -1;
+    }
+    double cnorm(int j) const {
+        const double* v = M_.col_val(j);
+        double s = 1.0;
+        for (int k = 0, n = M_.col_nnz(j); k < n; ++k) s += v[k] * v[k];
+        return s;
+    }
+
     int select_devex() {
         if (!cand_valid_) rebuild_cand();
         int q = -1;
@@ -393,7 +506,8 @@ private:
         const double tol = opt.primal_tol, piv = opt.pivot_tol;
         const double range = ubw(q) - lbw(q);
         double tmax = range;
-        for (int i = 0; i < m; ++i) {
+        (void)m;
+        for (int i : anz_) {
             const double a = dir * alpha_[i];
             if (a > piv) {
                 const double l = lo(i);
@@ -413,7 +527,7 @@ private:
             return s;
         }
         double bestpiv = 0.0;
-        for (int i = 0; i < m; ++i) {
+        for (int i : anz_) {
             const double a = dir * alpha_[i];
             double t;
             if (a > piv) {
@@ -427,7 +541,11 @@ private:
             } else {
                 continue;
             }
-            if (t <= tmax && std::fabs(a) > bestpiv) bestpiv = std::fabs(a), s.r = i, s.theta = t, s.hit_lo = a > 0;
+            // ties (|alpha| = 1 is common in set partitioning) go to the lowest
+            // position, independent of the order anz_ lists them in
+            const double fa = std::fabs(a);
+            if (t <= tmax && (fa > bestpiv || (fa == bestpiv && i < s.r)))
+                bestpiv = fa, s.r = i, s.theta = t, s.hit_lo = a > 0;
         }
         if (s.theta < 0.0) s.theta = 0.0;   // the leaving bound gets shifted (see pivot)
         return s;
@@ -439,10 +557,11 @@ private:
     // through the row-wise pivot row (phase 2); otherwise they are
     // recomputed later (phase 1). Returns false on numerical failure.
     bool pivot(int q, int r, double dir, double theta, bool maintain, bool to_upper) {
+        const bool partial = maintain && partial_;
         const int m = M_.rows();
         const int l = head_[r];
         // primal update
-        for (int i = 0; i < m; ++i) xb_[i] -= dir * theta * alpha_[i];
+        for (int i : anz_) xb_[i] -= dir * theta * alpha_[i];
         const double xq = x_[q] + dir * theta;
         // the leaving variable rests at the bound it reached; when Harris
         // let it overshoot, that bound is shifted to its value
@@ -459,8 +578,12 @@ private:
         bool stable = true;
         if (maintain) {
             const double arq = alpha_[r];
-            const double* rr = fac_->row(r);
-            rho_.assign(rr, rr + m);
+            {
+                FEDLP_TIME(t_btran);
+                const double* rr = fac_->row(r);
+                rho_.assign(rr, rr + m);
+                rho_pattern();
+            }
             const double td = d_[q] / arq;
             const double wq = w_[q];
             const double inv2 = 1.0 / (arq * arq);
@@ -471,13 +594,17 @@ private:
             // the reduced-cost and Devex updates and the choice of the next
             // entering column (hybrid, as in HiGHS).
             long long rowcost = 0;
-            for (int k = 0; k < m; ++k)
-                if (std::fabs(rho_[k]) >= 1e-14) rowcost += (long long)M_.row(k).size();
-            if (3 * rowcost < M_.nnz()) {
+            for (int k : rnz_) rowcost += (long long)M_.row(k).size();
+            if (partial) {
+                // partial pricing: no pivot row; only the duals move
+                // (below), and pricing re-prices a section from them
+                arq_row = M_.dot(rho_.data(), q);
+                d_[l] = -td;
+            } else if (3 * rowcost < M_.nnz()) {
+                FEDLP_TIME(t_rowwise);
                 ++stats_.row_pivots;
-                for (int k = 0; k < m; ++k) {
+                for (int k : rnz_) {
                     const double rk = rho_[k];
-                    if (std::fabs(rk) < 1e-14) continue;
                     for (const auto& e : M_.row(k)) {
                         const int j = e.col;
                         if (st_[j] == BASIC || st_[j] == DEAD || !in_work_[j]) continue;
@@ -501,6 +628,7 @@ private:
                     if (j != q) note_attractive(j);
                 touched_.clear();
             } else {
+                FEDLP_TIME(t_colwise);
                 ++stats_.col_pivots;
                 d_[l] = -td;
                 w_[l] = std::max(wq * inv2, 1.0);
@@ -527,20 +655,26 @@ private:
                 cand_valid_ = false;   // every working column was re-priced
             }
             stable = std::fabs(arq_row - arq) <= 1e-9 * (1.0 + std::fabs(arq));
-            for (int k = 0; k < m; ++k) y_[k] += td * rho_[k];
+            for (int k : rnz_) y_[k] += td * rho_[k];
+            // exact: a stale (only growing) |y|_inf loosens the tolerance
+            // and stops solves early (on rm_M8N40_1 the CG went 137 -> 542
+            // iterations)
             update_ymax();
             if (wmax > 1e8) {   // reset the reference framework
                 std::fill(w_.begin(), w_.end(), 1.0);
                 next_valid_ = false;
             }
         }
-        if (!fac_->update(r, alpha_.data())) stable = false;
+        {
+            FEDLP_TIME(t_fupdate);
+            if (!fac_->update(r, alpha_.data())) stable = false;
+        }
         head_[r] = q, pos_[q] = r, st_[q] = BASIC, xb_[r] = xq, d_[q] = 0.0;
         if (!stable) ++stats_.stability_refactors;
         const int interval = refactor_interval();
         if (!stable || ++since_refactor_ >= interval) {
             next_valid_ = false;   // the reduced costs are recomputed
-            if (!refactor()) return false;
+            if (!refactor(!maintain_work_only_)) return false;
         }
         return true;
     }
@@ -629,24 +763,52 @@ private:
     Status phase2(bool allow_perturb) {
         int& degenerate = degenerate_;   // the streak spans the rounds of a solve
         next_valid_ = false;
+        if (partial_) compute_d_work();   // a previous phase priced partially
+        partial_ = false;
+        struct Flag {
+            bool& f;
+            Flag(bool& x) : f(x) { f = true; }
+            ~Flag() { f = false; }
+        } only_work(maintain_work_only_);
         while (true) {
             if (stats_.iterations >= opt.max_iter) return Status::IterationLimit;
-            int q = next_valid_ ? next_q_ : select_devex();
+            int q;
+            {
+                FEDLP_TIME(t_select);
+                const bool was = partial_;
+                partial_ = opt.partial_min_cols > 0 && (int)work_.size() > opt.partial_min_cols;
+                if (was && !partial_) compute_d_work(), next_valid_ = false;   // back to maintained d
+                q = partial_ ? select_partial() : next_valid_ ? next_q_ : select_devex();
+            }
             next_valid_ = false;
             if (q < 0) {
-                if (!(opt.sifting && sift())) return Status::Optimal;
-                q = select_devex();
+                bool admitted;
+                {
+                    FEDLP_TIME(t_sift);
+                    admitted = opt.sifting && sift();
+                }
+                if (!admitted) return Status::Optimal;
+                const bool was2 = partial_;
+                partial_ = opt.partial_min_cols > 0 && (int)work_.size() > opt.partial_min_cols;
+                if (was2 && !partial_) compute_d_work();
+                q = partial_ ? select_partial() : select_devex();
                 if (q < 0) return Status::Optimal;
             }
             const double dir = d_[q] < 0 ? 1.0 : -1.0;
-            alpha_.resize(M_.rows());
-            fac_->ftran(M_, q, alpha_.data());
-            Step s = ratio_test(q, dir, [&](int i) { return lbw(head_[i]); },
-                                [&](int i) { return ubw(head_[i]); });
+            {
+                FEDLP_TIME(t_ftran);
+                ftran_alpha(q);
+            }
+            Step s;
+            {
+                FEDLP_TIME(t_ratio);
+                s = ratio_test(q, dir, [&](int i) { return lbw(head_[i]); },
+                               [&](int i) { return ubw(head_[i]); });
+            }
             if (s.unbounded) return Status::Unbounded;
             ++stats_.iterations;
             if (s.r < 0) {
-                for (int i = 0; i < M_.rows(); ++i) xb_[i] -= dir * s.theta * alpha_[i];
+                for (int i : anz_) xb_[i] -= dir * s.theta * alpha_[i];
                 x_[q] = dir > 0 ? ubw(q) : lbw(q);
                 st_[q] = dir > 0 ? AT_UB : AT_LB;
                 ++stats_.flips;
@@ -656,7 +818,12 @@ private:
             const bool degen = s.theta * std::fabs(alpha_[s.r]) <= opt.primal_tol;
             if (degen) ++stats_.degenerate;
             degenerate = degen ? degenerate + 1 : 0;
-            if (!pivot(q, s.r, dir, s.theta, true, to_upper)) return Status::Numerical;
+            bool pivoted;
+            {
+                FEDLP_TIME(t_pivot);
+                pivoted = pivot(q, s.r, dir, s.theta, true, to_upper);
+            }
+            if (!pivoted) return Status::Numerical;
             if (allow_perturb && degenerate >= opt.degenerate_trigger) {
                 perturb();
                 degenerate = 0;
@@ -711,8 +878,7 @@ private:
                 return Status::Optimal;
             }
             const double dir = dq < 0 ? 1.0 : -1.0;
-            alpha_.resize(m);
-            fac_->ftran(M_, q, alpha_.data());
+            ftran_alpha(q);
             // an infeasible variable may move up to its violated bound (and
             // leaves the basis there), not past it
             Step s = ratio_test(
@@ -721,7 +887,7 @@ private:
             if (s.unbounded) return Status::Infeasible;   // cannot reduce the infeasibility further
             ++stats_.iterations, ++stats_.phase1_iterations;
             if (s.r < 0) {
-                for (int i = 0; i < m; ++i) xb_[i] -= dir * s.theta * alpha_[i];
+                for (int i : anz_) xb_[i] -= dir * s.theta * alpha_[i];
                 x_[q] = dir > 0 ? ubw(q) : lbw(q);
                 st_[q] = dir > 0 ? AT_UB : AT_LB;
                 continue;
@@ -746,24 +912,30 @@ private:
         cand_valid_ = false;
         while (true) {
             if (stats_.iterations >= opt.max_iter) return Status::IterationLimit;
-            // leaving row: the largest bound violation
+            // leaving row: the largest violation^2 / beta_i (dual steepest
+            // edge, beta_i ~ |e_i' B^-1|^2) or the largest violation
+            const bool dse = opt.dual_pricing == 1;
+            if (dse && (int)dse_.size() != m) dse_.assign(m, 1.0);
             int r = -1;
-            double worst = 0.0;
+            double worst = 0.0, best = 0.0;
             bool below = false;
             for (int i = 0; i < m; ++i) {
                 const int j = head_[i];
                 const double l = lbw(j), u = ubw(j);
-                if (xb_[i] < l - opt.primal_tol * (1.0 + std::fabs(l))) {
-                    if (l - xb_[i] > worst) worst = l - xb_[i], r = i, below = true;
-                } else if (xb_[i] > u + opt.primal_tol * (1.0 + std::fabs(u))) {
-                    if (xb_[i] - u > worst) worst = xb_[i] - u, r = i, below = false;
-                }
+                double viol = 0.0;
+                bool lo = false;
+                if (xb_[i] < l - opt.primal_tol * (1.0 + std::fabs(l))) viol = l - xb_[i], lo = true;
+                else if (xb_[i] > u + opt.primal_tol * (1.0 + std::fabs(u))) viol = xb_[i] - u;
+                else continue;
+                const double sc = dse ? viol * viol / dse_[i] : viol;
+                if (sc > best) best = sc, worst = viol, r = i, below = lo;
             }
             if (r < 0) return Status::Optimal;
             // pivot row over the nonbasic columns
             {
                 const double* rr = fac_->row(r);
                 rho_.assign(rr, rr + m);
+                rho_pattern();
             }
             long long rowcost = 0;
             for (int k = 0; k < m; ++k)
@@ -824,8 +996,7 @@ private:
                 for (int j : nzj) inz[j] = 0;
                 return Status::Numerical;
             }
-            alpha_.resize(m);
-            fac_->ftran(M_, q, alpha_.data());
+            ftran_alpha(q);
             const double arq = alpha_[r];
             const bool stable = std::fabs(arow[q] - arq) <= 1e-9 * (1.0 + std::fabs(arq));
             if (std::fabs(arq) < piv) {
@@ -833,11 +1004,25 @@ private:
                 if (!refactor()) return Status::Numerical;
                 continue;
             }
+            if (dse) {
+                // tau = B^-1 rho_r, then the Forrest-Goldfarb update over
+                // the rows alpha touches
+                tau_.assign(rho_.begin(), rho_.end());
+                fac_->ftran_inplace(tau_.data());
+                const double br = dse_[r];
+                for (int i : anz_) {
+                    if (i == r) continue;
+                    const double ratio = alpha_[i] / arq;
+                    double b = dse_[i] - 2.0 * ratio * tau_[i] + ratio * ratio * br;
+                    dse_[i] = std::max(b, std::max(1e-6, ratio * ratio));
+                }
+                dse_[r] = std::max(br / (arq * arq), 1e-6);
+            }
             const int l = head_[r];
             const double target = below ? lbw(l) : ubw(l);
             const double tp = (xb_[r] - target) / arq;
             const double td = d_[q] / arq;
-            for (int i = 0; i < m; ++i) xb_[i] -= tp * alpha_[i];
+            for (int i : anz_) xb_[i] -= tp * alpha_[i];
             const double xq = x_[q] + tp;
             for (int j : nzj) {
                 if (j != q) d_[j] -= td * arow[j];
@@ -845,7 +1030,10 @@ private:
             }
             nzj.clear();
             d_[l] = -td;
-            for (int k = 0; k < m; ++k) y_[k] += td * rho_[k];
+            for (int k : rnz_) y_[k] += td * rho_[k];
+            // exact: a stale (only growing) |y|_inf loosens the tolerance
+            // and stops solves early (on rm_M8N40_1 the CG went 137 -> 542
+            // iterations)
             update_ymax();
             x_[l] = target, st_[l] = below ? AT_LB : AT_UB, pos_[l] = -1;
             admit(l), admit(q);

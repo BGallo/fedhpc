@@ -134,7 +134,8 @@ public:
         apply_R(v.data());
         // keep the spike (M a_j) for update(); solve U into out
         std::copy(v.begin(), v.end(), tmp_.begin());
-        solve_U(tmp_.data(), out);
+        out_nz_.clear();
+        solve_U(tmp_.data(), out, &out_nz_);
         have_spike_ = true;
     }
     void ftran_inplace(double* x) override {
@@ -233,6 +234,7 @@ public:
         return std::fabs(d - expected) <= 1e-9 * (1.0 + std::fabs(expected));
     }
     const char* name() const override { return "lu"; }
+    const std::vector<int>* last_nz() const override { return &out_nz_; }
     int updates() const { return updates_; }
 
 private:
@@ -248,6 +250,7 @@ private:
     std::vector<std::vector<std::pair<int, double>>> ucol_, urow_;
     std::vector<double> spike_, tmp_, rowbuf_, w_;
     std::vector<int> eta_of_row_, nzf_;   // L eta pivoting on each row; ftran's pattern
+    std::vector<int> out_nz_;             // last ftran(M, j, out)'s nonzero positions
     std::vector<char> seenf_;
 
     // L applied to a sparse v whose pattern is nz (seen marks it): only the
@@ -319,13 +322,14 @@ private:
             for (int e = rstart_[k], f = rstart_[k + 1]; e < f; ++e) z[ridx_[e]] -= rval_[e] * zt;
         }
     }
-    // U x = v (v by rows, consumed), x by position
-    void solve_U(double* v, double* x) const {
+    // U x = v (v by rows, consumed), x by position; nz collects x's pattern
+    void solve_U(double* v, double* x, std::vector<int>* nz = nullptr) const {
         for (int i = (int)ord_.size() - 1; i >= 0; --i) {
             const int c = ord_[i];
             const double xc = v[prow_[c]] / diag_[c];
             x[c] = xc;
             if (xc == 0.0) continue;
+            if (nz) nz->push_back(c);
             for (auto [p, u] : ucol_[c]) v[p] -= u * xc;
         }
     }

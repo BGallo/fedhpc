@@ -230,14 +230,16 @@ def test_batch_add_matches_single_adds():
     assert math.isfinite(a.objective)
 
 
+@pytest.mark.parametrize("dual_pricing", [0, 1], ids=["dantzig", "dse"])
 @pytest.mark.parametrize("seed", range(15))
-def test_dual_simplex_after_branching_bounds(seed):
+def test_dual_simplex_after_branching_bounds(seed, dual_pricing):
     """Closing used columns (ub = 0) and raising one lower bound, with no
     column appended, leaves the basis dual feasible: the dual simplex must
     finish it, with Gurobi's objective (or its infeasibility verdict)."""
     rng = random.Random(500 + seed)
     nj, nf = rng.randint(8, 30), rng.randint(1, 3)
     M = _sp_master(rng, nj, nf)
+    M.lp.options.dual_pricing = dual_pricing
     for _ in range(120):
         M.add(*_cost_idx_val(rng, nj, nf))
     M.check()

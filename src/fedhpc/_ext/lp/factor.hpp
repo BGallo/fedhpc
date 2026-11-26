@@ -45,6 +45,9 @@ public:
     // false: the factor could not absorb the update (refactorise)
     virtual bool update(int r, const double* alpha) = 0;
     virtual const char* name() const = 0;
+    // nonzero positions of the last ftran(M, j, out), when the factor
+    // tracks them (else null: the caller scans)
+    virtual const std::vector<int>* last_nz() const { return nullptr; }
 };
 
 // The explicit dense inverse behind the interface.

@@ -135,6 +135,10 @@ public:
         d["row_pivots"] = s.row_pivots, d["col_pivots"] = s.col_pivots;
         d["sifts"] = s.sifts, d["admitted"] = s.admitted, d["evicted"] = s.evicted;
         d["dual_iterations"] = s.dual_iterations, d["dual_solves"] = s.dual_solves;
+        d["t_select"] = s.t_select, d["t_ftran"] = s.t_ftran, d["t_ratio"] = s.t_ratio;
+        d["t_pivot"] = s.t_pivot, d["t_refactor"] = s.t_refactor, d["t_sift"] = s.t_sift;
+        d["t_btran"] = s.t_btran, d["t_rowwise"] = s.t_rowwise, d["t_colwise"] = s.t_colwise;
+        d["t_fupdate"] = s.t_fupdate;
         return d;
     }
     void reset_stats() { S_.reset_stats(); }
@@ -180,7 +184,9 @@ PYBIND11_MODULE(_fedlp, mod) {
         .def_readwrite("refactor_interval", &Options::refactor_interval)
         .def_readwrite("max_iter", &Options::max_iter)
         .def_readwrite("sifting", &Options::sifting)
+        .def_readwrite("partial_min_cols", &Options::partial_min_cols)
         .def_readwrite("dual", &Options::dual)
+        .def_readwrite("dual_pricing", &Options::dual_pricing)
         .def_readwrite("factor", &Options::factor)
         .def_readwrite("lu_refactor_interval", &Options::lu_refactor_interval)
         .def_readwrite("dense_max_rows", &Options::dense_max_rows)

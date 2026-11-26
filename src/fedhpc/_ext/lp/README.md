@@ -56,6 +56,31 @@ duals, reduced costs and weights carry over.
 - **Stability.** The pivot element is compared as computed by row and by
   column, and a disagreement triggers refactorisation. There is also a
   fixed refactorisation interval: 200 pivots dense, 64 etas sparse.
+- **Dual steepest edge** (`Options.dual_pricing` = 1, the default;
+  Forrest & Goldfarb 1992). The leaving row maximises violation^2 / beta_i,
+  with beta_i ~ |e_i' B^-1|^2. After a pivot, one extra FTRAN of the pivot
+  row gives tau = B^-1 rho_r, and the update runs over alpha's nonzeros.
+  Weights start at 1 and survive refactorisation, except under the product
+  form, which reorders positions. On 300-step branching dives over recorded
+  masters, with the same bound changes for both rules and the same
+  objective at every step, it beat dual Dantzig by 18-42 % in time:
+
+  | Master | Dantzig | DSE |
+  |---|---|---|
+  | M5N50_1 | 3.63 s | 2.83 s |
+  | M8N40_1 | 0.226 s | 0.155 s |
+  | M2N30_1 | 0.176 s | 0.103 s |
+  | M2N20_3 | 0.107 s | 0.088 s |
+
+- **Sparse vectors.** The factor reports the nonzero pattern of
+  alpha = B^-1 a_q (the LU collects it in its back-substitution), and the
+  ratio test and x_B updates loop over it. e_r' B^-1's pattern drives the
+  row-cost estimate, the row-wise pivot row and the dual update. The
+  pivot's ratio test breaks |alpha| ties toward the lowest position,
+  whatever order the pattern lists them in. Ties at 1 are everywhere in set
+  partitioning, and leaving the order to the pattern sent rm_M8N40_1's
+  column generation from 137 to 542 iterations.
+- **Phase timers** compiled in with `-DFEDLP_PROFILE` (`stats()["t_*"]`).
 - **Dual simplex** (`Options.dual`). When a solve starts primal infeasible
   but dual feasible, a bounded dual simplex runs first. That is the case
   when bounds changed and nothing was appended, as in a re-targeted
@@ -160,10 +185,21 @@ duals, reduced costs and weights carry over.
 - **Positive Edge.** Not implemented: after perturbation only 14-24 % of
   pivots are degenerate, below the 25 % where Towhidi et al. found it pays.
 
-- **Warm-started tree nodes** (`PricingOptions.warm_nodes`, off; with the
-  dual simplex now level with rebuilding: hard 6.83 vs 6.98 s, trap
-  front 0.87 vs 0.88 s, so no longer a loss, but not a gain on shallow
-  trees). One
+- **Warm-started tree nodes** (`PricingOptions.warm_nodes`, off). With
+  the dual simplex they are level with rebuilding. With dual steepest edge
+  as well:
+  - gap tier (the most branching) 5.01 -> 4.65 s;
+  - hard 6.24 vs 6.35 s;
+  - base 2.84 vs 2.89 s.
+
+  Even in total, so still off; it pays as trees deepen.
+- **Partial pricing** (`Options.partial_min_cols`, off). Pricing sections
+  of the working set from the duals, with no pivot row, halved the cost
+  per pivot on pos_congestion's lpfirst masters but took 2.9x the pivots
+  (Dantzig sections against Devex): 15.1 vs 11.5 s.
+- **Working-set row lists for pivot rows.** On pos_congestion e_r' B^-1 is
+  dense, so pivot rows touch most of the working set either way, and the
+  lists made them slower (6.8 vs 5.2 s): reverted. One
   master for the whole search; each node re-targets its column and `z_m`
   bounds and continues from the last basis, with phase 1 repairing what
   branching made infeasible. Exact, but neutral to slightly negative:
@@ -175,12 +211,13 @@ duals, reduced costs and weights carry over.
 
 ## Next steps
 
-- **Hyper-sparse vectors throughout the iteration** for masters of
-  thousands of rows: FTRAN results, x_B updates and the ratio test as
-  sparse vectors, as HiGHS does. That is what stays between fedlp and
-  Gurobi on pos_congestion.
-- **Dual steepest edge** for the dual simplex. Dual Dantzig suffices for
-  re-targeted nodes; deep trees would want better.
+- **Pricing on the largest masters.** pos_congestion's lpfirst anchor
+  (4.5 k rows, ~35 k columns) takes 11 s against Gurobi's 1.3 s: 49.8 k
+  Devex pivots against 29 k, at about 230 us each against 46. The time is
+  in the pivot rows and selection over a large working set. This is a
+  pricing problem, not dense vectors: the per-pivot vector work is now
+  sparse. Candidate list sizes, multiple pricing or a dual-simplex re-solve
+  of the CG masters are the levers to try.
 - **Rows for cuts.** Logicals are columns `0..m-1`, so added rows need a
   logical-index map. Subset-row cuts are off by default (a negative result
   on the Rm instances), so this waits for a use.
