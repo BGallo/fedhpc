@@ -119,7 +119,42 @@ are active):
   ``scripts/bpc_bench.py``: hard tier 103 s -> 32 s (rm_M5N50_1 47 -> 10 s),
   gap tier 36 -> 18 s, base 8.9 -> 5.5 s; the early break alone is about
   18 % of the hard tier (``threads=1``: 85 s). Pareto worker processes
-  price with one thread.
+  price with one thread, and a round whose previous one made fewer than
+  ``_PARALLEL_MIN_LABELS`` labels runs sequentially.
+- **DP engineering** (2026-11-26; profiled by replaying recorded pricing
+  calls, which also checks every result is unchanged up to equal-cost
+  ties). Almost all DP time was rejecting dominated candidates: 18 G
+  bucket dominance checks for 744 M candidates on rm_M5N50_1. Now:
+
+  - a candidate is first checked against the earlier survivors of its own
+    ``(slot, job)``; ng memories make these few, and they reject ~98 % of
+    candidates;
+  - once such a survivor's memory is just ``{i}`` (no cuts, no same pairs),
+    the rest of that scan is skipped, since it dominates every later one;
+  - the active set stays sorted by cost, so the merge's dominance scans
+    stop at the cost boundary;
+  - the active set and buckets hold compact contiguous entries, with the
+    pending and cut tests compiled out when there are no cuts or same pairs;
+  - the output columns come from a heap, not a full sort, and
+    ``Pricer.price_cols`` returns global paths, f1/f2 and the reduced cost
+    at the RMP duals (the smoothing filter), so no per-column Python work
+    remains.
+
+  The recorded DP went from 73 s to 4.0 s single-threaded. Hard tier
+  32 -> 9.5 s, gap 15 -> 7.3 s, base 5.5 -> 3.9 s. The RMP integer heuristic
+  runs Gurobi single-threaded (``_HEURISTIC_THREADS``): its small MIPs paid
+  more to start every core's thread than they gained (trap_medium's front:
+  1.75 -> 1.41 s).
+
+  Tried and not adopted:
+
+  - ``cols_per_type`` 10-200: 10 was about 10 % faster on the hard tier and
+    neutral on the gap tier; 60 or more was worse;
+  - primal simplex for the RMP: different duals, mixed;
+  - column purging (``PricingOptions.purge_checks``): mixed;
+  - dropping the implied fixed-cost link rows: CG iterations 99 -> 789.
+
+  An Rm solve is now about 40 % DP, 40 % LP and 20 % setup.
 - **RMP heuristic during root column generation**
   (``TREE_DEFAULTS["root_cg_heuristic"]``): at iterations 10, 20, 40, ...
   on a copy of the RMP (1 s cap), so the root's Lagrangian bound prunes
@@ -1462,6 +1497,13 @@ class PricingOptions:
     root-bound hard Rm solves by 40-48% (rm_M2N30_1 48 -> 25 s, rm_M5N50_1
     72 -> 42 s; ``--suite hard``).
 
+    ``purge_checks`` — every 10 column-generation iterations, a non-null
+    column found nonbasic with positive reduced cost at this many checks
+    in a row leaves the RMP (0, the default, keeps every column); pricing
+    is exact, so it comes back if it ever prices out. Off: on the hard Rm
+    solves (2026-11-26) 3 checks sped rm_M5N50_1 up 13 % but cost others
+    up to 30 % in regenerated columns, and 6 or 12 were neutral.
+
     ``threads`` — path types priced concurrently (the compiled pricer
     releases the GIL); 0 picks ``min(path types, CPUs)``, 1 prices them one
     after another. The columns and bounds do not depend on it.
@@ -1479,6 +1521,7 @@ class PricingOptions:
     sr_depth: int = 0
     sr_min_viol: float = 0.05
     threads: int = 0
+    purge_checks: int = 0
 
 
 # Used wherever no ``pricing`` argument is given (e.g. under pareto.py's
@@ -1487,6 +1530,9 @@ DEFAULT_PRICING = PricingOptions()
 
 
 _EXECUTORS: dict[int, ThreadPoolExecutor] = {}
+# A pricing round whose previous one created fewer labels (over all path
+# types) runs sequentially: below this the thread hand-off costs more.
+_PARALLEL_MIN_LABELS = 5000
 
 
 def _pricing_executor(opts: PricingOptions, n_types: int) -> ThreadPoolExecutor | None:
@@ -1674,6 +1720,11 @@ class _NodePricing:
             same = [(local[j], local[k]) for j, k in same_pairs if j in local and k in local]
             pricer = _bpcprice.Pricer(H, [arc.p_occ for arc, _ts in kept],
                                       [ts for _arc, ts in kept], differ, same)
+            pricer.set_info([arc.job_id for arc, _ts in kept],
+                            [arc.weight * (arc.p_occ - prep.arrival_of[arc.job_id])
+                             for arc, _ts in kept],
+                            [arc.weight for arc, _ts in kept],
+                            [arc.raw_cost2 for arc, _ts in kept])
             self.types[mid] = (pricer, [arc for arc, _ts in kept], local)
         self.cut_ids: dict[int, list[int]] = {mid: [] for mid in self.types}
         self.refresh_memory()
@@ -1729,22 +1780,31 @@ class _NodePricing:
               ) -> tuple[float, bool, int, list[Column]]:
         """``(min_lb, exact, n_labels, columns)``: ``min_lb`` lower-bounds the
         type's minimum reduced cost over ng-paths (``-inf`` when not exact)."""
-        pricer, arcs, _local = self.types[mid]
-        prep = self.prep
+        return self.price_eval(mid, d, w1, w2, tol)[:4]
+
+    def price_eval(self, mid: int, d: _Duals, w1: float, w2: float, tol: float,
+                   eval_d: _Duals | None = None
+                   ) -> tuple[float, bool, int, list[Column], list[float] | None]:
+        """:meth:`price`, plus each column's reduced cost at ``eval_d`` (the
+        compiled pricer computes it alongside the column), or None without
+        ``eval_d`` or when subset-row cuts are active (their terms are not
+        arc-additive: use :func:`_column_rc`)."""
+        pricer, _arcs, _local = self.types[mid]
         A, B, sources = self._inputs(mid, d, w1, w2)
-        min_lb, exact, n_labels, raw = pricer.price(
+        ev = eval_d is not None and not any(eval_d.beta[c] for c in self.cut_ids[mid])
+        if ev:
+            eA, eB, e_src = self._inputs(mid, eval_d, w1, w2)
+            e_first = max(0.0, -eval_d.eta.get(mid, 0.0))
+        else:
+            eA, eB, e_src, e_first = [], [], [], 0.0
+        min_lb, exact, n_labels, raw = pricer.price_cols(
             A, B, sources, self.opts.cols_per_type, tol, self.opts.max_labels,
             max(0.0, -d.eta.get(mid, 0.0)),
-            [max(0.0, -d.beta[c]) for c in self.cut_ids[mid]])
-        cols = []
-        for _rc, release, path in raw:
-            jobs = tuple((arcs[i].job_id, t) for i, t in path)
-            cost1 = sum(arcs[i].weight * (t + arcs[i].p_occ - prep.arrival_of[arcs[i].job_id])
-                        for i, t in path)
-            cost2 = sum(arcs[i].raw_cost2 for i, _t in path)
-            cols.append(Column(type_id=mid, jobs=jobs, cost1=cost1, cost2=cost2,
-                               release=release))
-        return min_lb, exact, n_labels, cols
+            [max(0.0, -d.beta[c]) for c in self.cut_ids[mid]],
+            eA, eB, e_src, e_first)
+        cols = [Column(type_id=mid, jobs=tuple(path), cost1=c1, cost2=c2, release=release)
+                for _rc, release, path, c1, c2, _er in raw]
+        return min_lb, exact, n_labels, cols, ([r[5] for r in raw] if ev else None)
 
 
 def _lagrangian_bound(
@@ -1830,6 +1890,9 @@ class _RmpState:
     columns: list[Column] = field(default_factory=list)
     vars: list[gp.Var] = field(default_factory=list)
     unbounded: frozenset[int] = frozenset()   # types with no fleet row
+    # columns taken out of the RMP by purging (_run_cg_compiled): still
+    # inherited by children and pooled, and pricing may regenerate them
+    purged: list[Column] = field(default_factory=list)
 
 
 def _add_column_var(
@@ -1848,13 +1911,18 @@ def _add_column_var(
     constrs: list[gp.Constr] = [fleet] if fleet is not None else []
     # An ng-route column may visit a job twice: its coefficient is the visit
     # count (it can then never be part of an integer solution).
-    for job_id, n in Counter(jid for jid, _start in col.jobs).items():
+    ids = [jid for jid, _start in col.jobs]
+    counts = (((jid, 1) for jid in ids) if len(set(ids)) == len(ids)
+              else Counter(ids).items())
+    coverage, links, mid = state.coverage, state.fixed_link, col.type_id
+    for job_id, n in counts:
         coeffs.append(float(n))
-        constrs.append(state.coverage[job_id])
-        link = state.fixed_link.get((job_id, col.type_id))
-        if link is not None:
-            coeffs.append(float(n))
-            constrs.append(link)
+        constrs.append(coverage[job_id])
+        if links:
+            link = links.get((job_id, mid))
+            if link is not None:
+                coeffs.append(float(n))
+                constrs.append(link)
     act = state.activation.get(col.type_id)
     if act is not None and col.jobs:
         coeffs.append(1.0)
@@ -1972,6 +2040,11 @@ def _build_rmp(
     # job, not one aggregate row, to keep the LP bound as tight as the compact
     # model's). Rows first (empty), then z_m with coefficient -1 on each of
     # its type's rows, so real columns only ever need to add +1 per job later.
+    #
+    # Tried 2026-11-26 and rejected: dropping these rows for single-instance
+    # types with an activation row (they are implied there; 310 -> 60 rows on
+    # rm_M5N50_1, same bound). The master's duals got much worse — 99 -> 789
+    # column-generation iterations — so they stay.
     fixed_link: dict[tuple[int, int], gp.Constr] = {}
     for itype in _fixed_cost_types(inst):
         for j in inst.jobs:
@@ -2165,6 +2238,7 @@ def _run_cg_compiled(
     best_lb, center, best_mins = -math.inf, None, None
     margin = 1e-3 * min(step, 1.0)
     next_cb = 10
+    idle: dict[tuple, int] = {}   # column key -> consecutive idle purge checks
 
     def same_grid_point(lb: float, ub: float) -> bool:
         return (step >= 1e-3 and math.isfinite(lb)
@@ -2182,26 +2256,36 @@ def _run_cg_compiled(
         return _CGResult(it, status, objective, best_lb, fixed)
 
     executor = _pricing_executor(opts, len(prep.path_types))
+    last_labels = [_PARALLEL_MIN_LABELS]   # labels of the last pricing round
 
-    def price_all(d: _Duals) -> tuple[float | None, list[Column], dict]:
+    def price_all(d: _Duals, eval_d: _Duals | None = None
+                  ) -> tuple[float | None, list[Column], dict, list[float]]:
+        """Price every path type at ``d``. With ``eval_d``, also returns each
+        column's reduced cost at ``eval_d`` (aligned with the columns)."""
         t0 = time.perf_counter()
-        mins, cols, exact = {}, [], True
-        if executor is None:
-            results = [pricing.price(mid, d, weight1, weight2, tol) for mid in prep.path_types]
-        else:
-            results = list(executor.map(
-                lambda mid: pricing.price(mid, d, weight1, weight2, tol), prep.path_types))
-        for mid, (mn, ex, n_labels, cs) in zip(prep.path_types, results):
+        mins, cols, exact, ercs = {}, [], True, []
+
+        def one(mid):
+            return pricing.price_eval(mid, d, weight1, weight2, tol, eval_d)
+        # small DPs (few labels last round) cost less than a thread hand-off
+        parallel = executor is not None and last_labels[0] >= _PARALLEL_MIN_LABELS
+        results = (list(executor.map(one, prep.path_types)) if parallel
+                   else [one(mid) for mid in prep.path_types])
+        last_labels[0] = sum(r[2] for r in results)
+        for mid, (mn, ex, n_labels, cs, er) in zip(prep.path_types, results):
             mins[mid] = mn
             exact &= ex
             cols += cs
+            if eval_d is not None:
+                ercs += er if er is not None else [_column_rc(c, eval_d, weight1, weight2)
+                                                   for c in cs]
             timers["labels"] = max(timers.get("labels", 0), n_labels)
         lag = (_lagrangian_bound(prep, state, d, mins, weight1, weight2, big_m,
                                  statics, fixed_cost) if exact else None)
         timers["pricing_s"] = timers.get("pricing_s", 0.0) + time.perf_counter() - t0
         if not exact:
             timers["inexact_pricing"] = timers.get("inexact_pricing", 0) + 1
-        return lag, cols, mins
+        return lag, cols, mins, ercs
 
     for it in range(max_iters):
         _check_deadline(deadline)
@@ -2209,12 +2293,15 @@ def _run_cg_compiled(
         mdl.optimize()
         timers["lp_s"] = timers.get("lp_s", 0.0) + time.perf_counter() - t_lp
         timers["cg_iters"] = timers.get("cg_iters", 0) + 1
+        timers["simplex_iters"] = timers.get("simplex_iters", 0) + int(mdl.IterCount)
         if mdl.Status == GRB.INFEASIBLE:
             raise _RmpInfeasible
         if mdl.Status != GRB.OPTIMAL:
             raise RuntimeError(f"BPC RMP LP not optimal: status={mdl.Status}")
         rmp = mdl.ObjVal
         d = _read_duals(state)
+        if opts.purge_checks and it % 10 == 9:
+            _purge_columns(mdl, state, keys, idle, opts.purge_checks, tol, timers)
         if incumbent_cb is not None and it + 1 >= next_cb:
             next_cb *= 2
             if sum(v.X for v in state.art.values()) <= 1e-6:
@@ -2226,13 +2313,12 @@ def _run_cg_compiled(
         new: list[Column] = []
         if center is not None and opts.smoothing > 0:
             sd = center.mix(d, opts.smoothing)
-            lag, cols, mins = price_all(sd)
+            lag, cols, mins, ercs = price_all(sd, d)
             if lag is not None and lag > best_lb:
                 best_lb, center, best_mins = lag, sd, mins
-            new = [c for c in cols if _column_key(c) not in keys
-                   and _column_rc(c, d, weight1, weight2) < -tol]
+            new = [c for c, er in zip(cols, ercs) if er < -tol and _column_key(c) not in keys]
         if not new:
-            lag, cols, mins = price_all(d)
+            lag, cols, mins, _ = price_all(d)
             if lag is not None and lag > best_lb:
                 best_lb, center, best_mins = lag, d, mins
             new = [c for c in cols if _column_key(c) not in keys]
@@ -2264,6 +2350,37 @@ def _run_cg_compiled(
                                               name=f"lam[{col.type_id}]_{len(state.columns)}"))
             state.columns.append(col)
     raise RuntimeError("BPC column generation did not converge within max_iters")
+
+
+def _purge_columns(mdl: gp.Model, state: _RmpState, keys: set, idle: dict,
+                   checks: int, tol: float, timers: dict) -> None:
+    """Remove from the RMP every non-null column that was nonbasic with
+    reduced cost above ``tol`` at ``checks`` consecutive calls (see
+    ``PricingOptions.purge_checks``). It moves to ``state.purged`` and
+    leaves ``keys``, so pricing can add it again. Call right after a
+    solve, before the next model change."""
+    vb = mdl.getAttr("VBasis", state.vars)
+    rc = mdl.getAttr("RC", state.vars)
+    keep_c, keep_v, drop = [], [], []
+    for col, var, b, r in zip(state.columns, state.vars, vb, rc):
+        k = _column_key(col)
+        if col.jobs and b != 0 and r > tol:
+            n = idle.get(k, 0) + 1
+            if n >= checks:
+                drop.append(var)
+                state.purged.append(col)
+                keys.discard(k)
+                idle.pop(k, None)
+                continue
+            idle[k] = n
+        else:
+            idle.pop(k, None)
+        keep_c.append(col)
+        keep_v.append(var)
+    if drop:
+        mdl.remove(drop)
+        state.columns[:], state.vars[:] = keep_c, keep_v
+        timers["purged"] = timers.get("purged", 0) + len(drop)
 
 
 def _rc_fixing(
@@ -2503,6 +2620,12 @@ class _NodeResult:
     fixed: frozenset = frozenset()   # reduced-cost fixing, inherited by children
 
 
+# Gurobi threads for the RMP integer heuristic: its MIPs are small and
+# time-capped, and starting every core's thread cost more than they saved
+# (trap_medium's front: 48 heuristic MIPs at ~14 ms each with the default).
+_HEURISTIC_THREADS = 1
+
+
 def _rmp_integer_heuristic(
     mdl: gp.Model,
     state: _RmpState,
@@ -2533,6 +2656,7 @@ def _rmp_integer_heuristic(
     for var in state.z.values():
         var.VType = GRB.BINARY
     mdl.setParam("TimeLimit", time_limit)
+    mdl.setParam("Threads", _HEURISTIC_THREADS)
     mdl.optimize()
     if mdl.SolCount == 0 or sum(v.X for v in state.art.values()) > 1e-6:
         return None
@@ -2673,11 +2797,11 @@ def _solve_node(
     except _RmpInfeasible:
         return _NodeResult(status="infeasible", objective=float("inf"), columns=seed_pool)
     if cg.status == "pruned":
-        return _NodeResult(status="pruned", objective=cg.objective, columns=state.columns)
+        return _NodeResult(status="pruned", objective=cg.objective, columns=state.columns + state.purged)
 
     artificial_total = sum(v.X for v in state.art.values())
     if artificial_total > 1e-6:
-        return _NodeResult(status="infeasible", objective=float("inf"), columns=state.columns)
+        return _NodeResult(status="infeasible", objective=float("inf"), columns=state.columns + state.purged)
 
     # Aggregate x_jmt = sum of lambda_p over columns placing job at (m,t), and
     # joint_jk = sum of lambda_p over columns placing *both* j and k (any
@@ -2737,7 +2861,7 @@ def _solve_node(
         ]
         if frac_z:
             return _NodeResult(status="fractional", objective=cg.objective,
-                                columns=state.columns, branch_type=frac_z[0], fixed=cg.fixed)
+                                columns=state.columns + state.purged, branch_type=frac_z[0], fixed=cg.fixed)
 
         assignment = {
             job_id: (mid, t) for (job_id, mid, t), v in agg.items()
@@ -2761,7 +2885,7 @@ def _solve_node(
         completion = {jid: t + inst.p_occ[jid, mid] for jid, (mid, t) in assignment.items()}
         true_objective = weight1 * inst.f1_of(completion) + weight2 * inst.f2_of(assignment)
         return _NodeResult(status="integral", objective=true_objective,
-                            columns=state.columns, assignment=assignment)
+                            columns=state.columns + state.purged, assignment=assignment)
 
     # Prefer Ryan-Foster: the job pair whose joint coverage is most fractional
     # (closest to 0.5) among those genuinely undetermined right now — this is
@@ -2776,11 +2900,11 @@ def _solve_node(
         if tol < v < 1 - tol
     ] if branching == "rf" else []
     if branching == "time":
-        result = _NodeResult(status="fractional", objective=cg.objective, columns=state.columns,
+        result = _NodeResult(status="fractional", objective=cg.objective, columns=state.columns + state.purged,
                              branch_forbid=_time_branch(inst, prep, agg, unsettled))
     elif pair_candidates:
         _dist, branch_j, branch_k = min(pair_candidates)
-        result = _NodeResult(status="fractional", objective=cg.objective, columns=state.columns,
+        result = _NodeResult(status="fractional", objective=cg.objective, columns=state.columns + state.purged,
                              branch_pair=(branch_j, branch_k))
     else:
         _dist, branch_j, branch_m, branch_t = min(
@@ -2788,7 +2912,7 @@ def _solve_node(
             for (jid, mid, t), v in agg.items()
             if jid in unsettled
         )
-        result = _NodeResult(status="fractional", objective=cg.objective, columns=state.columns,
+        result = _NodeResult(status="fractional", objective=cg.objective, columns=state.columns + state.purged,
                              branch_var=(branch_j, branch_m, branch_t))
     if heuristic_time_limit is not None:
         if deadline is not None:

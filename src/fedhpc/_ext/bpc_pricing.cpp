@@ -55,6 +55,9 @@ namespace {
 using Path = std::vector<std::pair<int, int>>;                 // (local job, start)
 using ColOut = std::tuple<double, int, Path>;                   // (rc, release, path)
 using PriceOut = std::tuple<double, bool, long long, std::vector<ColOut>>;
+// price_cols: (rc, release, path in global job ids, cost1, cost2, rc at the eval duals)
+using RichCol = std::tuple<double, int, Path, double, double, double>;
+using RichOut = std::tuple<double, bool, long long, std::vector<RichCol>>;
 
 constexpr double EPS = 1e-9;
 
@@ -83,6 +86,7 @@ public:
             set_bit(keep_.data(), a), set_bit(keep_.data(), b);
         }
         if (same.size() > 64) throw std::invalid_argument("more than 64 same pairs");
+        same_empty_ = same.empty();
         toggle_.assign(n_, 0);
         for (size_t s = 0; s < same.size(); ++s) {
             auto [a, b] = same[s];
@@ -152,6 +156,57 @@ public:
 
     int n_jobs() const { return n_; }
 
+    // Per local job: its global id and cost terms (an arc of job i started
+    // at t adds c1a[i] + c1b[i] * t to f1 and c2[i] to f2), so price_cols
+    // can hand back finished columns.
+    void set_info(std::vector<int> job_ids, std::vector<double> c1a, std::vector<double> c1b,
+                  std::vector<double> c2) {
+        if ((int)job_ids.size() != n_ || (int)c1a.size() != n_ || (int)c1b.size() != n_
+            || (int)c2.size() != n_)
+            throw std::invalid_argument("info length != n");
+        gid_ = std::move(job_ids), c1a_ = std::move(c1a), c1b_ = std::move(c1b), c2_ = std::move(c2);
+    }
+
+    // price(), then each column with its global path, cost1, cost2 and its
+    // reduced cost at a second dual vector (eA, eB, e_sources, e_first;
+    // NaN when eA is empty) — what column generation filters smoothed
+    // columns by.
+    RichOut price_cols(const std::vector<double>& A, const std::vector<double>& B,
+                       const std::vector<std::pair<int, double>>& sources, int max_cols,
+                       double tol, long long max_labels, double first_cost,
+                       const std::vector<double>& cut_cost, const std::vector<double>& eA,
+                       const std::vector<double>& eB,
+                       const std::vector<std::pair<int, double>>& e_sources, double e_first) {
+        if ((int)gid_.size() != n_) throw std::invalid_argument("set_info not called");
+        const bool ev = !eA.empty();
+        if (ev && ((int)eA.size() != n_ || (int)eB.size() != n_))
+            throw std::invalid_argument("eval dual vector length != n");
+        auto [min_lb, exact, n_labels, raw] =
+            price(A, B, sources, max_cols, tol, max_labels, first_cost, cut_cost);
+        std::vector<RichCol> out;
+        out.reserve(raw.size());
+        for (auto& [rc, release, path] : raw) {
+            double c1 = 0.0, c2 = 0.0, er = 0.0;
+            for (auto& [i, t] : path) {
+                c1 += c1a_[i] + c1b_[i] * t;
+                c2 += c2_[i];
+                if (ev) er += eA[i] + eB[i] * t;
+                i = gid_[i];
+            }
+            if (ev) {
+                er += e_first;
+                double src = std::numeric_limits<double>::infinity();
+                for (auto [r, c] : e_sources)
+                    if (r == release) src = c;
+                er += src;
+            } else {
+                er = std::numeric_limits<double>::quiet_NaN();
+            }
+            out.emplace_back(rc, release, std::move(path), c1, c2, er);
+        }
+        return {min_lb, exact, n_labels, std::move(out)};
+    }
+
     // Reduced-cost fixing: every arc (i, t) whose cheapest path through it —
     // repeats allowed, first_cost ignored, so a lower bound on any column
     // using it — has reduced cost >= threshold.
@@ -192,6 +247,10 @@ public:
 
 private:
     int H_, n_, nw_, nc_ = 0;
+    bool same_empty_ = true;
+    long long label_hint_ = 0;
+    std::vector<int> gid_;
+    std::vector<double> c1a_, c1b_, c2_;   // labels of the previous call: the arena's reserve
     double first_ = 0.0;
     std::vector<u64> inS_, inM_;   // per job: cuts whose S / M contain it
     std::vector<double> ccost_;
@@ -204,49 +263,76 @@ private:
     }
     static void set_bit(u64* m, int i) { m[i >> 6] |= u64(1) << (i & 63); }
     static bool has_bit(const u64* m, int i) { return (m[i >> 6] >> (i & 63)) & 1; }
-
     template <int NW>
+    static bool only_bit(const u64* m, int i) {
+        for (int w = 0; w < NW; ++w)
+            if (m[w] != (w == (i >> 6) ? u64(1) << (i & 63) : 0)) return false;
+        return true;
+    }
+
+    // Label storage for path reconstruction and column output. Dominance
+    // works on compact Ent copies (below), kept contiguous in the active set
+    // and the buckets, so the hot scans read memory in order.
     struct Arena {
         std::vector<double> cost;
         std::vector<int> pred, job, start;
-        std::vector<u64> pend, mask, cs;
         std::vector<char> alive;
-        double first = 0.0;   // paid by an empty (source) label's first arc
-        const double* ccost = nullptr;
-        int add(double c, int pr, int j, int s, u64 pd, u64 cst, const u64* m) {
+        int add(double c, int pr, int j, int s) {
             cost.push_back(c), pred.push_back(pr), job.push_back(j), start.push_back(s);
-            pend.push_back(pd), cs.push_back(cst), alive.push_back(1);
-            mask.insert(mask.end(), m, m + NW);
+            alive.push_back(1);
             return (int)cost.size() - 1;
         }
-        const u64* m(int id) const { return &mask[(size_t)id * NW]; }
-        void pop() {
-            cost.pop_back(), pred.pop_back(), job.pop_back(), start.pop_back();
-            pend.pop_back(), cs.pop_back(), alive.pop_back();
-            mask.resize(mask.size() - NW);
-        }
-        // a dominates b: cost <= (plus the cuts a may still pay and b not),
-        // mask(a) subset of mask(b), same pending parity. An empty label
-        // still owes `first` on its first arc, so it competes at cost +
-        // first against non-empty labels.
-        bool dom(int a, int b) const {
-            double ca = cost[a] + (job[a] < 0 && job[b] >= 0 ? first : 0.0);
-            if (ca > cost[b] + EPS || pend[a] != pend[b]) return false;
-            for (u64 x = cs[a] & ~cs[b]; x; x &= x - 1) {
-                ca += ccost[__builtin_ctzll(x)];
-                if (ca > cost[b] + EPS) return false;
-            }
-            const u64 *ma = m(a), *mb = m(b);
-            for (int w = 0; w < NW; ++w)
-                if (ma[w] & ~mb[w]) return false;
-            return true;
+        void reserve(size_t n) {
+            cost.reserve(n), pred.reserve(n), job.reserve(n), start.reserve(n), alive.reserve(n);
         }
     };
+
+    // One label's dominance state: cost, memory mask, whether it is an
+    // empty (source) label, pending same-pair parity and cut state bits,
+    // and its arena id.
+    template <int NW>
+    struct Ent {
+        double cost;
+        int id;
+        int src;
+        u64 pend, cs;
+        u64 mask[NW];
+    };
+
+    // a dominates b: cost <= (plus the cuts a may still pay and b not),
+    // mask(a) subset of mask(b), same pending parity. An empty label still
+    // owes `first` on its first arc, so it competes at cost + first against
+    // non-empty labels. PLAIN (no cuts, no same pairs): pend and cs are 0.
+    template <int NW, bool PLAIN>
+    bool dom(const Ent<NW>& a, const Ent<NW>& b) const {
+        double ca = a.cost + (a.src && !b.src ? first_ : 0.0);
+        if (ca > b.cost + EPS) return false;
+        if constexpr (!PLAIN) {
+            if (a.pend != b.pend) return false;
+            for (u64 x = a.cs & ~b.cs; x; x &= x - 1) {
+                ca += ccost_[__builtin_ctzll(x)];
+                if (ca > b.cost + EPS) return false;
+            }
+        }
+        u64 bad = 0;
+        for (int w = 0; w < NW; ++w) bad |= a.mask[w] & ~b.mask[w];
+        return bad == 0;
+    }
 
     template <int NW>
     PriceOut run(const std::vector<double>& A, const std::vector<double>& B,
                  const std::vector<std::pair<int, double>>& sources, int max_cols, double tol,
                  long long max_labels) {
+        // Without cuts or same pairs every label's pending and cut state is 0.
+        if (nc_ == 0 && same_empty_) return run_impl<NW, true>(A, B, sources, max_cols, tol, max_labels);
+        return run_impl<NW, false>(A, B, sources, max_cols, tol, max_labels);
+    }
+
+    template <int NW, bool PLAIN>
+    PriceOut run_impl(const std::vector<double>& A, const std::vector<double>& B,
+                      const std::vector<std::pair<int, double>>& sources, int max_cols,
+                      double tol, long long max_labels) {
+        using E = Ent<NW>;
         const double INF = std::numeric_limits<double>::infinity();
         const double thr = -tol;
         // completion bound g(t), repeats allowed
@@ -257,85 +343,97 @@ private:
             g[t] = v;
         }
 
-        Arena<NW> L;
-        L.first = first_;
-        L.ccost = ccost_.data();
-        std::vector<std::vector<int>> bucket(H_ + 1);
-        std::vector<int> active, cand;
+        Arena L;
+        L.reserve(std::min<long long>(label_hint_ + label_hint_ / 4 + 64, max_labels));
+        std::vector<std::vector<E>> bucket(H_ + 1);
+        std::vector<E> active, local;
+        std::vector<int> cand;
         double pruned_min = INF;     // lower bound over everything not enumerated
         double best = INF;           // best complete consistent label
         bool exact = true;
-        u64 zero[NW] = {0};
-        u64 nm[NW];
 
-        auto insert = [&](int t2, double c, int pr, int j, int s, u64 pd, u64 cst, const u64* m) {
-            // dominance within the arrivals of slot t2
+        // Bucket insertion (dominance within the arrivals of slot t2). A
+        // candidate is first checked against the earlier survivors of the
+        // same (slot, job) — scanned cheapest first, with masks drawn from
+        // that job's small memory, they dominate nearly every candidate —
+        // and takes an arena slot only if it survives.
+        auto insert = [&](int t2, E& x, int pr, int j, int s, bool ext) -> bool {
+            if (ext)
+                for (const E& y : local)
+                    if (L.alive[y.id] && dom<NW, PLAIN>(y, x)) return false;
             auto& bk = bucket[t2];
-            int id = L.add(c, pr, j, s, pd, cst, m);
             for (size_t k = 0; k < bk.size();) {
-                int o = bk[k];
-                if (L.dom(o, id)) {
-                    L.pop();
-                    return;
-                }
-                if (L.dom(id, o)) {
-                    L.alive[o] = 0;
+                if (dom<NW, PLAIN>(bk[k], x)) return false;
+                if (dom<NW, PLAIN>(x, bk[k])) {
+                    L.alive[bk[k].id] = 0;
                     bk[k] = bk.back();
                     bk.pop_back();
                 } else {
                     ++k;
                 }
             }
-            bk.push_back(id);
+            x.id = L.add(x.cost, pr, j, s);
+            bk.push_back(x);
+            if (ext) local.push_back(x);
+            return true;
         };
 
-        for (auto [r, c] : sources) insert(std::min(std::max(r, 0), H_), c, -1, -1, r, 0, 0, zero);
+        for (auto [r, c] : sources) {
+            E x{};
+            x.cost = c, x.src = 1;
+            insert(std::min(std::max(r, 0), H_), x, -1, -1, r, false);
+        }
 
+        auto by_cost = [](const E& x, double v) { return x.cost < v; };
         for (int t = 0; t <= H_; ++t) {
-            // merge this slot's arrivals into the active set
-            for (int id : bucket[t]) {
-                if (!L.alive[id]) continue;
+            // Merge this slot's arrivals. `active` stays sorted by cost: a
+            // label that dominates x costs at most x.cost + EPS, one x
+            // dominates at least x.cost - EPS (an empty label pays `first`
+            // on top, which only makes it costlier).
+            for (E& x : bucket[t]) {
+                const double c = x.cost;
+                size_t hi = std::upper_bound(active.begin(), active.end(), c + EPS,
+                                             [](double v, const E& y) { return v < y.cost; })
+                            - active.begin();
                 bool dominated = false;
-                for (int a : active)
-                    if (L.dom(a, id)) { dominated = true; break; }
-                if (dominated) { L.alive[id] = 0; continue; }
-                for (size_t k = 0; k < active.size();) {
-                    if (L.dom(id, active[k])) {
-                        L.alive[active[k]] = 0;
-                        active[k] = active.back();
-                        active.pop_back();
-                    } else {
-                        ++k;
-                    }
+                for (size_t k = 0; k < hi; ++k)
+                    if (dom<NW, PLAIN>(active[k], x)) { dominated = true; break; }
+                if (dominated) { L.alive[x.id] = 0; continue; }
+                size_t lo = std::lower_bound(active.begin(), active.end(), c - EPS, by_cost)
+                            - active.begin();
+                size_t w = lo;
+                for (size_t k = lo; k < active.size(); ++k) {
+                    if (dom<NW, PLAIN>(x, active[k])) L.alive[active[k].id] = 0;
+                    else active[w++] = active[k];
                 }
-                active.push_back(id);
-                if (L.pend[id] == 0) {
-                    best = std::min(best, L.cost[id]);
-                    if (L.cost[id] < thr) cand.push_back(id);
+                active.resize(w);
+                active.insert(std::lower_bound(active.begin() + lo, active.end(), c, by_cost), x);
+                if (x.pend == 0) {
+                    best = std::min(best, c);
+                    if (c < thr) cand.push_back(x.id);
                 }
             }
-            bucket[t].clear();
-            bucket[t].shrink_to_fit();
+            std::vector<E>().swap(bucket[t]);
             // retire labels that can no longer improve
-            for (size_t k = 0; k < active.size();) {
-                int a = active[k];
-                double lb = L.cost[a] + g[t];
-                if (lb >= thr || t == H_) {
-                    if (lb >= thr) pruned_min = std::min(pruned_min, lb);
-                    active[k] = active.back();
-                    active.pop_back();
-                } else {
-                    ++k;
+            {
+                size_t w = 0;
+                for (size_t k = 0; k < active.size(); ++k) {
+                    double lb = active[k].cost + g[t];
+                    if (lb >= thr || t == H_) {
+                        if (lb >= thr) pruned_min = std::min(pruned_min, lb);
+                    } else {
+                        active[w++] = active[k];
+                    }
                 }
+                active.resize(w);
             }
             if (t == H_ || !exact) break;
             if (at_[t].empty()) continue;
-            // Cheapest first: an extension costs at least cost + arc + g(t2)
-            // (first_cost and cut costs are >= 0), so the first label whose
-            // optimistic bound fails ends the scan for this arc — that bound
-            // also lower-bounds every later label's, keeping min_lb valid.
-            std::sort(active.begin(), active.end(),
-                      [&](int x, int y) { return L.cost[x] < L.cost[y]; });
+            // Cheapest first (active is sorted): an extension costs at least
+            // cost + arc + g(t2) (first_cost and cut costs are >= 0), so the
+            // first label whose optimistic bound fails ends the scan for this
+            // arc — that bound also lower-bounds every later label's, keeping
+            // min_lb valid.
             for (int i : at_[t]) {
                 const int t2 = t + p_[i];
                 const double arc = A[i] + B[i] * t;
@@ -343,44 +441,58 @@ private:
                 const u64* ret = &retain_[(size_t)i * NW];
                 const u64* dif = &differ_[(size_t)i * NW];
                 const u64 cS = inS_[i], cM = inM_[i];
+                const int iw = i >> 6;
+                const u64 ib = u64(1) << (i & 63);
+                local.clear();
                 for (size_t k = 0; k < active.size(); ++k) {
-                    int a = active[k];
-                    if (L.cost[a] + rest >= thr) {
-                        pruned_min = std::min(pruned_min, L.cost[a] + rest);
+                    const E& a = active[k];
+                    if (a.cost + rest >= thr) {
+                        pruned_min = std::min(pruned_min, a.cost + rest);
                         break;
                     }
-                    const u64* ma = L.m(a);
-                    if (has_bit(ma, i)) continue;
-                    bool clash = false;
-                    for (int w = 0; w < NW; ++w)
-                        if (ma[w] & dif[w]) { clash = true; break; }
+                    if (a.mask[iw] & ib) continue;
+                    u64 clash = 0;
+                    for (int w = 0; w < NW; ++w) clash |= a.mask[w] & dif[w];
                     if (clash) continue;
-                    double c = L.cost[a] + arc + (L.job[a] < 0 ? first_ : 0.0);
-                    u64 st = L.cs[a] & cM;
-                    for (u64 x = st & cS; x; x &= x - 1) c += ccost_[__builtin_ctzll(x)];
-                    st ^= cS;
-                    double lb = c + g[t2];
+                    E x;
+                    x.cost = a.cost + arc + (a.src ? first_ : 0.0);
+                    x.src = 0;
+                    if constexpr (PLAIN) {
+                        x.pend = 0, x.cs = 0;
+                    } else {
+                        u64 st = a.cs & cM;
+                        for (u64 y = st & cS; y; y &= y - 1) x.cost += ccost_[__builtin_ctzll(y)];
+                        x.cs = st ^ cS;
+                        x.pend = a.pend ^ toggle_[i];
+                    }
+                    double lb = x.cost + g[t2];
                     if (lb >= thr) {
                         pruned_min = std::min(pruned_min, lb);
                         continue;
                     }
                     if ((long long)L.cost.size() >= max_labels) { exact = false; break; }
-                    for (int w = 0; w < NW; ++w) nm[w] = ma[w] & ret[w];
-                    set_bit(nm, i);
-                    insert(t2, c, a, i, t, L.pend[a] ^ toggle_[i], st, nm);
+                    for (int w = 0; w < NW; ++w) x.mask[w] = a.mask[w] & ret[w];
+                    x.mask[iw] |= ib;
+                    const bool src = a.src;
+                    if (insert(t2, x, a.id, i, t, true) && PLAIN && !src && only_bit<NW>(x.mask, i))
+                        break;   // a stored {i}-memory extension dominates every later one
                 }
                 if (!exact) break;
             }
         }
 
         double min_lb = exact ? std::min(best, pruned_min) : -INF;
+        label_hint_ = (long long)L.cost.size();
 
-        std::sort(cand.begin(), cand.end(),
-                  [&](int a, int b) { return L.cost[a] < L.cost[b]; });
+        // the max_cols cheapest distinct candidates: a heap, not a full sort
+        auto costlier = [&](int a, int b) { return L.cost[a] > L.cost[b]; };
+        std::make_heap(cand.begin(), cand.end(), costlier);
         std::vector<ColOut> cols;
         std::unordered_set<std::size_t> seen;
-        for (int id : cand) {
-            if ((int)cols.size() >= max_cols) break;
+        while (!cand.empty() && (int)cols.size() < max_cols) {
+            std::pop_heap(cand.begin(), cand.end(), costlier);
+            const int id = cand.back();
+            cand.pop_back();
             Path path;
             int x = id;
             while (L.job[x] >= 0) {
@@ -410,6 +522,12 @@ PYBIND11_MODULE(_bpcprice, mod) {
              py::arg("differ") = std::vector<std::pair<int, int>>{},
              py::arg("same") = std::vector<std::pair<int, int>>{})
         .def("set_memory", &Pricer::set_memory, py::arg("ng"))
+        .def("set_info", &Pricer::set_info, py::arg("job_ids"), py::arg("c1a"), py::arg("c1b"),
+             py::arg("c2"))
+        .def("price_cols", &Pricer::price_cols, py::arg("A"), py::arg("B"), py::arg("sources"),
+             py::arg("max_cols"), py::arg("tol"), py::arg("max_labels"), py::arg("first_cost"),
+             py::arg("cut_cost"), py::arg("eA"), py::arg("eB"), py::arg("e_sources"),
+             py::arg("e_first"), py::call_guard<py::gil_scoped_release>())
         .def("set_cuts", &Pricer::set_cuts, py::arg("cuts"))
         .def("price", &Pricer::price, py::arg("A"), py::arg("B"), py::arg("sources"),
              py::arg("max_cols") = 10, py::arg("tol") = 1e-6,
