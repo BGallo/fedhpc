@@ -62,7 +62,8 @@ public:
         if (!alive_[j]) return;
         alive_[j] = 0;
         dead_entries_ += col_nnz(j);
-        if (dead_entries_ * 2 > live_entries_ + dead_entries_ && dead_entries_ > 4096) compact_rows();
+        live_entries_ -= col_nnz(j);
+        if (dead_entries_ > live_entries_ && dead_entries_ > 4096) compact_rows();
     }
 
     void set_bounds(int j, double lb, double ub) {
@@ -72,6 +73,8 @@ public:
         lb_[j] = lb, ub_[j] = ub;
     }
 
+    // nonzeros of the live columns
+    long long nnz() const { return live_entries_; }
     double obj(int j) const { return obj_[j]; }
     double lb(int j) const { return lb_[j]; }
     double ub(int j) const { return ub_[j]; }

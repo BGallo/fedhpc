@@ -113,6 +113,8 @@ public:
         d["flips"] = s.flips, d["degenerate"] = s.degenerate, d["refactors"] = s.refactors;
         d["stability_refactors"] = s.stability_refactors, d["perturbations"] = s.perturbations;
         d["cleanups"] = s.cleanups, d["seconds"] = s.seconds;
+        d["row_pivots"] = s.row_pivots, d["col_pivots"] = s.col_pivots;
+        d["sifts"] = s.sifts, d["admitted"] = s.admitted, d["evicted"] = s.evicted;
         return d;
     }
     void reset_stats() { S_.reset_stats(); }
@@ -155,7 +157,10 @@ PYBIND11_MODULE(_fedlp, mod) {
         .def_readwrite("perturb", &Options::perturb)
         .def_readwrite("degenerate_trigger", &Options::degenerate_trigger)
         .def_readwrite("refactor_interval", &Options::refactor_interval)
-        .def_readwrite("max_iter", &Options::max_iter);
+        .def_readwrite("max_iter", &Options::max_iter)
+        .def_readwrite("sifting", &Options::sifting)
+        .def_readwrite("work_min", &Options::work_min)
+        .def_readwrite("work_per_row", &Options::work_per_row);
     py::class_<Solver>(mod, "Solver")
         .def(py::init<const std::vector<std::string>&, const std::vector<double>&>(),
              py::arg("sense"), py::arg("rhs"))

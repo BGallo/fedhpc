@@ -23,6 +23,17 @@
 
 namespace fedlp {
 
+// y -= f * x over n entries: the inverse update's inner loop. Compiled for
+// AVX2 and for the baseline, the right one picked at load time.
+__attribute__((target_clones("avx2", "default")))
+inline void axpy_sub(double* __restrict y, const double* __restrict x, double f, int n) {
+    for (int k = 0; k < n; ++k) y[k] -= f * x[k];
+}
+__attribute__((target_clones("avx2", "default")))
+inline void scale(double* __restrict y, double f, int n) {
+    for (int k = 0; k < n; ++k) y[k] *= f;
+}
+
 class DenseInverse {
 public:
     void reset(int m) {
@@ -103,19 +114,29 @@ public:
     void update(int r, const double* alpha) {
         const int m = m_;
         double* br = &inv_[(size_t)r * m];
-        const double inv = 1.0 / alpha[r];
-        for (int k = 0; k < m; ++k) br[k] *= inv;
+        scale(br, 1.0 / alpha[r], m);
+        // the pivot row of B^-1 is often sparse: then update only its
+        // nonzero columns in every other row
+        nz_.clear();
+        for (int k = 0; k < m; ++k)
+            if (br[k] != 0.0) nz_.push_back(k);
+        const bool sparse = 4 * nz_.size() < (size_t)m;
         for (int i = 0; i < m; ++i) {
             const double f = alpha[i];
             if (i == r || f == 0.0) continue;
             double* bi = &inv_[(size_t)i * m];
-            for (int k = 0; k < m; ++k) bi[k] -= f * br[k];
+            if (sparse) {
+                for (int k : nz_) bi[k] -= f * br[k];
+            } else {
+                axpy_sub(bi, br, f, m);
+            }
         }
     }
 
 private:
     int m_ = 0;
     std::vector<double> inv_;   // row-major
+    std::vector<int> nz_;
 };
 
 }  // namespace fedlp

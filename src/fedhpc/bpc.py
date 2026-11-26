@@ -191,6 +191,22 @@ are active):
 
   Gurobi's per-call overhead is not the bottleneck: its pivot count on
   these degenerate masters is.
+- **fedlp masters** (2026-11-26; ``PricingOptions.master``, default
+  ``"auto"``). A second LP solver for the restricted masters, designed from
+  the literature for column generation masters (``src/fedhpc/_ext/lp``,
+  see its README). It uses Devex with hybrid row/column pivot rows,
+  sifting over a working set of columns, Harris with bound shifting,
+  perturbation plus phase-1 clean-up, and scaled dual tolerances.
+
+  The compiled column generation reaches the LP only through a master
+  interface (``_GurobiMaster`` / ``_FedlpMaster``: ``solve``, ``duals``,
+  ``values``, ``add_columns``, ``keep``, ``integer_heuristic``). The
+  integer heuristic still uses Gurobi, over the current columns.
+
+  On recorded Rm masters fedlp is 1.5-6.4x faster than Gurobi, with about
+  half the pivots, and agrees with it on every objective. ``"auto"`` uses
+  it up to ``_FEDLP_MAX_ROWS`` rows: hard tier 8.8 -> 7.2 s, gap 6.7 ->
+  5.5 s, base 3.7 -> 2.8 s.
 - **RMP heuristic during root column generation**
   (``TREE_DEFAULTS["root_cg_heuristic"]``): at iterations 10, 20, 40, ...
   on a copy of the RMP (1 s cap), so the root's Lagrangian bound prunes
@@ -665,11 +681,17 @@ from collections import Counter
 from dataclasses import dataclass, field, replace
 
 import gurobipy as gp
+import numpy as np
 from gurobipy import GRB
 
 from . import formulations
 from .data import Instance, Job
 from .model import Solution, grid_floor
+
+try:
+    from . import _fedlp  # type: ignore[attr-defined]
+except ImportError:  # extension not built: Gurobi masters only
+    _fedlp = None
 
 try:
     from . import _bpcprice  # type: ignore[attr-defined]
@@ -1533,6 +1555,14 @@ class PricingOptions:
     root-bound hard Rm solves by 40-48% (rm_M2N30_1 48 -> 25 s, rm_M5N50_1
     72 -> 42 s; ``--suite hard``).
 
+    ``master`` — the LP solver of the restricted masters: ``"gurobi"``,
+    ``"fedlp"`` (:mod:`fedhpc._fedlp`, the simplex for column generation
+    masters in ``_ext/lp``; compiled pricing without subset-row cuts only,
+    Gurobi otherwise) or ``"auto"``: fedlp for masters of at most
+    ``_FEDLP_MAX_ROWS`` rows, where its explicit basis inverse wins, else
+    Gurobi (on rm_M10N50_1's 570 rows Gurobi's sparse LU is faster). The
+    integer heuristic always uses Gurobi.
+
     ``purge_checks`` — every 10 column-generation iterations, a non-null
     column found nonbasic with positive reduced cost at this many checks
     in a row leaves the RMP (0, the default, keeps every column); pricing
@@ -1557,6 +1587,7 @@ class PricingOptions:
     sr_depth: int = 0
     sr_min_viol: float = 0.05
     threads: int = 0
+    master: str = "auto"
     purge_checks: int = 0
 
 
@@ -1867,9 +1898,9 @@ def _lagrangian_bound(
     for (mid, r), rho in d.rho.items():
         L += prep.releases[mid][r] * rho
     if d.nu1 is not None:
-        L += d.nu1 * state.bound1.RHS
+        L += d.nu1 * state.bound_rhs[0]
     if d.nu2 is not None:
-        L += d.nu2 * state.bound2.RHS
+        L += d.nu2 * state.bound_rhs[1]
     L += sum(d.beta)   # subset-row cuts, right-hand side 1
     for mid in prep.path_types:
         L += sum(prep.releases[mid].values()) * mins[mid]
@@ -1878,13 +1909,14 @@ def _lagrangian_bound(
         for col in statics_by_job.get(jid, ()):
             best = min(best, _column_rc(col, d, w1, w2))
         L += min(0.0, best)
-    for mid, zvar in state.z.items():
+    for mid in state.z:
+        zlb, zub = state.z_bounds[mid]
         U = fixed_cost[mid]
         rc = w2 * U - (d.nu2 or 0.0) * U + sum(
             th for (_jid, m2), th in d.theta.items() if m2 == mid)
         if mid in d.eta:
             rc += sum(prep.releases[mid].values()) * d.eta[mid]
-        L += rc * (zvar.LB if rc >= 0 else zvar.UB)
+        L += rc * (zlb if rc >= 0 else zub)
     return L
 
 
@@ -1937,6 +1969,11 @@ class _RmpState:
     # columns taken out of the RMP by purging (_run_cg_compiled): still
     # inherited by children and pooled, and pricing may regenerate them
     purged: list[Column] = field(default_factory=list)
+    # the LP behind the rows above (_GurobiMaster or _FedlpMaster); the
+    # compiled column generation goes through it only
+    master: object = None
+    bound_rhs: tuple = (None, None)     # right-hand sides of bound1 / bound2
+    z_bounds: dict = field(default_factory=dict)   # type -> (lb, ub) of z_m
 
 
 def _add_column_var(
@@ -2034,13 +2071,23 @@ def _build_rmp(
     prep: _Prep | None = None,
     activation: bool = False,
     lm_cuts: tuple[_LmCut, ...] = (),
+    master: str = "gurobi",
 ) -> tuple[gp.Model, _RmpState]:
     """The restricted master. ``activation`` adds, per fixed-cost path type
     ``m`` with ``N_m`` instances, ``sum_{p non-null on m} lambda_p <= N_m z_m``
     (dual ``eta_m``): valid, and with ``N_m = 1`` (e.g. Rm machines) it puts
     ``U_m`` into the column cost as Chen et al.'s master does, which the
-    per-job rows alone do not. Only the compiled pricing prices its dual."""
+    per-job rows alone do not. Only the compiled pricing prices its dual.
+
+    ``master="fedlp"`` builds the same rows and columns in fedlp instead
+    (:func:`_build_rmp_fedlp`; no subset-row cuts) and returns its
+    :class:`_FedlpMaster` in place of the Gurobi model."""
     prep = prep or _prepare(inst)
+    if master == "fedlp":
+        if cuts or lm_cuts:
+            raise ValueError("the fedlp master does not take subset-row cuts")
+        return _build_rmp_fedlp(inst, weight1, weight2, bound1_value, bound2_value, big_m,
+                                extra_columns, forbidden_types, forced_types, prep, activation)
     formulations.configure_env()
     mdl = gp.Model("bpc-rmp", env=formulations._shared_env)
     mdl.setParam("OutputFlag", 0)
@@ -2165,7 +2212,235 @@ def _build_rmp(
         state.vars.append(var)
 
     mdl.update()
+    state.master = _GurobiMaster(mdl, (inst, weight1, weight2, bound1_value, bound2_value))
+    state.bound_rhs = (bound1_value, bound2_value)
+    state.z_bounds = {m: (v.LB, v.UB) for m, v in z.items()}
     return mdl, state
+
+
+def _fixed_cost_rows(inst: Instance, prep: _Prep, activation: bool):
+    """The fixed-cost link rows ``(job, type)`` and activation types of
+    :func:`_build_rmp`, in its order."""
+    links = [(j.id, itype.id) for itype in _fixed_cost_types(inst)
+             for j in inst.jobs if itype.id in inst.F[j.id]]
+    act = [itype.id for itype in _fixed_cost_types(inst) if activation and itype.id in prep.releases]
+    return links, act
+
+
+def _build_rmp_fedlp(inst, weight1, weight2, bound1_value, bound2_value, big_m, extra_columns,
+                     forbidden_types, forced_types, prep, activation):
+    """:func:`_build_rmp`'s master in fedlp: the same rows and columns, in
+    the same order. Rows are integer indices in the returned state."""
+    if _fedlp is None:
+        raise RuntimeError("the _fedlp extension is not built")
+    sense, rhs = [], []
+
+    def row(sn, b):
+        sense.append(sn), rhs.append(float(b))
+        return len(rhs) - 1
+    coverage = {j.id: row("=", 1.0) for j in inst.jobs}
+    fleet = {(mid, r): row("=", n) for mid in prep.path_types for r, n in sorted(prep.releases[mid].items())}
+    bound1 = row("<", bound1_value) if bound1_value is not None else None
+    bound2 = row("<", bound2_value) if bound2_value is not None else None
+    links, act = _fixed_cost_rows(inst, prep, activation)
+    fixed_link = {k: row("<", 0.0) for k in links}
+    activation_rows = {m: row("<", 0.0) for m in act}
+    state = _RmpState(coverage=coverage, fleet=fleet, bound1=bound1, bound2=bound2, art={},
+                      fixed_link=fixed_link, activation=activation_rows, unbounded=prep.unbounded)
+    lp = _fedlp.Solver(sense, rhs)
+    m = _FedlpMaster(lp, state, (inst, weight1, weight2, bound1_value, bound2_value, big_m,
+                                 forbidden_types, forced_types, prep, activation))
+    state.master = m
+    state.bound_rhs = (bound1_value, bound2_value)
+    for j in inst.jobs:   # artificials
+        state.art[j.id] = lp.add_column(big_m, 0.0, math.inf, [coverage[j.id]], [1.0])
+    for itype in _fixed_cost_types(inst):
+        mid = itype.id
+        idx = [r for (jid, m2), r in fixed_link.items() if m2 == mid]
+        val = [-1.0] * len(idx)
+        if mid in activation_rows:
+            idx.append(activation_rows[mid])
+            val.append(-float(sum(prep.releases[mid].values())))
+        if bound2 is not None:
+            idx.append(bound2)
+            val.append(itype.fixed_cost)
+        lb = 1.0 if mid in forced_types else 0.0
+        ub = 0.0 if mid in forbidden_types else 1.0
+        state.z[mid] = lp.add_column(weight2 * itype.fixed_cost, lb, ub, idx, val)
+        state.z_bounds[mid] = (lb, ub)
+    cols = [Column(type_id=mid, jobs=(), cost1=0.0, cost2=0.0, release=r) for mid, r in fleet]
+    cols += [c for c in extra_columns if c.jobs]
+    m.add_columns(state, cols, weight1, weight2)
+    return m, state
+
+
+class _GurobiMaster:
+    """The restricted master in Gurobi (:func:`_build_rmp`), behind the
+    interface the compiled column generation uses."""
+
+    kind = "gurobi"
+
+    def __init__(self, mdl: gp.Model, args: tuple):
+        self.model, self.args = mdl, args
+
+    def solve(self, state: _RmpState) -> tuple[float, int]:
+        """Optimise; ``(objective, simplex iterations)``."""
+        mdl = self.model
+        mdl.optimize()
+        if mdl.Status == GRB.INFEASIBLE:
+            raise _RmpInfeasible
+        if mdl.Status != GRB.OPTIMAL:
+            raise RuntimeError(f"BPC RMP LP not optimal: status={mdl.Status}")
+        return mdl.ObjVal, int(mdl.IterCount)
+
+    def duals(self, state: _RmpState) -> "_Duals":
+        return _read_duals(state)
+
+    def values(self, state: _RmpState) -> np.ndarray:
+        """The column values, aligned with ``state.columns``."""
+        return np.asarray(self.model.getAttr("X", state.vars)) if state.vars else np.zeros(0)
+
+    def art_total(self, state: _RmpState) -> float:
+        return float(sum(self.model.getAttr("X", list(state.art.values()))))
+
+    def z_values(self, state: _RmpState) -> dict[int, float]:
+        return {m: v.X for m, v in state.z.items()}
+
+    def add_columns(self, state: _RmpState, cols: list[Column], w1: float, w2: float) -> None:
+        for col in cols:
+            state.vars.append(_add_column_var(self.model, col, w1, w2, state,
+                                              name=f"lam[{col.type_id}]_{len(state.columns)}"))
+            state.columns.append(col)
+
+    def keep(self, state: _RmpState, keep: list[bool]) -> None:
+        """Remove the columns whose ``keep`` entry is false."""
+        drop = [v for v, k in zip(state.vars, keep) if not k]
+        if not drop:
+            return
+        self.model.remove(drop)
+        state.columns[:] = [c for c, k in zip(state.columns, keep) if k]
+        state.vars[:] = [v for v, k in zip(state.vars, keep) if k]
+        self.model.update()
+
+    def basis_and_rc(self, state: _RmpState):
+        """``(basic?, reduced cost)`` per column."""
+        vb = self.model.getAttr("VBasis", state.vars)
+        rc = self.model.getAttr("RC", state.vars)
+        return [b == 0 for b in vb], rc
+
+    def integer_heuristic(self, state: _RmpState, time_limit: float, in_place: bool):
+        """:func:`_rmp_integer_heuristic` on the master (``in_place``: its
+        LP state is no longer needed) or on a copy."""
+        inst, w1, w2, b1, b2 = self.args
+        if in_place:
+            return _rmp_integer_heuristic(self.model, state, inst, w1, w2, b1, b2, time_limit)
+        return _rmp_heuristic_on_copy(self.model, state, inst, w1, w2, b1, b2, time_limit)
+
+
+class _FedlpMaster:
+    """The restricted master in fedlp (:func:`_build_rmp_fedlp`). Columns
+    are added in CSC batches; the integer heuristic builds a Gurobi master
+    over the current columns."""
+
+    kind = "fedlp"
+
+    def __init__(self, lp, state: _RmpState, args: tuple):
+        self.lp, self.args = lp, args
+        self._cov = np.array(list(state.coverage.values()), dtype=np.int64)
+        self._fleet = np.array(list(state.fleet.values()), dtype=np.int64)
+        self._link = np.array(list(state.fixed_link.values()), dtype=np.int64)
+        self._act = np.array(list(state.activation.values()), dtype=np.int64)
+
+    def solve(self, state: _RmpState) -> tuple[float, int]:
+        lp = self.lp
+        lp.reset_stats()
+        st = lp.solve()
+        if st == int(_fedlp.Status.INFEASIBLE):
+            raise _RmpInfeasible
+        if st != int(_fedlp.Status.OPTIMAL):
+            raise RuntimeError(f"BPC RMP LP (fedlp) not optimal: status={st}")
+        return lp.objective, int(lp.stats()["iterations"])
+
+    def duals(self, state: _RmpState) -> "_Duals":
+        y = self.lp.duals()
+        return _Duals(
+            sigma=dict(zip(state.coverage, y[self._cov].tolist())),
+            rho=dict(zip(state.fleet, y[self._fleet].tolist())),
+            nu1=float(y[state.bound1]) if state.bound1 is not None else None,
+            nu2=float(y[state.bound2]) if state.bound2 is not None else None,
+            theta=dict(zip(state.fixed_link, np.minimum(y[self._link], 0.0).tolist())) if len(self._link) else {},
+            eta=dict(zip(state.activation, np.minimum(y[self._act], 0.0).tolist())) if len(self._act) else {},
+        )
+
+    def values(self, state: _RmpState) -> np.ndarray:
+        return self.lp.x()[np.asarray(state.vars, dtype=np.int64)] if state.vars else np.zeros(0)
+
+    def art_total(self, state: _RmpState) -> float:
+        x = self.lp.x()
+        return float(sum(x[i] for i in state.art.values()))
+
+    def z_values(self, state: _RmpState) -> dict[int, float]:
+        x = self.lp.x()
+        return {m: float(x[i]) for m, i in state.z.items()}
+
+    def add_columns(self, state: _RmpState, cols: list[Column], w1: float, w2: float) -> None:
+        if not cols:
+            return
+        obj, start, idx, val = [], [0], [], []
+        cov, links, act = state.coverage, state.fixed_link, state.activation
+        b1, b2 = state.bound1, state.bound2
+        for col in cols:
+            fleet = state.fleet.get((col.type_id, col.release))
+            if fleet is None and col.type_id not in state.unbounded:
+                raise ValueError(f"column on type {col.type_id} from release {col.release}: "
+                                 "no such fleet row")
+            if fleet is not None:
+                idx.append(fleet), val.append(1.0)
+            counts = Counter(jid for jid, _t in col.jobs)
+            for jid, n in counts.items():
+                idx.append(cov[jid]), val.append(float(n))
+                link = links.get((jid, col.type_id))
+                if link is not None:
+                    idx.append(link), val.append(float(n))
+            a = act.get(col.type_id)
+            if a is not None and col.jobs:
+                idx.append(a), val.append(1.0)
+            if b1 is not None:
+                idx.append(b1), val.append(col.cost1)
+            if b2 is not None:
+                idx.append(b2), val.append(col.cost2)
+            obj.append(w1 * col.cost1 + w2 * col.cost2)
+            start.append(len(idx))
+        n = len(cols)
+        first = self.lp.add_columns(np.asarray(obj), np.zeros(n), np.full(n, np.inf),
+                                    np.asarray(start, dtype=np.int32), np.asarray(idx, dtype=np.int32),
+                                    np.asarray(val, dtype=np.float64))
+        state.vars.extend(range(first, first + n))
+        state.columns.extend(cols)
+
+    def keep(self, state: _RmpState, keep: list[bool]) -> None:
+        drop = [v for v, k in zip(state.vars, keep) if not k]
+        if not drop:
+            return
+        self.lp.remove_columns(drop)
+        state.columns[:] = [c for c, k in zip(state.columns, keep) if k]
+        state.vars[:] = [v for v, k in zip(state.vars, keep) if k]
+
+    def basis_and_rc(self, state: _RmpState):
+        ids = np.asarray(state.vars, dtype=np.int64)
+        return (self.lp.basis_status()[ids] == 0).tolist(), self.lp.reduced_costs()[ids].tolist()
+
+    def integer_heuristic(self, state: _RmpState, time_limit: float, in_place: bool):
+        """The RMP integer heuristic on a Gurobi master over the current
+        columns (fedlp has no MIP)."""
+        inst, w1, w2, b1, b2, big_m, forbidden_types, forced_types, prep, activation = self.args
+        mdl, gstate = _build_rmp(inst, w1, w2, b1, b2, big_m, extra_columns=state.columns,
+                                 forbidden_types=forbidden_types, forced_types=forced_types,
+                                 prep=prep, activation=activation)
+        try:
+            return _rmp_integer_heuristic(mdl, gstate, inst, w1, w2, b1, b2, time_limit)
+        finally:
+            mdl.dispose()
 
 
 class _RmpInfeasible(Exception):
@@ -2264,12 +2539,13 @@ def _run_cg_compiled(
     up to the same grid point (with the tree's ``1e-3`` margin) more
     columns cannot change what the node proves, and it stops (``"bound"``).
 
-    ``incumbent_cb(mdl, state)`` — called after the RMP solves at iterations
+    ``incumbent_cb(state)`` — called after the RMP solves at iterations
     10, 20, 40, ... (the root uses it for the RMP integer heuristic); it
     returns the search's cutoff, which may have dropped.
     """
     if timers is None:
         timers = {}
+    master = state.master
     pricing = _NodePricing(prep, opts, forbidden, pinned, differ_pairs, same_pairs)
     if state.lm_cuts:
         pricing.set_cuts([cut for cut, _row in state.lm_cuts])
@@ -2334,22 +2610,17 @@ def _run_cg_compiled(
     for it in range(max_iters):
         _check_deadline(deadline)
         t_lp = time.perf_counter()
-        mdl.optimize()
+        rmp, lp_iters = master.solve(state)
         timers["lp_s"] = timers.get("lp_s", 0.0) + time.perf_counter() - t_lp
         timers["cg_iters"] = timers.get("cg_iters", 0) + 1
-        timers["simplex_iters"] = timers.get("simplex_iters", 0) + int(mdl.IterCount)
-        if mdl.Status == GRB.INFEASIBLE:
-            raise _RmpInfeasible
-        if mdl.Status != GRB.OPTIMAL:
-            raise RuntimeError(f"BPC RMP LP not optimal: status={mdl.Status}")
-        rmp = mdl.ObjVal
-        d = _read_duals(state)
+        timers["simplex_iters"] = timers.get("simplex_iters", 0) + lp_iters
+        d = master.duals(state)
         if opts.purge_checks and it % 10 == 9:
-            _purge_columns(mdl, state, keys, idle, opts.purge_checks, tol, timers)
+            _purge_columns(state, keys, idle, opts.purge_checks, tol, timers)
         if incumbent_cb is not None and it + 1 >= next_cb:
             next_cb *= 2
-            if sum(v.X for v in state.art.values()) <= 1e-6:
-                cutoff = min(cutoff, incumbent_cb(mdl, state))
+            if master.art_total(state) <= 1e-6:
+                cutoff = min(cutoff, incumbent_cb(state))
                 if best_lb >= cutoff:
                     timers["lb_pruned"] = timers.get("lb_pruned", 0) + 1
                     return _CGResult(it + 1, "pruned", best_lb, best_lb)
@@ -2380,7 +2651,7 @@ def _run_cg_compiled(
             timers["grid_stops"] = timers.get("grid_stops", 0) + 1
             done = True
         if done:
-            if opts.ng_size is not None and _grow_ng_and_drop(mdl, state, prep, opts):
+            if opts.ng_size is not None and _grow_ng_and_drop(state, prep, opts):
                 pricing.refresh_memory()
                 keys = {_column_key(c) for c in state.columns}
                 timers["ng_rounds"] = timers.get("ng_rounds", 0) + 1
@@ -2390,41 +2661,37 @@ def _run_cg_compiled(
             return finish(it + 1, "converged", rmp)
         for col in new:
             keys.add(_column_key(col))
-            state.vars.append(_add_column_var(mdl, col, weight1, weight2, state,
-                                              name=f"lam[{col.type_id}]_{len(state.columns)}"))
-            state.columns.append(col)
+        master.add_columns(state, new, weight1, weight2)
     raise RuntimeError("BPC column generation did not converge within max_iters")
 
 
-def _purge_columns(mdl: gp.Model, state: _RmpState, keys: set, idle: dict,
+def _purge_columns(state: _RmpState, keys: set, idle: dict,
                    checks: int, tol: float, timers: dict) -> None:
     """Remove from the RMP every non-null column that was nonbasic with
     reduced cost above ``tol`` at ``checks`` consecutive calls (see
     ``PricingOptions.purge_checks``). It moves to ``state.purged`` and
     leaves ``keys``, so pricing can add it again. Call right after a
     solve, before the next model change."""
-    vb = mdl.getAttr("VBasis", state.vars)
-    rc = mdl.getAttr("RC", state.vars)
-    keep_c, keep_v, drop = [], [], []
-    for col, var, b, r in zip(state.columns, state.vars, vb, rc):
+    basic, rc = state.master.basis_and_rc(state)
+    keep = []
+    for col, b, r in zip(state.columns, basic, rc):
         k = _column_key(col)
-        if col.jobs and b != 0 and r > tol:
+        if col.jobs and not b and r > tol:
             n = idle.get(k, 0) + 1
             if n >= checks:
-                drop.append(var)
                 state.purged.append(col)
                 keys.discard(k)
                 idle.pop(k, None)
+                keep.append(False)
                 continue
             idle[k] = n
         else:
             idle.pop(k, None)
-        keep_c.append(col)
-        keep_v.append(var)
-    if drop:
-        mdl.remove(drop)
-        state.columns[:], state.vars[:] = keep_c, keep_v
-        timers["purged"] = timers.get("purged", 0) + len(drop)
+        keep.append(True)
+    n_drop = keep.count(False)
+    if n_drop:
+        state.master.keep(state, keep)
+        timers["purged"] = timers.get("purged", 0) + n_drop
 
 
 def _rc_fixing(
@@ -2458,23 +2725,15 @@ def _rc_fixing(
     return frozenset(out)
 
 
-def _grow_ng_and_drop(mdl: gp.Model, state: _RmpState, prep: _Prep,
-                      opts: PricingOptions) -> bool:
+def _grow_ng_and_drop(state: _RmpState, prep: _Prep, opts: PricingOptions) -> bool:
     """After convergence: if the LP uses repeating columns, grow the
     neighbourhoods against their cycles and remove every repeating column
     from the RMP. Returns whether generation must resume."""
-    used = [c for c, v in zip(state.columns, state.vars) if v.X > 1e-9 and not _is_elementary(c)]
+    x = state.master.values(state)
+    used = [c for c, v in zip(state.columns, x) if v > 1e-9 and not _is_elementary(c)]
     if not used or not _augment_ng(prep, used, opts.ng_max):
         return False
-    keep_cols, keep_vars = [], []
-    for c, v in zip(state.columns, state.vars):
-        if _is_elementary(c):
-            keep_cols.append(c)
-            keep_vars.append(v)
-        else:
-            mdl.remove(v)
-    state.columns[:], state.vars[:] = keep_cols, keep_vars
-    mdl.update()
+    state.master.keep(state, [_is_elementary(c) for c in state.columns])
     return True
 
 
@@ -2798,11 +3057,19 @@ def _solve_node(
         c for c in seed_pool
         if _is_elementary(c) and _column_allowed(c, forbidden, pinned, differ_pairs, same_pairs)
     ]
+    use_fedlp = (opts.master in ("fedlp", "auto") and _fedlp is not None
+                 and _compiled(opts, cuts) and not lm_cuts and opts.sr_cuts == 0)
+    if use_fedlp and opts.master == "auto":
+        links, act = _fixed_cost_rows(inst, prep, True)
+        n_rows = (len(inst.jobs) + sum(len(prep.releases[m]) for m in prep.path_types)
+                  + (bound1_value is not None) + (bound2_value is not None) + len(links) + len(act))
+        use_fedlp = n_rows <= _FEDLP_MAX_ROWS
     mdl, state = _build_rmp(inst, weight1, weight2, bound1_value, bound2_value, big_m,
                              extra_columns=valid_seed,
                              forbidden_types=forbidden_types, forced_types=forced_types,
                              cuts=cuts, prep=prep, activation=_compiled(opts, cuts),
-                             lm_cuts=tuple(lm_cuts) if _compiled(opts, cuts) else ())
+                             lm_cuts=tuple(lm_cuts) if _compiled(opts, cuts) else (),
+                             master="fedlp" if use_fedlp else "gurobi")
 
     def generate() -> _CGResult:
         return _run_column_generation(
@@ -2817,7 +3084,7 @@ def _solve_node(
         separate = (_compiled(opts, cuts) and depth <= opts.sr_depth
                     and min(opts.sr_cuts, 64) > len(lm_cuts))
         for _round in range(opts.sr_rounds if separate else 0):
-            if cg.status == "pruned" or sum(v.X for v in state.art.values()) > 1e-6:
+            if cg.status == "pruned" or state.master.art_total(state) > 1e-6:
                 break
             room = min(opts.sr_cuts, 64) - len(lm_cuts)
             t0 = time.perf_counter()
@@ -2843,9 +3110,10 @@ def _solve_node(
     if cg.status == "pruned":
         return _NodeResult(status="pruned", objective=cg.objective, columns=state.columns + state.purged)
 
-    artificial_total = sum(v.X for v in state.art.values())
+    artificial_total = state.master.art_total(state)
     if artificial_total > 1e-6:
         return _NodeResult(status="infeasible", objective=float("inf"), columns=state.columns + state.purged)
+    xs = state.master.values(state).tolist()
 
     # Aggregate x_jmt = sum of lambda_p over columns placing job at (m,t), and
     # joint_jk = sum of lambda_p over columns placing *both* j and k (any
@@ -2853,18 +3121,18 @@ def _solve_node(
     # two jobs currently are in the fractional solution.
     agg: dict[tuple[int, int, int], float] = {}
     joint: dict[tuple[int, int], float] = {}
-    for col, var in zip(state.columns, state.vars):
-        if not col.jobs or var.X <= 1e-9:
+    for col, xv in zip(state.columns, xs):
+        if not col.jobs or xv <= 1e-9:
             continue
         for job_id, start in col.jobs:
             key = (job_id, col.type_id, start)
-            agg[key] = agg.get(key, 0.0) + var.X
+            agg[key] = agg.get(key, 0.0) + xv
         if len(col.jobs) >= 2:
             job_ids = sorted({jid for jid, _t in col.jobs})
             for i in range(len(job_ids)):
                 for jx in range(i + 1, len(job_ids)):
                     pkey = (job_ids[i], job_ids[jx])
-                    joint[pkey] = joint.get(pkey, 0.0) + var.X
+                    joint[pkey] = joint.get(pkey, 0.0) + xv
 
     # A tight, fixed tolerance for *acceptance* (not the caller's, often-
     # loosened `tol`, which stays fine for RF branching-candidate selection
@@ -2900,8 +3168,8 @@ def _solve_node(
         # tolerance comment above; the same tight bound applies here for the
         # same reason (fixed_cost can be large, amplifying any residual).
         frac_z = [
-            mid for mid, zvar in state.z.items()
-            if _INTEGRALITY_TOL < zvar.X < 1 - _INTEGRALITY_TOL
+            mid for mid, zx in state.master.z_values(state).items()
+            if _INTEGRALITY_TOL < zx < 1 - _INTEGRALITY_TOL
         ]
         if frac_z:
             return _NodeResult(status="fractional", objective=cg.objective,
@@ -2962,10 +3230,7 @@ def _solve_node(
         if deadline is not None:
             heuristic_time_limit = min(heuristic_time_limit,
                                        max(0.0, deadline - time.perf_counter()))
-        result.incumbent = _rmp_integer_heuristic(
-            mdl, state, inst, weight1, weight2, bound1_value, bound2_value,
-            heuristic_time_limit,
-        )
+        result.incumbent = state.master.integer_heuristic(state, heuristic_time_limit, in_place=True)
     result.fixed = cg.fixed
     return result
 
@@ -3201,6 +3466,9 @@ def _add_lm_cuts(mdl: gp.Model, state: _RmpState, cuts: list[_LmCut]) -> None:
 _POOL_CAP = 50_000   # columns kept across solves (pool_out)
 
 # _branch_and_price's tree options when not given (as DEFAULT_PRICING).
+# Largest master (rows) PricingOptions(master="auto") gives fedlp; see there.
+_FEDLP_MAX_ROWS = 400
+
 # Seconds per RMP integer heuristic run during the root's column generation
 # (see _run_cg_compiled's incumbent_cb); capped by heuristic_time_limit.
 ROOT_CG_HEURISTIC_LIMIT = 1.0
@@ -3392,7 +3660,7 @@ def _branch_and_price(
     n_nodes = 0
     lm_cuts: list[_LmCut] = []   # limited-memory SR cuts, valid in the whole tree
 
-    def root_incumbent(mdl: gp.Model, state: _RmpState) -> float:
+    def root_incumbent(state: _RmpState) -> float:
         """The RMP integer heuristic during the root's column generation, so
         its Lagrangian bound can prune against a good incumbent early."""
         nonlocal best_obj, best_assignment
@@ -3400,8 +3668,7 @@ def _branch_and_price(
         if deadline is not None:
             limit = min(limit, max(0.0, deadline - time.perf_counter()))
         t0 = time.perf_counter()
-        res = _rmp_heuristic_on_copy(mdl, state, inst, weight1, weight2,
-                                     bound1_value, bound2_value, limit)
+        res = state.master.integer_heuristic(state, limit, in_place=False)
         timers["cg_heur_s"] = timers.get("cg_heur_s", 0.0) + time.perf_counter() - t0
         timers["cg_heur_runs"] = timers.get("cg_heur_runs", 0) + 1
         if res is not None and res[0] < best_obj:

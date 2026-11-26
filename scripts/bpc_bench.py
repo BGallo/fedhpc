@@ -292,7 +292,7 @@ def _pricing(spec: str | None) -> bpc.PricingOptions:
         k, v = part.split("=")
         if v.lower() == "none":
             kw[k] = None
-        elif k == "engine":
+        elif k in ("engine", "master"):
             kw[k] = v
         else:
             kw[k] = float(v) if "." in v else int(v)

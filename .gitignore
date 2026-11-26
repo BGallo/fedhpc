@@ -43,3 +43,6 @@ profile_logs/
 # exactly from their names; the manifest with their sha256 is tracked
 data/generated/*.json
 !data/generated/manifest.json
+
+# VRPSolver branch-and-price tree dump (vrpsolver/run.jl)
+BaPTree.dot
