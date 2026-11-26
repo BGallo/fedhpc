@@ -42,7 +42,8 @@ public:
     virtual void ftran_inplace(double* x) = 0;
     virtual void btran_inplace(double* y) = 0;
     virtual const double* row(int r) = 0;                          // e_r' B^-1
-    virtual void update(int r, const double* alpha) = 0;
+    // false: the factor could not absorb the update (refactorise)
+    virtual bool update(int r, const double* alpha) = 0;
     virtual const char* name() const = 0;
 };
 
@@ -72,7 +73,10 @@ public:
         std::copy(tmp_.begin(), tmp_.end(), y);
     }
     const double* row(int r) override { return inv_.row(r); }
-    void update(int r, const double* alpha) override { inv_.update(r, alpha); }
+    bool update(int r, const double* alpha) override {
+        inv_.update(r, alpha);
+        return true;
+    }
     const char* name() const override { return "dense"; }
 
 private:
@@ -149,7 +153,10 @@ public:
         apply_btran(rowbuf_.data());
         return rowbuf_.data();
     }
-    void update(int r, const double* alpha) override { push_eta(r, alpha); }
+    bool update(int r, const double* alpha) override {
+        push_eta(r, alpha);
+        return true;
+    }
     const char* name() const override { return "sparse"; }
     size_t etas() const { return piv_.size(); }
     size_t eta_nnz() const { return idx_.size(); }

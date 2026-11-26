@@ -269,7 +269,9 @@ class LPFirstOptions:
     faster (see the module docstring).
 
     ``backend`` — LP/MIP solver for every master and MIP: ``"gurobi"`` or
-    ``"highs"`` (:mod:`fedhpc.lp_backend`).
+    ``"highs"`` (:mod:`fedhpc.lp_backend`). ``lp_backend`` — the column
+    generation masters' LP solver instead (``"fedlp"``, ``"gurobi"``,
+    ``"highs"``; None: ``backend``); the MIPs keep ``backend``.
 
     Proof first (``quick_proof``): after the α-point schedules, the
     restricted-master MIP (for up to ``quick_rmp_time`` seconds) and, when at
@@ -306,6 +308,7 @@ class LPFirstOptions:
     lns_sweeps: int = 2
     tree: bool = True
     backend: str = "gurobi"
+    lp_backend: str | None = None
     aggregate_lp: bool = False
     node_eligible: int = 60_000
     node_mip_time: float = 60.0
@@ -1205,7 +1208,7 @@ def _cg_aggregated(ti: _TI, agg: _TI, full_master: "_Master", w1, w2, b1, b2, bi
     off = agg.offset
     off_sum = float(off.sum())
     b1a = None if b1 is None else b1 - off_sum
-    m = _Master(agg, w1, w2, b1a, b2, big_m, cover_rhs=agg.mult, backend=opts.backend,
+    m = _Master(agg, w1, w2, b1a, b2, big_m, cover_rhs=agg.mult, backend=opts.lp_backend or opts.backend,
                 threads=opts.lp_threads)
     seed = set(agg.agg_of[np.asarray(full_master.arcs, dtype=np.int64)].tolist())
     m.add(sorted(seed))
@@ -1311,7 +1314,7 @@ class _Tree:
             st["tree_nodes"] += 1
             if master is None:
                 master = _Master(ti, w1, w2, self.b1, self.b2, self.big_m,
-                                 backend=opts.backend, threads=opts.lp_threads)
+                                 backend=opts.lp_backend or opts.backend, threads=opts.lp_threads)
                 seed = set(cols[allow[cols]].tolist())
                 if best is not None:
                     seed.update(a for a in ti.arcs_of(best) if allow[a])
@@ -1436,12 +1439,15 @@ def solve_lpfirst(
 
     # in scaled units; _cg raises it (up to 1e6 more) while artificials stay
     big_m = 1e3 * max(1.0, float(np.max(w1 * ti.C1 + w2 * ti.C2)))
-    master = _Master(ti, w1, w2, b1, b2, big_m, backend=opts.backend, threads=opts.lp_threads)
+    master = _Master(ti, w1, w2, b1, b2, big_m, backend=opts.lp_backend or opts.backend, threads=opts.lp_threads)
     seed = set(column_pool or ())
     for a in seed_schedules:
         seed.update(ti.arcs_of(a))
     seed.update(np.nonzero(~ti.capped)[0].tolist())
     master.add(sorted(seed))
+    if best is not None and hasattr(master.be, "crash_hint"):
+        col = master.col_of()   # start the LP from the incumbent: a feasible basis
+        master.be.crash_hint([col[a] for a in ti.arcs_of(best) if a in col])
 
     # --- column generation, stopped by the certificate when possible
     agg = None

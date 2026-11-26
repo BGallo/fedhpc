@@ -34,6 +34,7 @@
 #include <string>
 
 #include "factor.hpp"
+#include "lu_ft.hpp"
 #include "model.hpp"
 
 namespace fedlp {
@@ -42,6 +43,7 @@ enum class Status : int { Optimal = 0, Infeasible = 1, Unbounded = 2, IterationL
 
 struct Options {
     double primal_tol = 1e-9;    // primal feasibility
+    double feas_accept = 1e-7;   // violations no pivot can repair are accepted (snapped) below this
     double dual_tol = 1e-9;      // optimality, scaled by 1 + |c_j|
     double pivot_tol = 1e-7;     // smallest acceptable pivot element
     double perturb = 5e-7;       // relative size of anti-degeneracy perturbation
@@ -53,11 +55,18 @@ struct Options {
     // a pricing pass with the current duals admits them. The working set is
     // capped at max(work_min, work_per_row * rows) nonbasic structurals.
     // Basis factor: 0 auto (the explicit dense inverse up to
-    // dense_max_rows rows, else the sparse product form), 1 dense, 2 sparse.
+    // dense_max_rows rows, else the sparse LU), 1 dense, 2 sparse product
+    // form, 3 sparse LU with Forrest-Tomlin updates. On lpfirst's 964-job
+    // masters (~1.5k rows) the LU's LP took 0.59 s, the product form's
+    // 1.94 s and Gurobi's 1.02 s; on bpc's masters the two sparse ones tie.
     int factor = 0;
+    int lu_refactor_interval = 100;   // Forrest-Tomlin updates before refactorising
     int dense_max_rows = 128;
     int sparse_refactor_interval = 64;   // etas appended before refactorising
     bool sifting = true;
+    // Dual simplex when a solve starts primal infeasible but dual feasible
+    // (bounds changed, nothing appended: a re-targeted branch-and-price node)
+    bool dual = true;
     int work_min = 500;
     double work_per_row = 3.0;
 };
@@ -67,6 +76,7 @@ struct Stats {
     long long refactors = 0, stability_refactors = 0, perturbations = 0, cleanups = 0;
     long long row_pivots = 0, col_pivots = 0;   // how pivot rows were computed
     long long sifts = 0, admitted = 0, evicted = 0;
+    long long dual_iterations = 0, dual_solves = 0;
     double seconds = 0.0;
 };
 
@@ -93,7 +103,16 @@ public:
         st_[j] = DEAD;
         x_[j] = 0.0;
     }
+    // after Model::set_obj(j): a nonbasic column's reduced cost shifts by
+    // the change, a basic one's changes the duals (recomputed at the solve)
+    void cost_changed(int j, double old) {
+        if (st_[j] == DEAD || !basis_valid_) return;
+        if (st_[j] == BASIC) refresh_duals_ = true;
+        else d_[j] += M_.obj(j) - old;
+        cand_valid_ = false;
+    }
     void bounds_changed(int j) {
+        cand_valid_ = false;
         if (st_[j] == DEAD || st_[j] == BASIC) return;   // a basic one is fixed by phase 1
         const double nx = rest_value(j, st_[j]);
         st_[j] = std::isfinite(M_.lb(j)) && nx == M_.lb(j) ? AT_LB : AT_UB;
@@ -106,6 +125,8 @@ public:
         sync_columns();
         next_valid_ = false;
         degenerate_ = 0;
+        if (refresh_duals_ && basis_valid_) compute_y(), compute_d();
+        refresh_duals_ = false;
         Status s = solve_impl();
         stats_.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         return s;
@@ -125,6 +146,8 @@ public:
     const Stats& stats() const { return stats_; }
     void reset_stats() { stats_ = Stats(); }
     void invalidate_basis() { basis_valid_ = false; }
+    // columns the next crash should make basic (model indices)
+    void set_hint(std::vector<int> cols) { hint_ = std::move(cols); }
 
 private:
     Model& M_;
@@ -145,9 +168,14 @@ private:
     // new and recently attractive columns); in_work_ marks membership
     std::vector<int> work_;
     std::vector<char> in_work_;
+    std::vector<int> cand_;      // attractive working columns (select_devex)
+    std::vector<char> in_cand_;
+    bool cand_valid_ = false;
     bool perturbed_ = false;
     int since_refactor_ = 0;
     int degenerate_ = 0;        // degenerate pivots in a row, this solve
+    bool refresh_duals_ = false;   // a basic column's cost changed
+    std::vector<int> hint_;        // crash hint (set_hint)
     int next_q_ = -1;           // entering column chosen by the last fused pivot row
     bool next_valid_ = false;
     unsigned long long rng_ = 0x2545F4914F6CDD1Dull;
@@ -183,7 +211,7 @@ private:
     void add_var(int j) {
         st_.push_back(DEAD), pos_.push_back(-1);
         x_.push_back(0.0), d_.push_back(0.0), w_.push_back(1.0), pl_.push_back(0.0), pu_.push_back(0.0);
-        acc_.push_back(0.0), in_touched_.push_back(0), in_work_.push_back(0);
+        acc_.push_back(0.0), in_touched_.push_back(0), in_work_.push_back(0), in_cand_.push_back(0);
         if (!M_.alive(j)) return;
         admit(j);   // a new column is a candidate
         const char s = std::isfinite(M_.lb(j)) ? AT_LB : AT_UB;
@@ -197,6 +225,7 @@ private:
 
     void admit(int j) {
         if (!in_work_[j]) in_work_[j] = 1, work_.push_back(j);
+        note_attractive(j);
     }
 
     // nonbasic j moved by delta: x_B -= delta B^-1 a_j
@@ -222,6 +251,20 @@ private:
         head_.assign(m, -1);
         for (int r = 0; r < m; ++r)
             if (M_.sense(r) != 'E') head_[r] = r;
+        // hinted columns (e.g. a known feasible solution's) take an equality
+        // row they touch, before the singleton crash
+        for (int j : hint_) {
+            if (j < m || j >= n || st_[j] == DEAD) continue;
+            const int* ix = M_.col_idx(j);
+            const double* v = M_.col_val(j);
+            for (int k = 0, nz = M_.col_nnz(j); k < nz; ++k) {
+                const int r = ix[k];
+                if (M_.sense(r) == 'E' && head_[r] < 0 && v[k] != 0.0) {
+                    head_[r] = j;
+                    break;
+                }
+            }
+        }
         for (int j = m; j < n; ++j) {
             if (st_[j] == DEAD || M_.col_nnz(j) != 1) continue;
             const int r = M_.col_idx(j)[0];
@@ -236,8 +279,9 @@ private:
         for (int j = 0; j < n; ++j)
             if (st_[j] != DEAD) admit(j);
         perturbed_ = false;
-        const bool sparse = opt.factor == 2 || (opt.factor == 0 && m > opt.dense_max_rows);
-        if (sparse) fac_ = std::make_unique<SparsePFI>();
+        if (opt.factor == 3 || (opt.factor == 0 && m > opt.dense_max_rows))
+            fac_ = std::make_unique<LuFT>();
+        else if (opt.factor == 2) fac_ = std::make_unique<SparsePFI>();
         else fac_ = std::make_unique<DenseFactor>();
         fac_->reset(m);
         basis_valid_ = refactor();
@@ -277,6 +321,7 @@ private:
     void compute_d() {
         for (int j = 0; j < M_.cols(); ++j)
             d_[j] = st_[j] == BASIC || st_[j] == DEAD ? 0.0 : M_.obj(j) - M_.dot(y_.data(), j);
+        cand_valid_ = false;
     }
 
     // largest bound violation of a basic variable, against working bounds
@@ -297,14 +342,38 @@ private:
         const double d = d_[j], t = dtol(j);
         return (s == AT_LB && d < -t) || (s == AT_UB && d > t);
     }
-    int select_devex() const {
+    // Attractive-column list: the working-set columns that price out.
+    // Selection scans it (dropping those no longer eligible) instead of the
+    // whole working set; after a row-wise pivot only the touched columns
+    // can change, so only they are checked for admission. Rebuilt whenever
+    // the reduced costs are recomputed.
+    void note_attractive(int j) {
+        if (cand_valid_ && in_work_[j] && !in_cand_[j] && eligible(j))
+            in_cand_[j] = 1, cand_.push_back(j);
+    }
+    void rebuild_cand() {
+        for (int j : cand_) in_cand_[j] = 0;
+        cand_.clear();
+        for (int j : work_)
+            if (!in_cand_[j] && eligible(j)) in_cand_[j] = 1, cand_.push_back(j);
+        cand_valid_ = true;
+    }
+    int select_devex() {
+        if (!cand_valid_) rebuild_cand();
         int q = -1;
         double best = 0.0;
-        for (int j : work_) {
-            if (!eligible(j)) continue;
+        size_t w = 0;
+        for (size_t k = 0; k < cand_.size(); ++k) {
+            const int j = cand_[k];
+            if (!eligible(j)) {
+                in_cand_[j] = 0;
+                continue;
+            }
+            cand_[w++] = j;
             const double sc = d_[j] * d_[j] / w_[j];
             if (sc > best) best = sc, q = j;
         }
+        cand_.resize(w);
         return q;
     }
 
@@ -426,9 +495,11 @@ private:
                     }
                     in_touched_[j] = 0, acc_[j] = 0.0;
                 }
-                touched_.clear();
                 d_[l] = -td;
                 w_[l] = std::max(wq * inv2, 1.0);
+                for (int j : touched_)
+                    if (j != q) note_attractive(j);
+                touched_.clear();
             } else {
                 ++stats_.col_pivots;
                 d_[l] = -td;
@@ -453,6 +524,7 @@ private:
                 }
                 next_q_ = bq;
                 next_valid_ = true;
+                cand_valid_ = false;   // every working column was re-priced
             }
             stable = std::fabs(arq_row - arq) <= 1e-9 * (1.0 + std::fabs(arq));
             for (int k = 0; k < m; ++k) y_[k] += td * rho_[k];
@@ -462,11 +534,10 @@ private:
                 next_valid_ = false;
             }
         }
-        fac_->update(r, alpha_.data());
+        if (!fac_->update(r, alpha_.data())) stable = false;
         head_[r] = q, pos_[q] = r, st_[q] = BASIC, xb_[r] = xq, d_[q] = 0.0;
         if (!stable) ++stats_.stability_refactors;
-        const int interval = std::string(fac_->name()) == "sparse"
-                                 ? opt.sparse_refactor_interval : opt.refactor_interval;
+        const int interval = refactor_interval();
         if (!stable || ++since_refactor_ >= interval) {
             next_valid_ = false;   // the reduced costs are recomputed
             if (!refactor()) return false;
@@ -478,6 +549,7 @@ private:
     // current duals and admit the eligible ones; evict the least attractive
     // working columns past the cap. Returns whether any column was admitted.
     bool sift() {
+        cand_valid_ = false;
         ++stats_.sifts;
         const int m = M_.rows(), n = M_.cols();
         const size_t cap = (size_t)std::max<double>(opt.work_min, opt.work_per_row * m);
@@ -527,6 +599,7 @@ private:
 
     // relax the bounds degenerate basic variables sit on
     void perturb() {
+        cand_valid_ = false;
         ++stats_.perturbations;
         perturbed_ = true;
         for (int i = 0; i < M_.rows(); ++i) {
@@ -541,6 +614,7 @@ private:
         }
     }
     void unperturb() {
+        cand_valid_ = false;
         perturbed_ = false;
         for (int j = 0; j < M_.cols(); ++j) {
             pl_[j] = pu_[j] = 0.0;
@@ -620,7 +694,22 @@ private:
                     if (sc > best) best = sc, q = j, dq = d;
                 }
             }
-            if (q < 0) return Status::Infeasible;
+            if (q < 0) {
+                // nothing reduces the infeasibility: rounding-sized
+                // violations are accepted (snapped), larger ones prove
+                // infeasibility
+                bool tiny = true;
+                for (int i = 0; i < m && tiny; ++i) {
+                    if (c1[i] == 0.0) continue;
+                    const int j = head_[i];
+                    const double b = c1[i] < 0 ? lbw(j) : ubw(j);
+                    tiny = std::fabs(xb_[i] - b) <= opt.feas_accept * (1.0 + std::fabs(b));
+                }
+                if (!tiny) return Status::Infeasible;
+                for (int i = 0; i < m; ++i)
+                    if (c1[i] != 0.0) xb_[i] = c1[i] < 0 ? lbw(head_[i]) : ubw(head_[i]);
+                return Status::Optimal;
+            }
             const double dir = dq < 0 ? 1.0 : -1.0;
             alpha_.resize(m);
             fac_->ftran(M_, q, alpha_.data());
@@ -643,10 +732,159 @@ private:
         }
     }
 
+    // Bounded dual simplex (dual Dantzig row choice, Harris two-pass dual
+    // ratio test), from a dual feasible basis with fresh reduced costs over
+    // every column; it keeps them all up to date (no sifting). Optimal when
+    // no basic variable is out of bounds; a row with no entering candidate
+    // proves primal infeasibility.
+    Status dual_phase() {
+        const int m = M_.rows(), n = M_.cols();
+        std::vector<double> arow(n, 0.0);
+        std::vector<int> nzj;
+        std::vector<char> inz(n, 0);
+        ++stats_.dual_solves;
+        cand_valid_ = false;
+        while (true) {
+            if (stats_.iterations >= opt.max_iter) return Status::IterationLimit;
+            // leaving row: the largest bound violation
+            int r = -1;
+            double worst = 0.0;
+            bool below = false;
+            for (int i = 0; i < m; ++i) {
+                const int j = head_[i];
+                const double l = lbw(j), u = ubw(j);
+                if (xb_[i] < l - opt.primal_tol * (1.0 + std::fabs(l))) {
+                    if (l - xb_[i] > worst) worst = l - xb_[i], r = i, below = true;
+                } else if (xb_[i] > u + opt.primal_tol * (1.0 + std::fabs(u))) {
+                    if (xb_[i] - u > worst) worst = xb_[i] - u, r = i, below = false;
+                }
+            }
+            if (r < 0) return Status::Optimal;
+            // pivot row over the nonbasic columns
+            {
+                const double* rr = fac_->row(r);
+                rho_.assign(rr, rr + m);
+            }
+            long long rowcost = 0;
+            for (int k = 0; k < m; ++k)
+                if (std::fabs(rho_[k]) >= 1e-14) rowcost += (long long)M_.row(k).size();
+            if (3 * rowcost < M_.nnz()) {
+                for (int k = 0; k < m; ++k) {
+                    const double rk = rho_[k];
+                    if (std::fabs(rk) < 1e-14) continue;
+                    for (const auto& e : M_.row(k)) {
+                        const int j = e.col;
+                        if (st_[j] == BASIC || st_[j] == DEAD) continue;
+                        if (!inz[j]) inz[j] = 1, nzj.push_back(j), arow[j] = 0.0;
+                        arow[j] += rk * e.val;
+                    }
+                }
+            } else {
+                for (int j = 0; j < n; ++j) {
+                    if (st_[j] == BASIC || st_[j] == DEAD) continue;
+                    const double a = M_.dot(rho_.data(), j);
+                    if (a != 0.0) inz[j] = 1, nzj.push_back(j), arow[j] = a;
+                }
+            }
+            // Harris dual ratio test: keep every reduced cost sign-correct
+            const double sgn = below ? 1.0 : -1.0, piv = opt.pivot_tol;
+            double tmax = kInf;
+            for (int j : nzj) {
+                const double a = arow[j];
+                if (std::fabs(a) < piv || lbw(j) == ubw(j)) continue;
+                const double as = sgn * a;
+                if (st_[j] == AT_LB && as < 0) tmax = std::min(tmax, (d_[j] + dtol(j)) / std::fabs(a));
+                else if (st_[j] == AT_UB && as > 0) tmax = std::min(tmax, (dtol(j) - d_[j]) / std::fabs(a));
+            }
+            if (!(tmax < kInf)) {
+                for (int j : nzj) inz[j] = 0;
+                const int l = head_[r];
+                const double bound = below ? lbw(l) : ubw(l);
+                if (worst <= opt.feas_accept * (1.0 + std::fabs(bound))) {
+                    xb_[r] = bound;   // rounding no pivot can fix: accept it
+                    nzj.clear();
+                    continue;
+                }
+                // dual unbounded: the primal phase 1 proves infeasibility
+                return Status::Numerical;
+            }
+            int q = -1;
+            double bestpiv = 0.0;
+            for (int j : nzj) {
+                const double a = arow[j];
+                if (std::fabs(a) < piv || lbw(j) == ubw(j)) continue;
+                const double as = sgn * a;
+                double t;
+                if (st_[j] == AT_LB && as < 0) t = std::max(d_[j], 0.0) / std::fabs(a);
+                else if (st_[j] == AT_UB && as > 0) t = std::max(-d_[j], 0.0) / std::fabs(a);
+                else continue;
+                if (t <= tmax && std::fabs(a) > bestpiv) bestpiv = std::fabs(a), q = j;
+            }
+            if (q < 0) {
+                for (int j : nzj) inz[j] = 0;
+                return Status::Numerical;
+            }
+            alpha_.resize(m);
+            fac_->ftran(M_, q, alpha_.data());
+            const double arq = alpha_[r];
+            const bool stable = std::fabs(arow[q] - arq) <= 1e-9 * (1.0 + std::fabs(arq));
+            if (std::fabs(arq) < piv) {
+                for (int j : nzj) inz[j] = 0;
+                if (!refactor()) return Status::Numerical;
+                continue;
+            }
+            const int l = head_[r];
+            const double target = below ? lbw(l) : ubw(l);
+            const double tp = (xb_[r] - target) / arq;
+            const double td = d_[q] / arq;
+            for (int i = 0; i < m; ++i) xb_[i] -= tp * alpha_[i];
+            const double xq = x_[q] + tp;
+            for (int j : nzj) {
+                if (j != q) d_[j] -= td * arow[j];
+                inz[j] = 0;
+            }
+            nzj.clear();
+            d_[l] = -td;
+            for (int k = 0; k < m; ++k) y_[k] += td * rho_[k];
+            update_ymax();
+            x_[l] = target, st_[l] = below ? AT_LB : AT_UB, pos_[l] = -1;
+            admit(l), admit(q);
+            bool ok = fac_->update(r, alpha_.data());
+            head_[r] = q, pos_[q] = r, st_[q] = BASIC, xb_[r] = xq, d_[q] = 0.0;
+            ++stats_.iterations, ++stats_.dual_iterations;
+            const int interval = refactor_interval();
+            if (!stable || !ok) ++stats_.stability_refactors;
+            if (!stable || !ok || ++since_refactor_ >= interval) {
+                if (!refactor()) return Status::Numerical;
+            }
+        }
+    }
+
+    int refactor_interval() const {
+        const std::string f = fac_->name();
+        return f == "sparse" ? opt.sparse_refactor_interval
+             : f == "lu" ? opt.lu_refactor_interval : opt.refactor_interval;
+    }
+
+    bool dual_feasible() const {
+        for (int j = 0, n = M_.cols(); j < n; ++j)
+            if (eligible(j)) return false;
+        return true;
+    }
+
     Status solve_impl() {
         if (!basis_valid_) {
             crash();
             if (!basis_valid_) return Status::Numerical;
+        }
+        // a warm basis that lost only primal feasibility: dual simplex
+        if (opt.dual && infeasibility() > opt.primal_tol) {
+            compute_y(), compute_d();
+            if (dual_feasible()) {
+                Status s = dual_phase();
+                if (s == Status::Infeasible) return s;
+                // Optimal, or trouble: the primal path below finishes the job
+            }
         }
         bool allow_perturb = true;
         int cleanups_here = 0;
@@ -665,9 +903,16 @@ private:
                 allow_perturb = ++cleanups_here < 3;
                 if (infeasibility() > opt.primal_tol) continue;
             }
-            // fresh duals and reduced costs over every column before
-            // declaring optimality
-            compute_y(), compute_d();
+            // fresh duals and reduced costs over every column, from a fresh
+            // factor when updates have accumulated (their rounding, amplified
+            // by big-M costs in c_B, could otherwise hide an improving
+            // column), before declaring optimality
+            if (since_refactor_ > 0) {
+                if (!refactor()) return Status::Numerical;
+                if (infeasibility() > opt.primal_tol) continue;
+            } else {
+                compute_y(), compute_d();
+            }
             if (!admit_eligible_all()) return Status::Optimal;
         }
         return Status::Numerical;

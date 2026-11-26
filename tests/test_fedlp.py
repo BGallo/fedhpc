@@ -27,7 +27,7 @@ configure_env()
 INF = float("inf")
 
 
-@pytest.fixture(autouse=True, params=[1, 2], ids=["dense", "sparse"])
+@pytest.fixture(autouse=True, params=[1, 2, 3], ids=["dense", "pfi", "lu"])
 def factor(request, monkeypatch):
     """Every test runs with the dense explicit inverse and with the sparse
     product-form factor."""
@@ -228,3 +228,31 @@ def test_batch_add_matches_single_adds():
     assert a.solve() == b.solve() == int(_fedlp.Status.OPTIMAL)
     assert a.objective == pytest.approx(b.objective)
     assert math.isfinite(a.objective)
+
+
+@pytest.mark.parametrize("seed", range(15))
+def test_dual_simplex_after_branching_bounds(seed):
+    """Closing used columns (ub = 0) and raising one lower bound, with no
+    column appended, leaves the basis dual feasible: the dual simplex must
+    finish it, with Gurobi's objective (or its infeasibility verdict)."""
+    rng = random.Random(500 + seed)
+    nj, nf = rng.randint(8, 30), rng.randint(1, 3)
+    M = _sp_master(rng, nj, nf)
+    for _ in range(120):
+        M.add(*_cost_idx_val(rng, nj, nf))
+    M.check()
+    used_dual = False
+    for _step in range(6):
+        x = M.lp.x()
+        live = [k for k in range(nj + nf, len(M.vars)) if M.vars[k] is not None and M.cols[k][2] > 0]
+        used = [k for k in live if x[k] > 1e-9]
+        for k in rng.sample(used, min(len(used), rng.randint(1, 3))):
+            M.bounds(k, 0.0, 0.0)
+        if rng.random() < 0.3 and live:
+            k = rng.choice(live)
+            if M.cols[k][2] > 0:
+                M.bounds(k, min(1.0, M.cols[k][2]), M.cols[k][2])
+        M.lp.reset_stats()
+        M.check()
+        used_dual |= M.lp.stats()["dual_iterations"] > 0
+    assert used_dual

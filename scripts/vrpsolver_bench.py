@@ -7,7 +7,7 @@ sets and the same heuristic cutoff, so the comparison is between the solvers.
     uv run python scripts/vrpsolver_bench.py --out results/vrpsolver_bench/rm.jsonl \\
         --instances rm_M2N10_1 rm_M5N25_1 --time-limit 600
 
-Needs VRPSolver (``BAPCOD_RCSP_LIB``, CPLEX, Julia or ``FEDHPC_JULIA``; see
+Needs VRPSolver (``BAPCOD_RCSP_LIB`` built with CLP or CPLEX, Julia or ``FEDHPC_JULIA``; see
 ``docs/vrpsolver_integration.md``). ``--dry-run`` only builds the VRPSolver
 models, which needs Julia alone.
 """

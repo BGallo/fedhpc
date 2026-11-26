@@ -7,8 +7,8 @@ our problem in its terms and runs it, for head-to-head comparisons with
 :mod:`fedhpc.bpc`. See ``docs/vrpsolver_integration.md``.
 
 It is **academic-use only** and is not shipped with the repo. Running it needs
-Julia >= 1.11.5, CPLEX >= 12.9 and the BaPCod shared library (the path in
-``BAPCOD_RCSP_LIB``); :func:`available` says whether this machine has them.
+Julia >= 1.11.5 and the BaPCod shared library (the path in ``BAPCOD_RCSP_LIB``),
+built against an LP solver: COIN-OR CLP >= 1.17.7 (free) or CPLEX >= 12.9; :func:`available` says whether this machine has them.
 Exporting and checking the model need none of that.
 
 The model is the BPC master of ``fedhpc.bpc`` on the same space-time networks:
@@ -310,7 +310,7 @@ def run_julia(model: dict, *, dry_run: bool = False, time_limit: float | None = 
               julia_cmd: list[str] | None = None) -> dict:
     """Write ``model`` to JSON, run ``vrpsolver/run.jl`` on it and return its
     JSON result. ``dry_run`` builds the VRPSolver model and stops before
-    calling BaPCod, so it needs neither CPLEX nor the BaPCod library."""
+    calling BaPCod, so it needs neither the BaPCod library nor its LP solver."""
     tmp = workdir or tempfile.mkdtemp(prefix="fedhpc-vrp-")
     src, out = Path(tmp) / "model.json", Path(tmp) / "result.json"
     src.write_text(json.dumps(model))

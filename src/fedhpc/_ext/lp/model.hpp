@@ -76,6 +76,10 @@ public:
     // nonzeros of the live columns
     long long nnz() const { return live_entries_; }
     double obj(int j) const { return obj_[j]; }
+    void set_obj(int j, double c) {
+        check_structural(j);
+        obj_[j] = c;
+    }
     double lb(int j) const { return lb_[j]; }
     double ub(int j) const { return ub_[j]; }
     bool alive(int j) const { return alive_[j]; }

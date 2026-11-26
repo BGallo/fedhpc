@@ -15,7 +15,8 @@ built for:
 |---|---|
 | `model.hpp` | `Model`: the column store, plus an append-only row-wise copy for pivot rows. Row logicals are columns `0..m-1`, so slacks and structurals are handled alike. Columns can be appended, tombstoned and have their bounds changed. |
 | `dense_inverse.hpp` | `DenseInverse`: an explicit B^-1 (Gauss-Jordan refactorisation, rank-1 updates). The sparse-row update and an AVX2 clone of the dense one are picked at load time. |
-| `factor.hpp` | `BasisFactor`: the factor interface (factorize, which may reorder the basis positions, plus ftran, btran, row, update). `DenseFactor` wraps the explicit inverse. `SparsePFI` is a product-form inverse (see below). `Options.factor` picks one: by default dense up to `dense_max_rows` = 128 rows, sparse above. |
+| `factor.hpp` | `BasisFactor`: the factor interface (factorize, which may reorder the basis positions, plus ftran, btran, row, update, which may report failure). `DenseFactor` wraps the explicit inverse; `SparsePFI` is a product-form inverse. |
+| `lu_ft.hpp` | `LuFT`: sparse LU with Forrest-Tomlin updates (see below). `Options.factor` picks a factor: by default dense up to `dense_max_rows` = 128 rows, the LU above. |
 | `primal.hpp` | `PrimalSimplex`: the algorithm. |
 | `lp_module.cpp` | `Solver`: the Python façade. It does batch CSC column adds from numpy, and returns duals, primal values, reduced costs, basis status and stats. Solves release the GIL. |
 
@@ -55,6 +56,33 @@ duals, reduced costs and weights carry over.
 - **Stability.** The pivot element is compared as computed by row and by
   column, and a disagreement triggers refactorisation. There is also a
   fixed refactorisation interval: 200 pivots dense, 64 etas sparse.
+- **Dual simplex** (`Options.dual`). When a solve starts primal infeasible
+  but dual feasible, a bounded dual simplex runs first. That is the case
+  when bounds changed and nothing was appended, as in a re-targeted
+  branch-and-price node. It uses dual Dantzig rows, a Harris two-pass dual
+  ratio test, and pivot rows over every column (no sifting). Violations no
+  pivot can repair, below `feas_accept` = 1e-7, are rounding and get
+  snapped. A dual ray hands over to phase 1, which proves infeasibility
+  reliably: a tiny violation once looked like a ray.
+- **Final refactorisation.** Optimality is declared from a fresh factor
+  whenever updates have accumulated. With big-M costs in c_B, the updates'
+  rounding could hide an improving column: about 2e-7 relative
+  suboptimality with the LU.
+- **Crash hint** (`Solver.set_crash_hint`). Columns of a known feasible
+  solution take equality rows first in the crash. lpfirst passes its
+  incumbent, a feasible start without artificials: pos_congestion's anchor
+  went from 105.6 k to 49.8 k iterations.
+- **LU with Forrest-Tomlin updates (`LuFT`).**
+  - Factorisation is left-looking over the basis columns, sparsest first,
+    with threshold pivoting. It is hyper-sparse: each column's nonzero
+    pattern is tracked, and L etas are applied through a min-heap of the
+    touched pivot rows.
+  - U is stored by rows and by columns, so BTRAN is row-oriented and skips
+    zeros.
+  - An update moves the leaving position's spike to the end of the order
+    and eliminates its pivot row into one row eta. It refactorises when the
+    determinant check (new diagonal = alpha_r times the old one) fails or a
+    multiplier exceeds 1e4.
 - **Sparse factor (`SparsePFI`).** Left-looking Gauss-Jordan in product
   form over the basis columns, sparsest first: the master's slacks,
   artificials and null columns give trivial etas, so only a small bump
@@ -110,6 +138,20 @@ duals, reduced costs and weights carry over.
   inverse to 0.40 s, level with Gurobi; `auto` now covers masters up to
   2000 rows.
 
+- **lpfirst masters** (`LPFirstOptions(lp_backend="fedlp")`, opt-in). The
+  964-job trace's masters (~1.5 k rows) take 0.59 s of LP with the LU,
+  against 1.02 s with Gurobi and 1.94 s with the product form: the five
+  bench solves 9.07 -> 7.81 s. pos_congestion's (4.5 k rows, ~35 k
+  columns) stay about 9x slower than Gurobi, from the per-pivot dense O(m)
+  work. All results are exact.
+- **bpc with the LU as the default sparse factor** (`lplu_*`):
+
+  | Suite | Gurobi masters | fedlp |
+  |---|---|---|
+  | hard | 8.84 s | 6.33 s |
+  | gap | 6.71 s | 4.95 s |
+  | base | 3.68 s | 2.84 s |
+
 ## Tried and rejected
 
 - **Lazy reduced costs.** Skipping columns by an exact drift bound skipped
@@ -118,7 +160,10 @@ duals, reduced costs and weights carry over.
 - **Positive Edge.** Not implemented: after perturbation only 14-24 % of
   pivots are degenerate, below the 25 % where Towhidi et al. found it pays.
 
-- **Warm-started tree nodes** (`PricingOptions.warm_nodes`, off). One
+- **Warm-started tree nodes** (`PricingOptions.warm_nodes`, off; with the
+  dual simplex now level with rebuilding: hard 6.83 vs 6.98 s, trap
+  front 0.87 vs 0.88 s, so no longer a loss, but not a gain on shallow
+  trees). One
   master for the whole search; each node re-targets its column and `z_m`
   bounds and continues from the last basis, with phase 1 repairing what
   branching made infeasible. Exact, but neutral to slightly negative:
@@ -130,12 +175,12 @@ duals, reduced costs and weights carry over.
 
 ## Next steps
 
-- **A dual simplex for re-targeted nodes.** After branching, the old basis
-  stays dual feasible, so a dual simplex could replace the phase-1 repair.
-  That is the missing half of warm starts, and matters for deep trees.
-- **LU with Forrest-Tomlin updates** in place of the product form. Etas
-  accumulate between refactorisations, and a FT update keeps the factor
-  compact for masters of thousands of rows (lpfirst's 4.5k-row masters).
+- **Hyper-sparse vectors throughout the iteration** for masters of
+  thousands of rows: FTRAN results, x_B updates and the ratio test as
+  sparse vectors, as HiGHS does. That is what stays between fedlp and
+  Gurobi on pos_congestion.
+- **Dual steepest edge** for the dual simplex. Dual Dantzig suffices for
+  re-targeted nodes; deep trees would want better.
 - **Rows for cuts.** Logicals are columns `0..m-1`, so added rows need a
   logical-index map. Subset-row cuts are off by default (a negative result
   on the Rm instances), so this waits for a use.

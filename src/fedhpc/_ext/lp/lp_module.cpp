@@ -63,6 +63,25 @@ public:
         }
     }
 
+    // columns the next crash (the first solve, or one after a basic column
+    // was removed) places in the basis first: a feasible solution's columns
+    // give a feasible start
+    void set_crash_hint(const std::vector<int>& ids) {
+        std::vector<int> cols;
+        for (int id : ids) cols.push_back(col(id));
+        S_.set_hint(std::move(cols));
+    }
+
+    void set_costs(const std::vector<int>& ids, const std::vector<double>& costs) {
+        if (ids.size() != costs.size()) throw std::invalid_argument("ids and costs lengths differ");
+        for (size_t k = 0; k < ids.size(); ++k) {
+            const int j = col(ids[k]);
+            const double old = M_.obj(j);
+            M_.set_obj(j, costs[k]);
+            S_.cost_changed(j, old);
+        }
+    }
+
     void set_bounds(int id, double lb, double ub) {
         const int j = col(id);
         M_.set_bounds(j, lb, ub);
@@ -115,6 +134,7 @@ public:
         d["cleanups"] = s.cleanups, d["seconds"] = s.seconds;
         d["row_pivots"] = s.row_pivots, d["col_pivots"] = s.col_pivots;
         d["sifts"] = s.sifts, d["admitted"] = s.admitted, d["evicted"] = s.evicted;
+        d["dual_iterations"] = s.dual_iterations, d["dual_solves"] = s.dual_solves;
         return d;
     }
     void reset_stats() { S_.reset_stats(); }
@@ -152,6 +172,7 @@ PYBIND11_MODULE(_fedlp, mod) {
         .value("NUMERICAL", Status::Numerical);
     py::class_<Options>(mod, "Options")
         .def_readwrite("primal_tol", &Options::primal_tol)
+        .def_readwrite("feas_accept", &Options::feas_accept)
         .def_readwrite("dual_tol", &Options::dual_tol)
         .def_readwrite("pivot_tol", &Options::pivot_tol)
         .def_readwrite("perturb", &Options::perturb)
@@ -159,7 +180,9 @@ PYBIND11_MODULE(_fedlp, mod) {
         .def_readwrite("refactor_interval", &Options::refactor_interval)
         .def_readwrite("max_iter", &Options::max_iter)
         .def_readwrite("sifting", &Options::sifting)
+        .def_readwrite("dual", &Options::dual)
         .def_readwrite("factor", &Options::factor)
+        .def_readwrite("lu_refactor_interval", &Options::lu_refactor_interval)
         .def_readwrite("dense_max_rows", &Options::dense_max_rows)
         .def_readwrite("sparse_refactor_interval", &Options::sparse_refactor_interval)
         .def_readwrite("work_min", &Options::work_min)
@@ -175,6 +198,8 @@ PYBIND11_MODULE(_fedlp, mod) {
              py::arg("start"), py::arg("idx"), py::arg("val"))
         .def("remove_columns", &Solver::remove_columns, py::arg("ids"))
         .def("set_bounds", &Solver::set_bounds, py::arg("id"), py::arg("lb"), py::arg("ub"))
+        .def("set_costs", &Solver::set_costs, py::arg("ids"), py::arg("costs"))
+        .def("set_crash_hint", &Solver::set_crash_hint, py::arg("ids"))
         .def("solve", &Solver::solve, py::call_guard<py::gil_scoped_release>())
         .def_property_readonly("objective", &Solver::objective)
         .def("x", &Solver::x)

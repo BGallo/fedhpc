@@ -4,7 +4,7 @@ The exporter is checked on its own: an exported model, solved as the
 equivalent compact MIP with HiGHS, must reach the same optimum as BPC. The
 Julia model build (``--dry-run``) runs when Julia and the ``vrpsolver/``
 project are set up (``FEDHPC_JULIA``), and the full solve only when VRPSolver
-itself is available (``BAPCOD_RCSP_LIB`` plus CPLEX).
+itself is available (``BAPCOD_RCSP_LIB``, a BaPCod build with CLP or CPLEX).
 """
 import os
 import shutil

@@ -25,7 +25,9 @@ def make(name: str, threads: int = 0):
         return GurobiBackend(threads)
     if name == "highs":
         return HighsBackend(threads)
-    raise ValueError(f"unknown LP backend {name!r} (gurobi, highs)")
+    if name == "fedlp":
+        return FedlpBackend(threads)
+    raise ValueError(f"unknown LP backend {name!r} (gurobi, highs, fedlp)")
 
 
 def available(name: str) -> bool:
@@ -34,6 +36,8 @@ def available(name: str) -> bool:
             import gurobipy  # noqa: F401
         elif name == "highs":
             import highspy  # noqa: F401
+        elif name == "fedlp":
+            from . import _fedlp  # noqa: F401
         else:
             return False
     except ImportError:
@@ -328,3 +332,90 @@ class HighsBackend:
 
     def write(self, path: str) -> None:
         self.h.writeModel(path)
+
+
+# Options applied to every fedlp solver (e.g. {"factor": 3}); see _fedlp.Options.
+FEDLP_OPTIONS: dict = {}
+
+
+class FedlpBackend:
+    """fedlp (:mod:`fedhpc._fedlp`), LPs only: the column generation master.
+    Rows are buffered until the first column batch builds the solver (fedlp
+    fixes its rows at construction); MIPs stay on another backend."""
+
+    name = "fedlp"
+
+    def __init__(self, threads: int = 0):
+        from . import _fedlp
+        self._fedlp = _fedlp
+        self.lp = None
+        self._sense: list[str] = []
+        self._rhs: list[float] = []
+        self.n_cols = 0
+        self._status = None
+
+    def add_rows(self, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
+        if self.lp is not None:
+            raise NotImplementedError("fedlp takes no rows after its first columns")
+        start = len(self._rhs)
+        for a, b in zip(np.asarray(lo, float).tolist(), np.asarray(hi, float).tolist()):
+            if a == b:
+                self._sense.append("="), self._rhs.append(a)
+            elif a == -INF:
+                self._sense.append("<"), self._rhs.append(b)
+            elif b == INF:
+                self._sense.append(">"), self._rhs.append(a)
+            else:
+                raise NotImplementedError("fedlp has no ranged rows")
+        return np.arange(start, len(self._rhs))
+
+    def _ensure(self) -> None:
+        if self.lp is None:
+            self.lp = self._fedlp.Solver(self._sense, self._rhs)
+            for k, v in FEDLP_OPTIONS.items():
+                setattr(self.lp.options, k, v)
+
+    def add_cols(self, cost, ub, integer, starts, index, value) -> None:
+        n = len(cost)
+        if not n:
+            return
+        if np.any(np.asarray(integer, dtype=bool)):
+            raise NotImplementedError("fedlp solves LPs only")
+        self._ensure()
+        self.lp.add_columns(np.asarray(cost, float), np.zeros(n), np.asarray(ub, float),
+                            np.asarray(starts, dtype=np.int32), np.asarray(index, dtype=np.int32),
+                            np.asarray(value, float))
+        self.n_cols += n
+
+    def change_costs(self, idx: np.ndarray, cost: np.ndarray) -> None:
+        self._ensure()
+        self.lp.set_costs(np.asarray(idx).tolist(), np.asarray(cost, float).tolist())
+
+    def crash_hint(self, cols) -> None:
+        """Columns to start the basis from (a feasible solution's)."""
+        self._ensure()
+        self.lp.set_crash_hint([int(c) for c in cols])
+
+    def solve_lp(self) -> str:
+        self._ensure()
+        st = self.lp.solve()
+        self._status = st
+        return "optimal" if st == int(self._fedlp.Status.OPTIMAL) else "other"
+
+    def solve_mip(self, **kw) -> str:
+        raise NotImplementedError("fedlp solves LPs only")
+
+    def has_solution(self) -> bool:
+        return self._status == int(self._fedlp.Status.OPTIMAL)
+
+    def objective(self) -> float:
+        return self.lp.objective
+
+    def col_values(self) -> np.ndarray:
+        return self.lp.x() if self.lp is not None else np.zeros(0)
+
+    def row_duals(self) -> np.ndarray:
+        return self.lp.duals() if self.lp is not None else np.zeros(0)
+
+    def write(self, path: str) -> None:
+        raise NotImplementedError

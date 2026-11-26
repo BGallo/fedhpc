@@ -5,7 +5,7 @@
 #         [--dry-run] [--time-limit SECONDS] [--no-rank1]
 #
 # --dry-run builds the VRPSolver model and stops before VrpOptimizer, which is
-# the first call into BaPCod: it needs neither CPLEX nor BAPCOD_RCSP_LIB.
+# the first call into BaPCod: it needs neither BAPCOD_RCSP_LIB nor an LP solver.
 # See docs/vrpsolver_integration.md and the module docstring of
 # src/fedhpc/vrpsolver.py for the model.
 

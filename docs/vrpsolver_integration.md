@@ -11,7 +11,7 @@ VRPSolver model and run it.
 |---|---|---|
 | Exporter (instance -> JSON model) | `src/fedhpc/vrpsolver.py`, `export_model` | yes: the exported model, solved as a compact MIP with HiGHS, matches BPC's optimum on all trap instances, the fixed-cost fixture and capped problems (`tests/test_vrpsolver.py`) |
 | Julia model build | `vrpsolver/run.jl` (`--dry-run`) | yes, in the `julia:1.11` Docker image, up to Rm M8N40 (116k placements, ~2 s) |
-| Solve + result check | `run.jl`, `solve_vrpsolver` | **not run**: needs CPLEX and BaPCod (below) |
+| Solve + result check | `run.jl`, `solve_vrpsolver` | **not run**: needs the BaPCod library (below) |
 | Benchmark | `scripts/vrpsolver_bench.py` | dry-run mode only |
 
 ## What running it needs
@@ -19,11 +19,24 @@ VRPSolver model and run it.
 VRPSolver is **academic-use only** (BaPCod licence) and is not in the repo.
 
 1. **Julia >= 1.11.5**, or Docker with `julia:1.11` (see below).
-2. **CPLEX >= 12.9** (free through the IBM Academic Initiative).
-3. **BaPCod shared library** `libbapcod-shared.so`: download the source from
-   bapcod.math.u-bordeaux.fr with an academic e-mail, accept the licence and
-   build it as its `README.md` says. Point `BAPCOD_RCSP_LIB` at the `.so`.
-   CPLEX's shared libraries must be on `LD_LIBRARY_PATH`.
+2. **An LP solver for BaPCod**, either one:
+   - **COIN-OR CLP >= 1.17.7**: free (EPL), and enough on its own. BaPCod's
+     requirements list "CPLEX 12.9 or above OR COIN-OR CLP 1.17.7 or above";
+     CLP support was experimental in v0.74 (2022), improved in v0.77 (2023).
+     CLP is what VRPSolverEasy uses by default.
+   - **CPLEX >= 12.9** (free through the IBM Academic Initiative): faster
+     according to the VRPSolverEasy paper, and still the only solver the
+     VrpSolver.jl README lists. Its shared libraries must then be on
+     `LD_LIBRARY_PATH`.
+   - BaPCod v0.83.1 (2025-08) added a beta Gurobi interface; HiGHS is not
+     supported.
+3. **BaPCod shared library** `libbapcod-shared.so` (v0.84, 2025-11, is the
+   latest release listed): download the source from bapcod.math.u-bordeaux.fr
+   with an academic e-mail, accept the licence and build it against CLP or
+   CPLEX as its `README.md` says. Point `BAPCOD_RCSP_LIB` at the `.so`.
+   (The VRPSolverEasy wheel and GitHub repo do not contain a prebuilt
+   library.) Untested here: whether the RCSP extension and the shared library
+   build with CLP alone. The requirements page does not say otherwise.
 
 Then, once:
 
@@ -37,7 +50,7 @@ julia --project=vrpsolver -e 'using Pkg; Pkg.instantiate()'
 ### Through Docker instead of a local Julia
 
 `FEDHPC_JULIA` replaces the `julia` command. The repo, the temporary
-directory, the CPLEX installation and the BaPCod library must be mounted at
+directory, the LP solver (if CPLEX) and the BaPCod library must be mounted at
 the same paths inside the container:
 
 ```
@@ -52,7 +65,7 @@ export FEDHPC_JULIA="docker run --rm --user $(id -u):$(id -g) \
   julia:1.11 julia"
 ```
 
-(Adjust the CPLEX path to your version.) The dry run needs only the first
+(Adjust the CPLEX path to your version, or drop that line for a CLP build.) The dry run needs only the first
 three `-v`/`-e` pairs.
 
 ### Commands
