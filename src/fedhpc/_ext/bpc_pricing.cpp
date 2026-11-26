@@ -44,6 +44,8 @@
 #include <utility>
 #include <vector>
 
+#include <immintrin.h>
+
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
@@ -60,6 +62,83 @@ using RichCol = std::tuple<double, int, Path, double, double, double>;
 using RichOut = std::tuple<double, bool, long long, std::vector<RichCol>>;
 
 constexpr double EPS = 1e-9;
+
+// ---------------------------------------------------------------------------
+// Dominance scans for one-word masks without cuts or same pairs (the SoA
+// path, Pricer::run_soa). Entry k dominates x when ce[k] <= c + EPS and
+// mask[k] is a subset of x's; x dominates entry k when c <= cost[k] + EPS
+// and x's mask is a subset of mask[k]. The AVX2 versions do the scalar
+// arithmetic four entries at a time, so they agree bit for bit.
+// ---------------------------------------------------------------------------
+inline bool any_dom_scalar(const double* ce, const u64* m, size_t n, double c, u64 mx) {
+    const double cv = c + EPS;
+    for (size_t k = 0; k < n; ++k)
+        if (ce[k] <= cv && !(m[k] & ~mx)) return true;
+    return false;
+}
+inline bool any_domd_scalar(const double* co, const u64* m, size_t n, double c, u64 mx) {
+    for (size_t k = 0; k < n; ++k)
+        if (c <= co[k] + EPS && !(mx & ~m[k])) return true;
+    return false;
+}
+__attribute__((target("avx2"))) inline
+bool any_dom_avx2(const double* ce, const u64* m, size_t n, double c, u64 mx) {
+    const __m256d cv = _mm256_set1_pd(c + EPS);
+    const __m256i xv = _mm256_set1_epi64x((long long)mx);
+    const __m256i z = _mm256_setzero_si256();
+    size_t k = 0;
+    for (; k + 4 <= n; k += 4) {
+        __m256d le = _mm256_cmp_pd(_mm256_loadu_pd(ce + k), cv, _CMP_LE_OQ);
+        __m256i bad = _mm256_andnot_si256(xv, _mm256_loadu_si256((const __m256i*)(m + k)));
+        __m256d ok = _mm256_castsi256_pd(_mm256_cmpeq_epi64(bad, z));
+        if (_mm256_movemask_pd(_mm256_and_pd(le, ok))) return true;
+    }
+    return any_dom_scalar(ce + k, m + k, n - k, c, mx);
+}
+__attribute__((target("avx2"))) inline
+bool any_domd_avx2(const double* co, const u64* m, size_t n, double c, u64 mx) {
+    const __m256d cv = _mm256_set1_pd(c), ev = _mm256_set1_pd(EPS);
+    const __m256i xv = _mm256_set1_epi64x((long long)mx);
+    const __m256i z = _mm256_setzero_si256();
+    size_t k = 0;
+    for (; k + 4 <= n; k += 4) {
+        __m256d le = _mm256_cmp_pd(cv, _mm256_add_pd(_mm256_loadu_pd(co + k), ev), _CMP_LE_OQ);
+        __m256i bad = _mm256_andnot_si256(_mm256_loadu_si256((const __m256i*)(m + k)), xv);
+        __m256d ok = _mm256_castsi256_pd(_mm256_cmpeq_epi64(bad, z));
+        if (_mm256_movemask_pd(_mm256_and_pd(le, ok))) return true;
+    }
+    return any_domd_scalar(co + k, m + k, n - k, c, mx);
+}
+const bool HAS_AVX2 = __builtin_cpu_supports("avx2");
+
+// Structure-of-arrays label entries for the SoA path: cost, effective cost
+// against a non-empty label (cost + first for an empty one), mask, arena id,
+// empty flag.
+struct Soa {
+    std::vector<double> cost, ceff;
+    std::vector<u64> mask;
+    std::vector<int> id;
+    std::vector<char> src;
+    size_t n() const { return cost.size(); }
+    void push(double c, double ce, u64 m, int i, char s) {
+        cost.push_back(c), ceff.push_back(ce), mask.push_back(m), id.push_back(i), src.push_back(s);
+    }
+    void insert(size_t pos, double c, double ce, u64 m, int i, char s) {
+        cost.insert(cost.begin() + pos, c), ceff.insert(ceff.begin() + pos, ce);
+        mask.insert(mask.begin() + pos, m), id.insert(id.begin() + pos, i);
+        src.insert(src.begin() + pos, s);
+    }
+    void move(size_t w, size_t k) {
+        cost[w] = cost[k], ceff[w] = ceff[k], mask[w] = mask[k], id[w] = id[k], src[w] = src[k];
+    }
+    void resize(size_t n) {
+        cost.resize(n), ceff.resize(n), mask.resize(n), id.resize(n), src.resize(n);
+    }
+    void release() { Soa().swap(*this); }
+    void swap(Soa& o) {
+        cost.swap(o.cost), ceff.swap(o.ceff), mask.swap(o.mask), id.swap(o.id), src.swap(o.src);
+    }
+};
 
 class Pricer {
 public:
@@ -156,6 +235,17 @@ public:
 
     int n_jobs() const { return n_; }
 
+    // DP kernel: 0 auto (the SoA path with AVX2 scans when it applies and
+    // the CPU has AVX2), 1 the AoS path, 2 SoA with scalar scans, 3 SoA with
+    // AVX2 scans. The SoA path needs one mask word (<= 64 jobs) and no cuts
+    // or same pairs; elsewhere every kernel runs the AoS path. Results do
+    // not depend on it.
+    void set_kernel(int k) {
+        if (k < 0 || k > 3) throw std::invalid_argument("kernel must be 0..3");
+        if (k == 3 && !HAS_AVX2) throw std::invalid_argument("this CPU has no AVX2");
+        kernel_ = k;
+    }
+
     // Per local job: its global id and cost terms (an arc of job i started
     // at t adds c1a[i] + c1b[i] * t to f1 and c2[i] to f2), so price_cols
     // can hand back finished columns.
@@ -249,6 +339,7 @@ private:
     int H_, n_, nw_, nc_ = 0;
     bool same_empty_ = true;
     long long label_hint_ = 0;
+    int kernel_ = 0;
     std::vector<int> gid_;
     std::vector<double> c1a_, c1b_, c2_;   // labels of the previous call: the arena's reserve
     double first_ = 0.0;
@@ -324,6 +415,10 @@ private:
                  const std::vector<std::pair<int, double>>& sources, int max_cols, double tol,
                  long long max_labels) {
         // Without cuts or same pairs every label's pending and cut state is 0.
+        if constexpr (NW == 1)
+            if (nc_ == 0 && same_empty_ && kernel_ != 1)
+                return run_soa(A, B, sources, max_cols, tol, max_labels,
+                               kernel_ == 3 || (kernel_ == 0 && HAS_AVX2));
         if (nc_ == 0 && same_empty_) return run_impl<NW, true>(A, B, sources, max_cols, tol, max_labels);
         return run_impl<NW, false>(A, B, sources, max_cols, tol, max_labels);
     }
@@ -481,10 +576,157 @@ private:
             }
         }
 
-        double min_lb = exact ? std::min(best, pruned_min) : -INF;
-        label_hint_ = (long long)L.cost.size();
+        return finish(L, cand, exact ? std::min(best, pruned_min) : -INF, exact, max_cols);
+    }
 
-        // the max_cols cheapest distinct candidates: a heap, not a full sort
+    // The DP of run_impl<1, true> on structure-of-arrays storage, with the
+    // dominance scans done by any_dom/any_domd (AVX2 or scalar). Buckets
+    // are antichains, so "is the candidate dominated" and "whom does it
+    // dominate" can be two passes. The per-(slot, job) survivor list of
+    // run_impl is not needed: its entries are in the bucket being scanned.
+    PriceOut run_soa(const std::vector<double>& A, const std::vector<double>& B,
+                     const std::vector<std::pair<int, double>>& sources, int max_cols,
+                     double tol, long long max_labels, bool avx2) {
+        return avx2 ? run_soa_avx2(A, B, sources, max_cols, tol, max_labels)
+                    : run_soa_body<false>(A, B, sources, max_cols, tol, max_labels);
+    }
+    // The whole DP compiled for AVX2, so the scans inline.
+    __attribute__((target("avx2")))
+    PriceOut run_soa_avx2(const std::vector<double>& A, const std::vector<double>& B,
+                          const std::vector<std::pair<int, double>>& sources, int max_cols,
+                          double tol, long long max_labels) {
+        return run_soa_body<true>(A, B, sources, max_cols, tol, max_labels);
+    }
+    template <bool AVX>
+    __attribute__((always_inline)) inline
+    PriceOut run_soa_body(const std::vector<double>& A, const std::vector<double>& B,
+                          const std::vector<std::pair<int, double>>& sources, int max_cols,
+                          double tol, long long max_labels) {
+        auto any_dom = [](const double* ce, const u64* m, size_t n, double c, u64 mx) {
+            if constexpr (AVX) return any_dom_avx2(ce, m, n, c, mx);
+            else return any_dom_scalar(ce, m, n, c, mx);
+        };
+        auto any_domd = [](const double* co, const u64* m, size_t n, double c, u64 mx) {
+            if constexpr (AVX) return any_domd_avx2(co, m, n, c, mx);
+            else return any_domd_scalar(co, m, n, c, mx);
+        };
+        const double INF = std::numeric_limits<double>::infinity();
+        const double thr = -tol;
+        std::vector<double> g(H_ + 1, 0.0);
+        for (int t = H_ - 1; t >= 0; --t) {
+            double v = g[t + 1];
+            for (int i : at_[t]) v = std::min(v, A[i] + B[i] * t + g[t + p_[i]]);
+            g[t] = v;
+        }
+        Arena L;
+        L.reserve(std::min<long long>(label_hint_ + label_hint_ / 4 + 64, max_labels));
+        std::vector<Soa> bucket(H_ + 1);
+        Soa act;
+        std::vector<int> cand;
+        double pruned_min = INF, best = INF;
+        bool exact = true;
+
+        // an empty (source) label x: a dominates it iff a.cost <= c + EPS
+        // and a is empty too; it dominates b iff c (+ first if b is not
+        // empty) <= b.cost + EPS
+        for (auto [r, c] : sources) {
+            Soa& bk = bucket[std::min(std::max(r, 0), H_)];
+            bool dominated = false;
+            for (size_t k = 0; k < bk.n(); ++k)
+                if (bk.cost[k] <= c + EPS && bk.mask[k] == 0) { dominated = true; break; }
+            if (dominated) continue;
+            size_t w = 0;
+            for (size_t k = 0; k < bk.n(); ++k) {
+                if (c + (bk.src[k] ? 0.0 : first_) <= bk.cost[k] + EPS) L.alive[bk.id[k]] = 0;
+                else bk.move(w++, k);
+            }
+            bk.resize(w);
+            bk.push(c, c + first_, 0, L.add(c, -1, -1, r), 1);
+        }
+
+        for (int t = 0; t <= H_; ++t) {
+            Soa& bk = bucket[t];
+            for (size_t e = 0; e < bk.n(); ++e) {
+                const double c = bk.cost[e];
+                const u64 m = bk.mask[e];
+                const char s = bk.src[e];
+                const size_t na = act.n();
+                size_t hi = std::upper_bound(act.cost.begin(), act.cost.end(), c + EPS) - act.cost.begin();
+                if (any_dom(s ? act.cost.data() : act.ceff.data(), act.mask.data(), hi, c, m)) {
+                    L.alive[bk.id[e]] = 0;
+                    continue;
+                }
+                size_t lo = std::lower_bound(act.cost.begin(), act.cost.end(), c - EPS) - act.cost.begin();
+                if (s || any_domd(act.cost.data() + lo, act.mask.data() + lo, na - lo, c, m)) {
+                    size_t w = lo;
+                    for (size_t k = lo; k < na; ++k) {
+                        double cx = c + (s && !act.src[k] ? first_ : 0.0);
+                        if (cx <= act.cost[k] + EPS && !(m & ~act.mask[k])) L.alive[act.id[k]] = 0;
+                        else act.move(w++, k);
+                    }
+                    act.resize(w);
+                }
+                size_t pos = std::lower_bound(act.cost.begin() + lo, act.cost.end(), c) - act.cost.begin();
+                act.insert(pos, c, bk.ceff[e], m, bk.id[e], s);
+                best = std::min(best, c);
+                if (c < thr) cand.push_back(bk.id[e]);
+            }
+            bk.release();
+            // retire: act is sorted by cost, so the labels with cost + g(t)
+            // >= thr are a suffix, and its first entry has the least bound
+            {
+                const double gt = g[t];
+                size_t cut = std::partition_point(act.cost.begin(), act.cost.end(),
+                                                  [&](double c) { return c + gt < thr; })
+                             - act.cost.begin();
+                if (cut < act.n()) pruned_min = std::min(pruned_min, act.cost[cut] + gt);
+                act.resize(t == H_ ? 0 : cut);
+            }
+            if (t == H_ || !exact) break;
+            for (int i : at_[t]) {
+                const int t2 = t + p_[i];
+                const double arc = A[i] + B[i] * t;
+                const double rest = arc + g[t2];
+                const u64 ret = retain_[i], dif = differ_[i], ib = u64(1) << i;
+                Soa& out = bucket[t2];
+                for (size_t k = 0; k < act.n(); ++k) {
+                    const double ac = act.cost[k];
+                    if (ac + rest >= thr) {
+                        pruned_min = std::min(pruned_min, ac + rest);
+                        break;
+                    }
+                    const u64 am = act.mask[k];
+                    if ((am & ib) || (am & dif)) continue;
+                    const double c = ac + arc + (act.src[k] ? first_ : 0.0);
+                    const double lb = c + g[t2];
+                    if (lb >= thr) {
+                        pruned_min = std::min(pruned_min, lb);
+                        continue;
+                    }
+                    if ((long long)L.cost.size() >= max_labels) { exact = false; break; }
+                    const u64 nm = (am & ret) | ib;
+                    const size_t no = out.n();
+                    if (any_dom(out.ceff.data(), out.mask.data(), no, c, nm)) continue;
+                    if (any_domd(out.cost.data(), out.mask.data(), no, c, nm)) {
+                        size_t w = 0;
+                        for (size_t q = 0; q < no; ++q) {
+                            if (c <= out.cost[q] + EPS && !(nm & ~out.mask[q])) L.alive[out.id[q]] = 0;
+                            else out.move(w++, q);
+                        }
+                        out.resize(w);
+                    }
+                    out.push(c, c, nm, L.add(c, act.id[k], i, t), 0);
+                    if (!act.src[k] && nm == ib) break;   // dominates every later candidate
+                }
+                if (!exact) break;
+            }
+        }
+        return finish(L, cand, exact ? std::min(best, pruned_min) : -INF, exact, max_cols);
+    }
+
+    // The max_cols cheapest distinct candidate columns: a heap, not a full sort.
+    PriceOut finish(Arena& L, std::vector<int>& cand, double min_lb, bool exact, int max_cols) {
+        label_hint_ = (long long)L.cost.size();
         auto costlier = [&](int a, int b) { return L.cost[a] > L.cost[b]; };
         std::make_heap(cand.begin(), cand.end(), costlier);
         std::vector<ColOut> cols;
@@ -522,6 +764,7 @@ PYBIND11_MODULE(_bpcprice, mod) {
              py::arg("differ") = std::vector<std::pair<int, int>>{},
              py::arg("same") = std::vector<std::pair<int, int>>{})
         .def("set_memory", &Pricer::set_memory, py::arg("ng"))
+        .def("set_kernel", &Pricer::set_kernel, py::arg("kernel"))
         .def("set_info", &Pricer::set_info, py::arg("job_ids"), py::arg("c1a"), py::arg("c1b"),
              py::arg("c2"))
         .def("price_cols", &Pricer::price_cols, py::arg("A"), py::arg("B"), py::arg("sources"),

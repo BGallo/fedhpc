@@ -228,3 +228,58 @@ def test_activation_dual_is_priced_once_per_column(name, ng_size):
                 assert mn == pytest.approx(brute, abs=1e-6)
             else:               # none: a valid bound no lower than -tol
                 assert -1e-9 - 1e-6 <= mn <= brute + 1e-6
+
+
+def _rm_m2n10():
+    from fedhpc import rm_benchmark as rm
+    from test_rm_benchmark import M2N10_1
+    data = rm.parse(M2N10_1)
+    return rm.to_instance(data, horizon=sum(max(r) for r in data[0]))
+
+
+def _kernels():
+    ks = [1, 2]
+    probe = bpc._bpcprice.Pricer(4, [1], [[0]])
+    try:
+        probe.set_kernel(3)
+        ks.append(3)
+    except ValueError:   # no AVX2 on this CPU
+        pass
+    return ks
+
+
+@pytest.mark.parametrize("name", [*_TRAPS, "rm_M2N10_1"])
+@pytest.mark.parametrize("w", [(1.0, 0.0), (1.0, 1.0)])
+def test_dp_kernels_agree(name, w):
+    """The DP kernels (AoS, SoA scalar, SoA AVX2) give the same minimum,
+    exactness and reduced costs on random duals."""
+    inst = _rm_m2n10() if name == "rm_M2N10_1" else TRAP_INSTANCES[name]()
+    prep = bpc._prepare(inst)
+    rng = random.Random(zlib.crc32(name.encode()))
+    opts = bpc.PricingOptions()
+    for _draw in range(6):
+        d = _random_duals(prep, rng, *w)
+        out = {}
+        for k in _kernels():
+            pricing = bpc._NodePricing(prep, opts, frozenset(), {}, frozenset(), frozenset())
+            for pricer, _arcs, _local in pricing.types.values():
+                pricer.set_kernel(k)
+            res = []
+            for mid in prep.path_types:
+                mn, exact, _n, cols = pricing.price(mid, d, *w, 1e-7)
+                rcs = sorted(round(bpc._column_rc(c, d, *w), 6) for c in cols)
+                res.append((round(mn, 9) if math.isfinite(mn) else mn, exact, rcs))
+            out[k] = res
+        first = out[1]
+        for k, res in out.items():
+            assert res == first, f"kernel {k} differs from kernel 1"
+
+
+def test_dp_kernels_same_optimum(monkeypatch):
+    inst = _rm_m2n10()
+    objs = {}
+    for k in _kernels():
+        monkeypatch.setattr(bpc, "_PRICER_KERNEL", k)
+        objs[k] = bpc._branch_and_price(inst, 1.0, 1.0)[0]
+    assert len(set(objs.values())) == 1, objs
+    assert objs[1] == 145220

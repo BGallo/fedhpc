@@ -155,6 +155,42 @@ are active):
   - dropping the implied fixed-cost link rows: CG iterations 99 -> 789.
 
   An Rm solve is now about 40 % DP, 40 % LP and 20 % setup.
+- **SIMD dominance scans** (2026-11-26). With the early stop, what is left
+  are scans of 10-28 entries: the bucket, and both merge scans against the
+  active set. For one-word masks without cuts or same pairs, the DP runs
+  on structure-of-arrays storage (``Pricer.run_soa``):
+
+  - every scan compares four entries at a time with AVX2 (cost compare,
+    ``andnot``/``cmpeq`` mask subset), selected at run time;
+  - the body is compiled once for AVX2 so the scans inline;
+  - retirement is one binary search, since the active set is sorted.
+
+  It agrees with the other kernels (``_PRICER_KERNEL``, tests in
+  ``test_bpc_pricing.py``). Recorded DP 4.05 -> 3.16 s (rm_M5N50_1 1.45 ->
+  0.93 s); end to end, with pricing already threaded, hard tier 9.5 ->
+  8.9 s and gap 7.3 -> 6.9 s.
+- **A bespoke RMP LP: investigated, not adopted** (2026-11-26). The
+  prototype was a bounded primal simplex with a dense explicit B^-1 and
+  warm starts across column additions (no refactorisation, no fixed
+  per-call cost). Its anti-degeneracy was bound perturbation plus Bland.
+  On the recorded RMP sequences, objectives agreed with Gurobi's to 1e-8:
+
+  - rm_M2N30_1 (94 rows): 2.2x faster than Gurobi with partial Dantzig;
+  - rm_M5N50_1 (310 rows): 0.66x (Dantzig) and 0.88x (Devex, fewer
+    pivots than Gurobi but a full pass per pivot);
+  - rm_M8N40_1: 0.5x;
+  - rm_M2N20_3's child masters: stalled.
+
+  Pricing with its duals instead of Gurobi's took 5 % more CG iterations
+  on rm_M2N30_1, and the column stream they produced doubled its own LP
+  time, which erased the gain. Matching Gurobi would need:
+
+  - Devex with sparse pivot rows from a row-wise A;
+  - EXPAND-style anti-degeneracy and a phase-1 clean-up;
+  - LU updates for the 300+-row masters.
+
+  Gurobi's per-call overhead is not the bottleneck: its pivot count on
+  these degenerate masters is.
 - **RMP heuristic during root column generation**
   (``TREE_DEFAULTS["root_cg_heuristic"]``): at iterations 10, 20, 40, ...
   on a copy of the RMP (1 s cap), so the root's Lagrangian bound prunes
@@ -1530,6 +1566,12 @@ DEFAULT_PRICING = PricingOptions()
 
 
 _EXECUTORS: dict[int, ThreadPoolExecutor] = {}
+# The compiled DP's kernel (``Pricer.set_kernel``): 0 picks the
+# structure-of-arrays path with AVX2 dominance scans where it applies (one
+# mask word, no cuts or same pairs) and the CPU has AVX2; 1 the
+# array-of-structures path, 2 SoA with scalar scans, 3 SoA with AVX2.
+# Results do not depend on it.
+_PRICER_KERNEL = 0
 # A pricing round whose previous one created fewer labels (over all path
 # types) runs sequentially: below this the thread hand-off costs more.
 _PARALLEL_MIN_LABELS = 5000
@@ -1720,6 +1762,8 @@ class _NodePricing:
             same = [(local[j], local[k]) for j, k in same_pairs if j in local and k in local]
             pricer = _bpcprice.Pricer(H, [arc.p_occ for arc, _ts in kept],
                                       [ts for _arc, ts in kept], differ, same)
+            if _PRICER_KERNEL:
+                pricer.set_kernel(_PRICER_KERNEL)
             pricer.set_info([arc.job_id for arc, _ts in kept],
                             [arc.weight * (arc.p_occ - prep.arrival_of[arc.job_id])
                              for arc, _ts in kept],

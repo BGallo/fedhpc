@@ -37,6 +37,7 @@ cache-keys = [
     { file = "pyproject.toml" },
     { file = "CMakeLists.txt" },
     { file = "src/fedhpc/_ext/*" },
+    { file = "src/fedhpc/_ext/lp/*" },
 ]
 
 [dependency-groups]

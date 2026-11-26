@@ -7,7 +7,7 @@
 \emergencystretch=3em
 \usepackage[margin=2.6cm]{geometry}
 \usepackage{amsmath,amssymb,amsthm,mathtools}
-\usepackage{booktabs,array}
+\usepackage{booktabs,array,longtable}
 \usepackage{enumitem}
 \usepackage{tikz}
 \usetikzlibrary{arrows.meta,positioning}
@@ -20,15 +20,19 @@
 \newtheorem{corollary}[theorem]{Corollary}
 \theoremstyle{definition}
 \newtheorem{definition}[theorem]{Definition}
+\newtheorem{example}[theorem]{Example}
 \theoremstyle{remark}
 \newtheorem{remark}[theorem]{Remark}
 
 \newcommand{\J}{\mathcal{J}}
 \newcommand{\M}{\mathcal{M}}
+\newcommand{\K}{\mathcal{K}}
+\newcommand{\Sites}{\mathcal{S}}
+\newcommand{\Res}{\mathcal{R}}
 \newcommand{\Minf}{\M^{\infty}}
 \newcommand{\MP}{\M^{\mathrm{P}}}
 \newcommand{\MU}{\M^{U}}
-\newcommand{\Rel}{\mathcal{R}}
+\newcommand{\Rel}{\mathcal{T}^{\mathrm{rel}}}
 \newcommand{\Om}{\Omega}
 \newcommand{\Cuts}{\mathcal{C}}
 \newcommand{\Z}{\mathbb{Z}}
@@ -37,9 +41,17 @@
 \newcommand{\ind}[1]{\mathbf{1}[#1]}
 \newcommand{\rc}{\bar c}
 \newcommand{\RMP}{\mathrm{RMP}}
+\newcommand{\loc}{\operatorname{loc}}
+\newcommand{\busy}{\operatorname{busy}}
+\newcommand{\nrun}{n^{\mathrm{run}}}
+\newcommand{\nrel}{n^{\mathrm{rel}}}
+\newcommand{\pin}{\mathrm{in}}
+\newcommand{\pout}{\mathrm{out}}
+\newcommand{\status}[1]{\textsf{\small[#1]}}
 
-\title{The FED-HPC branch-price-and-cut solver:\\
-mathematical formulation}
+\title{Exact decomposition solvers for FED-HPC:\\
+branch-price-and-cut and the LP-first engine,\\
+with multi-node jobs and geo-distributed I/O}
 \author{fedhpc project notes}
 \date{26 November 2026}
 
@@ -47,120 +59,396 @@ mathematical formulation}
 \maketitle
 
 \begin{abstract}
-This note states the mathematics behind the exact branch-price-and-cut (BPC)
-solver in \code{src/fedhpc/bpc.py} and its compiled pricer
-\code{src/fedhpc/\_ext/bpc\_pricing.cpp}. We give the preprocessing that turns
-an instance into path types and release groups, the Dantzig--Wolfe master
-problem over instance-lifetime columns with all its optional rows (bound rows,
-fixed-cost linking, activation rows and limited-memory subset-row cuts), its
-dual, the reduced cost and its decomposition over arcs, the pricing problem
-(an ng-route shortest path with resources on the space-time DAG of each type),
-the Lagrangian bound, the stopping rules of column generation, reduced-cost
-fixing, the branching rules and the way lexicographic and Pareto searches call
-the solver. Each statement names the code that implements it.
+This note is a self-contained mathematical description of the two
+decomposition-based exact solvers of the FED-HPC scheduling problem: the
+branch-price-and-cut (BPC) solver (\code{src/fedhpc/bpc.py} with its compiled
+pricer \code{src/fedhpc/\_ext/bpc\_pricing.cpp}) and the LP-first engine
+(\code{src/fedhpc/lpfirst.py}). It defines the problem from scratch, including
+the two newest extensions of the data model: \emph{multi-node} jobs, which hold
+several instances of one type at the same time, and \emph{geo-distributed I/O},
+where each job stages its data in from an origin site and its results out to a
+destination site. It then states the compact arc-flow model, the exact start-set
+reductions both solvers rely on, the BPC master problem, its pricing, bounds,
+fixing and branching, the LP-first master and its branch-free optimality
+certificate, and finally how the two extensions change each solver. Every
+statement names the code that implements it.
 \end{abstract}
 
 \tableofcontents
 
 %======================================================================
-\section{Scope and notation}\label{sec:scope}
+\section{Reading guide}\label{sec:guide}
 %======================================================================
 
-The problem and its compact (space-time, arc-flow) model are those of the
-note \code{formulation\_reductions.tex} in \code{docs/}; we reuse its notation and only recall
-what is needed. The solver requires single-node jobs (it calls
-\code{Instance.require\allowbreak\_unit\allowbreak\_demand}), so each job holds one instance of one
-type for its whole processing time. The LP-first engine (\code{fedhpc.lpfirst})
-for the large trace instances is a different method and is not covered here.
+\Cref{sec:data,sec:derived,sec:problem} define the problem.
+\Cref{sec:compact} states the compact model and \cref{sec:reductions} the
+reductions. \Cref{sec:columns,sec:master,sec:rc,sec:pricing,sec:lagr,sec:cg,sec:fixing,sec:tree,sec:cuts,sec:strength}
+describe BPC; \cref{sec:lpfirst} describes LP-first; \cref{sec:lex} describes
+how both plug into the lexicographic and Pareto searches.
+\Cref{sec:multinode,sec:geo} collect the effect of the two extensions on
+everything before, and \cref{sec:support} summarises which solver handles what.
 
-Time is discrete. A \emph{slot} $u\in\{0,\dots,H-1\}$ is the interval
-$[u,u+1)$ and a \emph{node} $v\in\{0,\dots,H\}$ is an instant.
+Each statement about the code carries a status tag:
+\status{impl} implemented and tested on \code{main};
+\status{branch} implemented and tested on branch \code{geo-distributed-io} only;
+\status{proposed} specified here, not implemented.
+Untagged statements are mathematics or describe \code{main}.
 
-\paragraph{Data.}
-\begin{itemize}[nosep]
-  \item $\J$: jobs. Job $j$ has arrival $a_j$, release $r_j=\max(0,\lceil a_j\rceil)$
-    and weight $w_j\ge0$ (an integer; \code{Instance.build} enforces this).
-  \item $\M$: instance types. Type $m$ has capacity $N_m\in\Z_{\ge0}\cup\{\infty\}$
-    and fixed usage cost $U_m\ge0$. $\MU:=\{m:U_m>0\}$.
-  \item $F_j\subseteq\M$: types that fit job $j$. For $m\in F_j$: occupied time
-    $p_{jm}\in\Z_{\ge1}$, cost $c_{jm}\ge0$ and feasible starts
-    $T_{jm}=[r_j,H-p_{jm}]\cap\Z$.
-  \item Running jobs: $\Rel^{\mathrm{run}}_m(v)$ instances of type $m$ become free
-    at node $v\in\{1,\dots,H\}$ (a running job's clipped end), and
-    $R_m=\sum_v \Rel^{\mathrm{run}}_m(v)$ instances are busy at $0$.
-  \item Cost resolution $\delta>0$: every $c_{jm}$ and $U_m$ is an integer
-    multiple of $\delta$ (\code{c\_units}).
+\paragraph{Conventions.} Time is discrete. A \emph{slot} $u\in\{0,\dots,H-1\}$
+is the interval $[u,u+1)$ and a \emph{node} $v\in\{0,\dots,H\}$ is an instant;
+durations are in slots (physical times are divided by the slot length before
+the model is built). $[a,b]_\Z:=\{t\in\Z:a\le t\le b\}$. $\ind{\cdot}$ is the
+indicator of a statement, $|A|$ the size of a finite set, $\lceil\cdot\rceil$
+the ceiling. A \emph{bitset} is a subset of a finite set stored as bits.
+
+%======================================================================
+\section{Data}\label{sec:data}
+%======================================================================
+
+\subsection{Sites and transfer links \status{branch}}
+\begin{itemize}[leftmargin=*]
+\item $\Sites$: a finite set of \emph{sites}, i.e.\ places that hold data. Each
+  on-premises cluster is a site, and so is each cloud region.
+\item For each ordered pair of sites $(s,s')$, a \emph{link} with transfer time
+  $\tau^{\mathrm L}_{ss'}\ge0$ (slots per GB) and price
+  $\kappa^{\mathrm L}_{ss'}\ge0$ (currency per GB), and
+  $\tau^{\mathrm L}_{ss}=\kappa^{\mathrm L}_{ss}=0$ (\code{Link(src, dst, time, cost)}).
+  Typically cloud egress has $\kappa^{\mathrm L}>0$, cloud ingress
+  $\kappa^{\mathrm L}=0$, and research-network links $\kappa^{\mathrm L}=0$,
+  $\tau^{\mathrm L}>0$.
+\end{itemize}
+On \code{main} there are no sites; the \emph{per-type mode} below replaces the
+links.
+
+\subsection{Instance types}
+$\M$ is a finite set of \emph{instance types}. A type is a pool of identical
+instances (nodes or virtual machines). Type $m$ has
+\begin{itemize}[nosep,leftmargin=*]
+\item a capacity $N_m\in\Z_{\ge0}\cup\{\infty\}$ (number of instances; $\infty$
+  for cloud);
+\item a performance factor $P_m>0$ and a deployment time $D_m\ge0$ (occupied,
+  not billed);
+\item per-instance resource capacities $C^r_m\ge0$ for
+  $r\in\Res=\{\mathrm{cpu},\mathrm{mem},\mathrm{stor},\mathrm{gpu}\}$; a GPU
+  partition is a type with $C^{\mathrm{gpu}}_m>0$;
+\item prices: $\kappa^{\mathrm{VM}}_m$ per instance and slot,
+  $\kappa^{\mathrm S}_m$ per storage unit, instance and slot, and a one-off
+  \emph{fixed usage cost} $U_m\ge0$ charged if any job uses the type;
+\item in per-type mode, an I/O time $\tau^{\mathrm{IO}}_m$ and price
+  $\kappa^{\mathrm{IO}}_m$ per GB of output (zero on on-prem types);
+\item \status{branch} in site-aware mode, a site $\loc(m)\in\Sites$.
+\end{itemize}
+$\MU:=\{m:U_m>0\}$.
+
+\subsection{Jobs}
+$\J$ is the finite set of jobs to schedule. Job $j$ has
+\begin{itemize}[nosep,leftmargin=*]
+\item an arrival $a_j\in\R$ (negative if the job has already waited inside a
+  rolling window), a base execution time $e_j\ge0$ and an integer priority
+  weight $w_j\ge0$;
+\item a \emph{node count} $q_j\in\Z_{\ge1}$ \status{impl}: the job runs on $q_j$
+  instances of \emph{one} type, all starting and ending together (gang
+  scheduling). $q_j=1$ is a single-node job;
+\item per-instance demands $q^r_j\ge0$, $r\in\Res$;
+\item an output volume $\iota^\pout_j\ge0$ (GB);
+\item \status{branch} an input volume $\iota^\pin_j\ge0$, an \emph{origin}
+  site $o_j$ that holds the input, a \emph{destination} site $h_j$ that receives
+  the output (default $h_j=o_j$), and a set of \emph{allowed sites}
+  $\Sites_j\subseteq\Sites$ (default $\Sites$).
 \end{itemize}
 
-\paragraph{Schedules and objectives.} A schedule assigns each job a type
-$\mu_j\in F_j$ and a start $s_j\in T_{j\mu_j}$, with completion
-$C_j=s_j+p_{j\mu_j}$. It is feasible if at every slot at most $N_m$ instances of
-type $m$ are busy (running jobs included). The objectives are
+\subsection{Running jobs and horizon}
+$H\in\Z_{\ge1}$ is the horizon. $\K$ is the set of jobs already running at time
+$0$; they are fixed. Running job $k$ holds $u_k\in\Z_{\ge1}$ instances of a
+finite-capacity type $m_k$ until node $\bar e_k:=\min(e_k,H)\ge1$. Define
 \[
-f_1=\sum_{j\in\J} w_j\,(C_j-a_j),\qquad
-f_2=\sum_{j\in\J} c_{j\mu_j}+\sum_{m\in\mu(\J)}U_m .
+\nrun_m:=\sum_{k:m_k=m}u_k\ \le N_m,\qquad
+\nrel_{mv}:=\sum_{k:m_k=m,\ \bar e_k=v}u_k,\qquad
+\nrun_m(u):=\sum_{k:m_k=m,\ u<\bar e_k}u_k,
 \]
+the instances held at $0$, released at node $v$, and held during slot $u$.
+Running jobs on infinite-capacity types are discarded.
 
-\paragraph{The problem the tree solves.} Every call of
-\code{\_branch\_and\_price} solves
-\begin{equation}\label{eq:P}
-\tag{P}
-z^\star(\omega,B)=\min\bigl\{\omega_1 f_1+\omega_2 f_2 \;:\;
-\text{feasible schedule},\ f_1\le B_1,\ f_2\le B_2\bigr\},
+%======================================================================
+\section{Derived parameters}\label{sec:derived}
+%======================================================================
+
+\code{Instance.build} (\code{src/fedhpc/data.py}) computes, for every job $j$
+and type $m$:
+
+\paragraph{Feasible types.}
+\begin{equation}\label{eq:F}
+F_j=\bigl\{m\in\M:\ q^r_j\le C^r_m\ \forall r\in\Res,\ \ q_j\le N_m,\ \
+\loc(m)\in\Sites_j\bigr\}.
 \end{equation}
-with $\omega_1,\omega_2\ge0$ (\code{weight1}, \code{weight2}) and optional caps
-$B_1,B_2\in\R\cup\{+\infty\}$ (\code{bound1\_value}, \code{bound2\_value}).
-A missing cap means the row is not built. Lexicographic and Pareto searches are
-sequences of such calls (\cref{sec:lex}).
+The site condition exists only in site-aware mode \status{branch}. The build
+fails if some $F_j$ is empty.
+
+\paragraph{Transfer time and cost.}
+\begin{align}
+\text{per-type mode:}\quad&
+\tau_{jm}=\tau^{\mathrm{IO}}_m\,\iota^\pout_j,\qquad
+\kappa_{jm}=\kappa^{\mathrm{IO}}_m\,\iota^\pout_j;\label{eq:io-type}\\
+\text{site-aware \status{branch}:}\quad&
+\tau_{jm}=\tau^{\mathrm L}_{o_j\loc(m)}\iota^\pin_j+\tau^{\mathrm L}_{\loc(m)h_j}\iota^\pout_j,\notag\\
+&\kappa_{jm}=\kappa^{\mathrm L}_{o_j\loc(m)}\iota^\pin_j+\kappa^{\mathrm L}_{\loc(m)h_j}\iota^\pout_j.\label{eq:io-geo}
+\end{align}
+Site-aware mode is on when the instance has links; it requires
+$\tau^{\mathrm{IO}}_m=\kappa^{\mathrm{IO}}_m=0$ so nothing is priced twice. Both
+quantities are per job, not per instance: a multi-node job's data move once.
+
+\paragraph{Durations, cost, start sets.} With $\delta>0$ the \emph{cost
+resolution} (\code{cost\_resolution}),
+\begin{align}
+p^{\mathrm{bill}}_{jm}&=e_j/P_m+\tau_{jm}, \label{eq:pbill}\\
+p_{jm}&=\max\bigl\{1,\ \lceil p^{\mathrm{bill}}_{jm}+D_m\rceil\bigr\}\in\Z_{\ge1}, \label{eq:p}\\
+c_{jm}&=\delta\cdot\operatorname{round}\Bigl(\bigl[\kappa_{jm}+q_j\,(\kappa^{\mathrm{VM}}_m+\kappa^{\mathrm S}_mq^{\mathrm{stor}}_j)\,p^{\mathrm{bill}}_{jm}\bigr]/\delta\Bigr)\in\delta\Z, \label{eq:c}\\
+r_j&=\max(0,\lceil a_j\rceil),\qquad T_{jm}=[\,r_j,\ H-p_{jm}\,]_\Z. \label{eq:T}
+\end{align}
+$p_{jm}$ is the \emph{occupied time} (the job holds $q_j$ instances during
+$[t,t+p_{jm})$ if it starts at $t$), $c_{jm}$ its money cost, $r_j$ its
+\emph{release slot} and $T_{jm}$ its feasible starts. Transfers are inside
+$p^{\mathrm{bill}}$, so all $q_j$ instances are held (and billed, in the cloud)
+while data is staged. The build fails if some $T_{jm}$ with $m\in F_j$ is
+empty. Every $c_{jm}$ and every $U_m$ is an integer multiple of $\delta$
+(\code{c\_units} stores $c_{jm}/\delta$).
+
+\begin{example}
+A job with $q_j=2$, $e_j=8$, $\iota^\pin_j=50$, $\iota^\pout_j=20$ and
+$o_j=h_j=A$. A research cluster $m_B$ at site $B$ ($P=2$,
+$\tau^{\mathrm L}_{AB}=\tau^{\mathrm L}_{BA}=0.02$, free) gets
+$\tau_{jm_B}=1.0+0.4$, $p^{\mathrm{bill}}=5.4$, $p=6$, $c=0$. A cloud type $m_c$
+at site $C$ ($P=2$, $D=1$, $\tau^{\mathrm L}_{AC}=0.01$,
+$\tau^{\mathrm L}_{CA}=0.02$, $\kappa^{\mathrm L}_{CA}=0.09$,
+$\kappa^{\mathrm{VM}}=3$) gets $\tau=0.9$, $p^{\mathrm{bill}}=4.9$, $p=6$ and
+$c=1.8+2\cdot3\cdot4.9=31.2$.
+\end{example}
 
 %======================================================================
-\section{Preprocessing}\label{sec:prep}
+\section{Schedules, objectives and the problems solved}\label{sec:problem}
 %======================================================================
 
-\code{\_prepare} computes the following once per instance. A Pareto search
-shares the result across all its box solves.
-
-\subsection{Reduced start sets}
-If the data are nonnegative ($w_j,c_{jm},U_m\ge0$), the start sets are reduced
-to $S_{jm}\subseteq T_{jm}$ by the objective-independent exact reductions of
-\code{formulations}: normal-pattern starts (N1), the collapse of unbounded
-types to their release (R1) and the Pareto filter on unbounded options (R2).
-Otherwise $S_{jm}=T_{jm}$. Pairs with $S_{jm}=\emptyset$ are dropped. These
-reductions never raise $f_1$ or $f_2$ of any schedule (proofs in
-\code{docs/formulation\_reductions.tex}), so they remain valid under both caps
-of \eqref{eq:P} and under any branching decision. The objective-dependent
-reductions R3 and LX are not valid under an $f_2$ cap and are not used.
-
-\subsection{Unbounded types and path types}
-A type is \emph{unbounded} if its capacity can never bind:
+\begin{definition}[Schedule, feasibility]\label{def:schedule}
+A \emph{schedule} assigns each job $j$ a type $\mu_j\in F_j$ and a start
+$s_j\in T_{j\mu_j}$; its completion is $C_j=s_j+p_{j\mu_j}$. The \emph{busy
+count} of type $m$ in slot $u$ is
 \[
-\Minf := \bigl\{m\in\M : N_m=\infty \ \text{ or }\ N_m-R_m\ \ge\ |\{j: m\in F_j\}|\bigr\}
+\busy_{mu}:=\sum_{j:\ \mu_j=m,\ s_j\le u<C_j} q_j .
 \]
-(\code{formulations.unbounded\_types}). On such a type every job may run on
-its own instance, so a multi-job timeline is never needed: it splits into
-single-job timelines with the same total cost. The remaining types are the
-\emph{path types} $\MP:=\M\setminus\Minf$.
+The schedule is \emph{feasible} if $\busy_{mu}+\nrun_m(u)\le N_m$ for every
+type and slot. This is the check \code{Instance.\allowbreak schedule\_\allowbreak violations}
+performs.
+\end{definition}
 
-\subsection{Release groups}
-For $m\in\MP$ the instances are grouped by the node at which they become free
-(\code{\_release\_classes}):
+Which $q_j$ instances a job gets is not modelled: instances of a type are
+interchangeable, and any feasible schedule can be given concrete instances by
+assigning jobs in start order to free instances (interval-graph colouring).
+
+\begin{definition}[Objectives]
 \[
-N_{m,0}:=N_m-R_m,\qquad N_{m,r}:=\Rel^{\mathrm{run}}_m(r)\quad(1\le r<H),
+f_1=\sum_{j\in\J}w_j\,(C_j-a_j)\quad\text{(weighted turnaround)},\qquad
+f_2=\sum_{j\in\J}c_{j\mu_j}+\sum_{m\in\mu(\J)}U_m\quad\text{(money)},
 \]
-and $\Rel_m:=\{r: N_{m,r}>0\}$. An instance released at $H$ can run nothing and
-is left out. Each group $(m,r)$ gets its own fleet row
-(\cref{sec:master}), which reproduces the compact model's boundary condition
-$y_{m,-1}=N_m-R_m$ together with the running-job inflows $\Rel^{\mathrm{run}}_m(v)$.
+where $\mu(\J)$ is the set of types some job uses.
+\end{definition}
+
+\paragraph{Grid property.} Weights and completions are integers, so $f_1$
+takes values in $s_1\Z-\sum_jw_ja_j$ with $s_1:=\gcd_jw_j$; $f_2$ takes
+values in $s_2\Z$ with $s_2:=\delta\cdot\gcd(\{c_{jm}/\delta\}\cup\{U_m/\delta\})$.
+Two schedules with different $f_1$ differ by at least $s_1$, and likewise for
+$f_2$. Every exactness argument below uses this.
+
+\paragraph{The scalar problem.} Every call of either solver solves
+\begin{equation}\label{eq:P}\tag{P}
+z^\star(\omega,B)=\min\bigl\{\omega_1f_1+\omega_2f_2:\ \text{feasible schedule},\ f_1\le B_1,\ f_2\le B_2\bigr\}
+\end{equation}
+with weights $\omega_1,\omega_2\ge0$ and optional \emph{caps}
+$B_1,B_2\in\R\cup\{+\infty\}$ (an infinite cap means no constraint).
+
+\paragraph{Lexicographic problem.} $\operatorname{lex\,min}(f_1,f_2)$ subject to
+caps is: minimise $f_1$; among the minimisers, minimise $f_2$. It is two calls
+of \eqref{eq:P}: first $\omega=(1,0)$ giving $f_1^\star$, then $\omega=(0,1)$
+with $B_1:=\min(B_1,f_1^\star)$. The order $(f_2,f_1)$ is symmetric.
+
+\paragraph{Pareto front.} Schedule $\sigma'$ \emph{dominates} $\sigma$ if
+$f_1(\sigma')\le f_1(\sigma)$ and $f_2(\sigma')\le f_2(\sigma)$ with one strict.
+The \emph{Pareto front} is the set of objective vectors of nondominated feasible
+schedules. \code{pareto.true\_pareto\_frontier} computes it exactly by
+\emph{box search} (Hamacher, Pedersen and Ruzika~\cite{hamacher2007}): find the
+two extreme points $A=\operatorname{lex\,min}(f_1,f_2)$ and
+$B=\operatorname{lex\,min}(f_2,f_1)$; keep a box between two adjacent known
+points $L$ (smaller $f_1$) and $R$; shrink it from the left by solving
+$\operatorname{lex\,min}(f_1,f_2)$ with cap $f_2\le f_2(L)-s_2$, or from the
+right by $\operatorname{lex\,min}(f_2,f_1)$ with cap $f_1\le f_1(R)-s_1$. The
+result is either the opposite corner (the box is empty) or a new Pareto point
+adjacent to $L$ (resp.\ $R$). The grid property makes the caps exact. The
+\emph{engine} that answers each capped lex-min is pluggable: the compact
+Gurobi model, BPC or LP-first.
+
+%======================================================================
+\section{The compact arc-flow model}\label{sec:compact}
+%======================================================================
+
+This is \code{SpaceTimeFormulation} in \code{src/fedhpc/formulations.py}, the
+reference both decompositions are measured against.
+
+\paragraph{Network.} For each finite-capacity type $m$, $G_m$ is a directed
+acyclic graph on the nodes $\{0,\dots,H\}$ with a \emph{wait arc} $(v,v+1)$ for
+$v<H$ and a \emph{processing arc} $(j,t)$ from $t$ to $t+p_{jm}$ for every job
+$j$ with $m\in F_j$ and start $t\in S_{jm}$, where $S_{jm}\subseteq T_{jm}$ is
+the set of allowed starts (all of $T_{jm}$ without reductions;
+\cref{sec:reductions}). A selected processing arc carries $q_j$ units of flow
+(the instances it holds); a wait arc carries idle instances.
+
+\paragraph{Variables.} $x_{jmt}\in\{0,1\}$: job $j$ starts on $m$ at $t$.
+$y_{mv}\ge0$: idle instances of $m$ in slot $v$. $z_m\in\{0,1\}$ for $m\in\MU$:
+type $m$ is used. For unbounded capacity the code uses $N_m:=\sum_jq_j$.
+\begin{align}
+&\textstyle\sum_{m\in F_j}\sum_{t\in S_{jm}}x_{jmt}=1 && j\in\J, \label{eq:assign}\\
+&\textstyle y_{m,v-1}+\sum_{j}q_j\,x_{jm,v-p_{jm}}+\nrel_{mv}
+ =y_{mv}+\sum_{j}q_j\,x_{jmv} && m,\ v\in[0,H]_\Z, \label{eq:flow}\\
+&y_{m,-1}:=N_m-\nrun_m,\qquad y_{mH}:=N_m, \label{eq:boundary}\\
+&\textstyle\sum_{t\in S_{jm}}x_{jmt}\le z_m && m\in\MU\cap F_j, \label{eq:fixed}
+\end{align}
+where terms with $t\notin S_{jm}$ are absent. The objectives are linear:
+$f_1=\sum w_j(t+p_{jm}-a_j)x_{jmt}$ and
+$f_2=\sum c_{jm}x_{jmt}+\sum_{m\in\MU}U_mz_m$. Caps become the rows
+$f_1\le B_1$ and $f_2\le B_2$.
+
+\begin{proposition}[Flow rows are capacity rows]\label{prop:capacity}
+Let $x\ge0$ (integral or not). There is a $y\ge0$ satisfying
+\eqref{eq:flow}--\eqref{eq:boundary} if and only if
+\begin{equation}\label{eq:cap}
+\sum_{j}q_j\!\!\sum_{t\in S_{jm}:\,t\le u<t+p_{jm}}\!\!x_{jmt}\ +\ \nrun_m(u)\ \le\ N_m
+\qquad\text{for all $m$ and slots $u$,}
+\end{equation}
+and then $y_{mu}$ equals $N_m$ minus the left-hand side.
+\end{proposition}
+
+\begin{proof}
+Add \eqref{eq:flow} for $v=0,\dots,u$. The $y$ terms telescope to
+$y_{m,-1}-y_{mu}$. An arc $(j,t)$ contributes $-q_jx_{jmt}$ if it started by
+$u$ and $+q_jx_{jmt}$ if it also ended by $u$, so in total
+$-q_jx_{jmt}\ind{t\le u<t+p_{jm}}$. The running jobs contribute
+$\nrun_m-\nrun_m(u)$. With \eqref{eq:boundary} this gives $y_{mu}=N_m-\text{LHS of \eqref{eq:cap}}$,
+and $y\ge0$ is \eqref{eq:cap}. The row at $v=H$ holds because every arc and every
+running job ends by $H$. The argument is linear, so it holds for fractional $x$.
+\end{proof}
+
+So integer solutions are exactly the feasible schedules, and the LP relaxation
+equals the \emph{time-indexed} LP with capacity rows \eqref{eq:cap}, which is
+LP-first's master (\cref{sec:lpfirst}).
+
+%======================================================================
+\section{Exact start-set reductions}\label{sec:reductions}
+%======================================================================
+
+Both decompositions build their start sets with \code{bpc.\_prepare}. If all
+data are nonnegative ($w_j,c_{jm},U_m\ge0$; \code{nonnegative\_data}), the sets
+$T_{jm}$ are replaced by $S_{jm}\subseteq T_{jm}$ through the reductions
+below; otherwise $S_{jm}=T_{jm}$. Pairs with $S_{jm}=\emptyset$ are dropped.
+
+\begin{definition}[Unbounded types]\label{def:unbounded}
+\[
+\Minf:=\Bigl\{m\in\M:\ N_m=\infty\ \ \text{or}\ \ N_m-\nrun_m\ \ge\sum_{j:\,m\in F_j}q_j\Bigr\}
+\]
+(\code{formulations.unbounded\_types}). On such a type every job that fits can
+run at any time on instances of its own: capacity never binds. The other types
+are the \emph{path types} $\MP:=\M\setminus\Minf$.
+\end{definition}
+
+\begin{definition}[The three reductions used]
+\begin{itemize}[leftmargin=*]
+\item \textbf{N1, normal patterns} (Kramer et al.~\cite{kramer2020};
+  \code{normal\_pattern\_starts}). For type $m$, let $\mathcal P_m$ be the
+  smallest set of nodes that contains every release slot $r_j$ of a job with
+  $m\in F_j$ and every node $v$ with $\nrel_{mv}>0$, and that contains $v+p$
+  whenever it contains $v$, $v+p\le H$ and $p=p_{jm}$ for some job with
+  $r_j\le v$. Then $S_{jm}:=T_{jm}\cap\mathcal P_m$.
+\item \textbf{R1, collapse unbounded types.} For $m\in\Minf$,
+  $S_{jm}:=\{\min S_{jm}\}$: a job on an unbounded type starts as early as
+  allowed.
+\item \textbf{R2, Pareto filter on unbounded options.} Among the options
+  $m\in\Minf\cap F_j$ (each now with one completion $C_{jm}$), drop $m$ if
+  another option $m'$ without a fixed cost has $C_{jm'}\le C_{jm}$ and
+  $c_{jm'}\le c_{jm}$ and comes first in the order (completion, cost).
+\end{itemize}
+\end{definition}
+
+\begin{proposition}\label{prop:reductions}
+With nonnegative data, for every feasible schedule there is a feasible schedule
+using only starts in $S_{jm}$ whose $f_1$ and $f_2$ are both no larger. Hence
+\eqref{eq:P} has the same optimal value over the reduced sets for every
+$\omega\ge0$ and every pair of caps, and the Pareto front is unchanged.
+\end{proposition}
+
+\begin{proof}[Proof sketch]
+$f_1$ is nondecreasing in each completion and $f_2$ does not depend on start
+times. \emph{N1:} shift jobs left one slot at a time while feasible. In a
+schedule where no job can move left, take a job that does not start at its
+release. Moving it from $[t,t+p)$ to $[t-1,t-1+p)$ fails exactly when fewer
+than $q_j$ instances are free in slot $t-1$ (with the job removed), while at
+least $q_j$ are free in slot $t$; the free count therefore rises at $t$, which
+only a completion (new or running job) causes. By induction every start is in
+$\mathcal P_m$. \emph{R1:} on an unbounded type starting earlier never breaks
+capacity and lowers $f_1$. \emph{R2:} moving $j$ to the dominating option lowers
+or keeps both objectives and frees capacity elsewhere; the dominating option
+has no fixed cost, so $f_2$ gains no $U_m$. Full proofs:
+\code{docs/formulation\_reductions.tex} (unit demand, partly machine-checked in
+Lean) and \code{docs/arc\_flow\_extended\_model.tex} (multi-node and geo-I/O).
+\end{proof}
+
+The reductions R3 (rejection deadlines) and LX (lexicographic deadlines) of
+the compact model depend on the objective and are \emph{not} valid under an
+$f_2$ cap, so neither decomposition uses them in general. (LP-first uses LX in
+its reference-point phases, where it is valid; \cref{sec:lpfirst-refs}.)
+
+\paragraph{Release groups.} For a path type $m$, instances are grouped by the
+node at which they become free (\code{\_release\_classes}):
+\[
+N_{m,0}:=N_m-\nrun_m,\qquad N_{m,r}:=\nrel_{mr}\ \ (1\le r<H),
+\]
+\[
+\Rel_m:=\{r:N_{m,r}>0\},\qquad N^{\mathrm P}_m:=\sum_{r\in\Rel_m}N_{m,r}.
+\]
+An instance released at $H$ can do nothing and is left out. The groups
+reproduce \eqref{eq:boundary} and the running-job inflows $\nrel_{mv}$.
+
+%======================================================================
+\part*{Branch-price-and-cut}
+\addcontentsline{toc}{part}{Branch-price-and-cut}
+%======================================================================
+
+The BPC solver applies to \emph{unit-demand} instances: $q_j=1$ for every job
+and $u_k=1$ for every running job (\code{Instance.require\_unit\_demand}).
+\Cref{sec:multinode} explains why and what an extension would need. Under unit
+demand an instance runs at most one job at a time, so its whole timeline is a
+path in $G_m$, which is what the decomposition exploits.
 
 %======================================================================
 \section{Columns}\label{sec:columns}
 %======================================================================
 
-\subsection{The space-time network of a path type}
-For $m\in\MP$, the network $G_m$ has nodes $\{0,\dots,H\}$, a wait arc
-$(v,v+1)$ for every $v<H$, and a \emph{processing arc} $(j,t)$ from $t$ to
-$t+p_{jm}$ for every $j$ with $m\in F_j$ and $t\in S_{jm}$. It is a DAG ordered
-by time.
+\begin{definition}[Path column]\label{def:column}
+A column of release group $(m,r)$, $m\in\MP$, $r\in\Rel_m$, is a sequence
+$p=\bigl((j_1,t_1),\dots,(j_k,t_k)\bigr)$, $k\ge0$, of processing arcs of $G_m$
+with
+\[
+r\le t_1,\qquad t_i+p_{j_im}\le t_{i+1}\ (1\le i<k),\qquad t_k+p_{j_km}\le H .
+\]
+It is one instance's timeline over the horizon: a path from node $r$ to node $H$
+in $G_m$, with the waits implicit (\cref{fig:network}). The empty sequence is
+the \emph{null column} $\emptyset_{m,r}$ (an idle instance). The column is
+\emph{elementary} if $j_1,\dots,j_k$ are distinct. Its data are
+\begin{align*}
+a_{jp}&:=|\{i: j_i=j\}| &&\text{(visit count of job $j$)},\\
+c^1_p&:=\textstyle\sum_{i=1}^k w_{j_i}\,(t_i+p_{j_im}-a_{j_i}) &&\text{(its share of $f_1$)},\\
+c^2_p&:=\textstyle\sum_{i=1}^k c_{j_im} &&\text{(its share of $f_2$, fixed costs excluded)}.
+\end{align*}
+$\Om_{m,r}$ is the set of columns the pricer may generate for $(m,r)$: all
+elementary ones plus some that repeat a job (\cref{sec:ng}).
+$\Om_m:=\bigcup_r\Om_{m,r}$ and $\Om^{\mathrm P}:=\bigcup_{m\in\MP}\Om_m$.
+\end{definition}
 
 \begin{figure}[ht]
 \centering
@@ -174,45 +462,26 @@ by time.
   \draw[->,very thick,blue!60!black] (n2) to[bend left=50] node[above]{\small $(j_1,2)$} (n5);
   \draw[->,very thick,blue!60!black] (n6) to[bend left=50] node[above]{\small $(j_2,6)$} (n9);
   \draw[->,dashed,red!60!black] (n3) to[bend right=45] node[below=1pt]{\small $(j_3,3)$} (n7);
-  \node[draw,rounded corners,fill=blue!8,above=1.6cm of n2,anchor=south] (src) {\small source $r=2$, cost $-\rho_{m,2}$};
-  \draw[->] (src) -- (n2);
+  \node[draw,rounded corners,fill=blue!8] (src) at (0.3,1.6) {\small source $r=2$, cost $-\rho_{m,2}$};
+  \draw[->] (src.south east) -- (n2);
   \node[draw,rounded corners,fill=gray!10] (snk) at (10,1.5) {\small sink $H$};
   \draw[->] (snk) -- (n10);
 \end{tikzpicture}
 \caption{A column of release group $(m,2)$ in $G_m$ with $H=10$: wait to $2$,
 run $j_1$ on $[2,5)$, wait, run $j_2$ on $[6,9)$, wait to $H$. The dashed arc
-is another processing arc of $G_m$ that this column does not use.}
+is another processing arc of $G_m$, not used by this column.}
 \label{fig:network}
 \end{figure}
-
-\begin{definition}[Path column]\label{def:column}
-A column of release group $(m,r)$, $m\in\MP$, $r\in\Rel_m$, is a sequence
-$p=\bigl((j_1,t_1),\dots,(j_k,t_k)\bigr)$, $k\ge0$, of processing arcs of $G_m$
-with
-\[
-r\le t_1,\qquad t_i+p_{j_im}\le t_{i+1}\ (1\le i<k),\qquad t_k+p_{j_km}\le H .
-\]
-It is one instance's timeline over the whole horizon (a source-to-sink path in
-$G_m$ from node $r$, with waits filled in). The empty sequence is the
-\emph{null column} $\emptyset_{m,r}$ (an idle instance). The column is
-\emph{elementary} if $j_1,\dots,j_k$ are distinct. Its data are
-\begin{align*}
-a_{jp}&:=|\{i: j_i=j\}| &&\text{(visit count of job $j$)},\\
-c^1_p&:=\textstyle\sum_{i=1}^k w_{j_i}\,(t_i+p_{j_im}-a_{j_i}) &&\text{(its share of $f_1$)},\\
-c^2_p&:=\textstyle\sum_{i=1}^k c_{j_im} &&\text{(its share of $f_2$ without $U_m$)}.
-\end{align*}
-$\Om_{m,r}$ is the set of columns the pricer may generate for group $(m,r)$
-(\cref{sec:ng}): all elementary columns, plus some that repeat a job.
-$\Om_m:=\bigcup_{r}\Om_{m,r}$.
-\end{definition}
 
 \begin{definition}[Static column]
 For $m\in\Minf$, $m\in F_j$ and $t\in S_{jm}$, the \emph{static column}
 $q=(j,m,t)$ is the single-job timeline with $a_{jq}=1$,
-$c^1_q=w_j(t+p_{jm}-a_j)$ and $c^2_q=c_{jm}$. $\Om^\infty_j$ denotes the static
-columns of job $j$ and $\Om^\infty:=\bigcup_j\Om^\infty_j$. They are all
-enumerated up front (\code{static\_columns}); under R1 each pair $(j,m)$ has
-one start, so there are at most $|\J|\,|\Minf|$ of them.
+$c^1_q=w_j(t+p_{jm}-a_j)$, $c^2_q=c_{jm}$. On an unbounded type a multi-job
+timeline splits into single-job ones of the same total cost and capacity never
+binds, so these suffice. $\Om^\infty_j$ is the set of static columns of job
+$j$, $\Om^\infty_{jm}$ those on type $m$, $\Om^\infty:=\bigcup_j\Om^\infty_j$.
+They are enumerated up front (\code{static\_columns}); under R1 there is one
+per pair $(j,m)$.
 \end{definition}
 
 %======================================================================
@@ -221,23 +490,23 @@ one start, so there are at most $|\J|\,|\Minf|$ of them.
 
 \subsection{Variables}
 \begin{itemize}[nosep]
-  \item $\lambda_p\ge0$ for every path column $p\in\Om_{m,r}$: the number of
-    instances of group $(m,r)$ following timeline $p$.
-  \item $\lambda_q\ge0$ for every static column $q\in\Om^\infty$.
-  \item $z_m\in[0,1]$ for $m\in\MU$: type $m$ is used.
-  \item $\alpha_j\ge0$ for $j\in\J$: an artificial variable with cost $\bar M$
-    (\code{\_big\_m\_for}: $10^6$ times the largest of the cost, fixed-cost and
-    $H\cdot\max_j w_j$ scales). It keeps every restricted master LP feasible
-    before columns cover all jobs.
-  \item Cuts: a finite set $\Cuts$ of limited-memory subset-row cuts
-    (\cref{sec:cuts}), each with coefficients $\gamma_c(p)\in\Z_{\ge0}$.
+\item $\lambda_p\ge0$, $p\in\Om^{\mathrm P}$: the number of instances of the
+  column's group following timeline $p$.
+\item $\lambda_q\ge0$, $q\in\Om^\infty$.
+\item $z_m\in[z^{\min}_m,z^{\max}_m]$ for $m\in\MU$, with $[0,1]$ unless a
+  branching decision fixes it (\cref{sec:tree}).
+\item $\alpha_j\ge0$, $j\in\J$: an \emph{artificial} variable with a large
+  cost $\bar M$ (\code{\_big\_m\_for}: $10^6$ times the largest of the cost,
+  fixed-cost and $H\max_jw_j$ scales). It keeps every restricted master
+  feasible before columns cover every job. A solution with $\alpha\ne0$ is not
+  a schedule.
 \end{itemize}
 
 \subsection{The master LP}
-Write $\Om^{\mathrm P}:=\bigcup_{m\in\MP}\Om_m$ for all path columns and
-$c^\omega_v:=\omega_1c^1_v+\omega_2c^2_v$ for the cost of a column $v$. The
-master LP over all columns, with the dual variable of each row on the right,
-is
+Write $c^\omega_v:=\omega_1c^1_v+\omega_2c^2_v$ for the cost of a column $v$.
+$\Cuts$ is a finite set of subset-row cuts with integer coefficients
+$\gamma_c(p)\ge0$ (\cref{sec:cuts}; empty by default). The master LP, with the
+dual variable of each row on the right, is
 \begin{alignat}{3}
 \min\quad & \sum_{p\in\Om^{\mathrm P}}c^\omega_p\lambda_p
  +\sum_{q\in\Om^\infty}c^\omega_q\lambda_q
@@ -257,233 +526,206 @@ is
   && m\in\MU\cap\MP && [\eta_m\le0] \label{eq:act}\\
 & \sum_{p\in\Om^{\mathrm P}}\gamma_c(p)\lambda_p\le 1
   && c\in\Cuts && [\beta_c\le0] \label{eq:cut}\\
-& \lambda\ge0,\quad \alpha\ge0,\quad \ell_m\le z_m\le u_m\ \ (m\in\MU), \notag
+& \lambda\ge0,\quad \alpha\ge0,\quad z^{\min}_m\le z_m\le z^{\max}_m\ \ (m\in\MU). \notag
 \end{alignat}
-where $N^{\mathrm{P}}_m:=\sum_{r\in\Rel_m}N_{m,r}$ is the number of instances of
-path type $m$ that can do work, $\Om^\infty_{jm}$ is the set of static
-columns of $j$ on type $m$, and $[\ell_m,u_m]=[0,1]$ unless a branching
-decision fixes $z_m$ (\cref{sec:branch}). The duals $\sigma_j$ and
-$\rho_{m,r}$ of the equality rows are free.
+The duals $\sigma_j,\rho_{m,r}$ of the equality rows are free.
 
 \paragraph{Row by row} (\code{\_build\_rmp}, \code{\_add\_column\_var}).
 \begin{itemize}[leftmargin=*]
-\item \eqref{eq:cover} \emph{Coverage.} Each job is processed once. A column that
-  repeats a job has its visit count as coefficient, so it can never take part
-  in an integer solution.
-\item \eqref{eq:fleet} \emph{Fleet.} Exactly $N_{m,r}$ timelines start at $r$;
-  idle instances take the null column, which is seeded in every master so
-  pricing never has to find it. Unbounded types have no fleet row.
-\item \eqref{eq:b1}--\eqref{eq:b2} \emph{Bound rows.} Aggregate caps on $f_1$ and
-  $f_2$; both may be present at once. $z_m$ enters the $f_2$ row with
-  coefficient $U_m$ (it never enters the $f_1$ row).
-\item \eqref{eq:link} \emph{Fixed-cost linking.} The master copy of the compact
-  model's $\sum_t x_{jmt}\le z_m$, one row per $(j,m)$ (disaggregated, as in
-  the compact model). The coefficient of a column is again the visit count.
-\item \eqref{eq:act} \emph{Activation rows} (built only with the compiled pricer).
-  At most $N^{\mathrm{P}}_m$ non-null timelines of $m$, and none unless $z_m=1$.
-  It is valid for every integer solution. When $N^{\mathrm{P}}_m=1$ (the Rm
-  machines) it charges $U_m$ to the column itself, as in the master of Chen
-  and Powell~\cite{chen1999}, which \eqref{eq:link} alone does not: there a
-  column pays $U_m$ only in proportion to its largest single-job share.
-\item \eqref{eq:cut} \emph{Limited-memory subset-row cuts} (off by default;
-  \cref{sec:cuts}).
+\item \eqref{eq:cover} \emph{Coverage.} Each job is processed once. A column
+  that repeats a job has its visit count as coefficient, so it can never be in
+  an integer solution.
+\item \eqref{eq:fleet} \emph{Fleet.} Exactly $N_{m,r}$ timelines start at $r$.
+  Idle instances take the null column, which every master holds. Unbounded
+  types have no fleet row.
+\item \eqref{eq:b1}--\eqref{eq:b2} \emph{Caps.} $z_m$ enters the $f_2$ cap
+  with coefficient $U_m$, never the $f_1$ cap.
+\item \eqref{eq:link} \emph{Fixed-cost linking}: the master copy of
+  \eqref{eq:fixed}, one row per pair (as disaggregated as the compact model).
+\item \eqref{eq:act} \emph{Activation} (built only with the compiled pricer):
+  at most $N^{\mathrm P}_m$ non-null timelines on $m$, and none unless $z_m=1$.
+  Valid for every integer solution. With $N^{\mathrm P}_m=1$ (one machine) it
+  charges $U_m$ to the column itself, as in Chen and Powell's
+  master~\cite{chen1999}; with \eqref{eq:link} alone a column pays $U_m$ only in
+  proportion to its largest single-job share.
+\item \eqref{eq:cut} \emph{Limited-memory subset-row cuts}, off by default.
 \end{itemize}
 
-A \emph{restricted master} $\RMP$ keeps a finite subset of the path columns
-(all static columns, the null columns, heuristic seed columns and those found
-by pricing). Each B\&B node builds its own $\RMP$ from scratch, seeded with the
-parent's columns that survive the node's decisions (\code{\_column\_allowed});
-columns that repeat a job are not inherited.
+A \emph{restricted master} ($\RMP$) holds a finite subset of the path columns:
+null columns, columns of heuristic schedules, columns found by pricing, and all
+static columns. Each node of the search tree builds its own $\RMP$, seeded with
+the parent's columns that respect the node's decisions
+(\code{\_column\_allowed}); columns that repeat a job are not inherited.
 
-\subsection{Integer master and schedules}
-
-\begin{proposition}\label{prop:integer}
-Let $\Om_{m,r}$ contain all elementary columns. Then
-\begin{enumerate}[label=(\alph*),nosep]
-\item every solution of \eqref{eq:cover}--\eqref{eq:cut} with $\alpha=0$,
-  $\lambda$ integer and $z$ binary uses only elementary columns and induces a
-  feasible schedule within the caps $B_1,B_2$, with objective
-  $\omega_1f_1+\omega_2f_2$ at most the master objective;
-\item conversely every feasible schedule that respects the caps and uses
-  starts in $S_{jm}$ has such a master solution with the same objective.
-\end{enumerate}
-Hence the integer master with columns $\Om$ solves \eqref{eq:P} restricted to
-the reduced start sets, which by \cref{sec:prep} has the same optimal value as
-\eqref{eq:P}.
+\begin{proposition}[Integer master $=$ schedules]\label{prop:integer}
+Let $\Om_{m,r}$ contain all elementary columns.
+(a) Every solution of \eqref{eq:cover}--\eqref{eq:cut} with $\alpha=0$,
+integer $\lambda$ and binary $z$ uses only elementary columns and defines a
+feasible schedule within the caps, whose $\omega_1f_1+\omega_2f_2$ is at most
+the master objective.
+(b) Every feasible schedule within the caps that uses starts in $S_{jm}$ has
+such a master solution with the same objective.
+With Proposition~\ref{prop:reductions}, the integer master solves \eqref{eq:P}.
 \end{proposition}
 
 \begin{proof}
-(a) By \eqref{eq:cover} with $\alpha=0$ and integer $\lambda$, each job $j$
-lies in exactly one selected column and is visited once in it, so the selected
-columns are elementary in $j$ and define $(\mu_j,s_j)$. On $m\in\MP$, the
-selected columns of group $(m,r)$ number $N_{m,r}$ by \eqref{eq:fleet}; each is
-a sequence of non-overlapping intervals after $r$, so at any slot $u$ at most
-$\sum_{r\le u}N_{m,r}$ jobs run on $m$, which is $N_m$ minus the running jobs
-still busy at $u$. So capacity holds. Types in $\Minf$ cannot violate capacity
-by definition. The column costs add up to $f_1$ and to $f_2$ without fixed
-costs. If a job uses $m\in\MU$, then \eqref{eq:link} forces $z_m=1$, so the
-master pays at least $\sum_{m\in\mu(\J)}U_m$, and \eqref{eq:b2} holds with the
-true $f_2$ on its left. (b) For each path type, assign the jobs in order of
-start to the instance that became free latest among those free by the start
-(interval partitioning, \code{\_schedule\_columns}). An instance free at a job's
-start stays free for every later one, so a capacity-feasible schedule always
-fits, and each instance's sequence is an elementary column of its group; idle
-instances get the null column. Jobs on unbounded types take their static
-column, and $z_m:=\ind{m\in\mu(\J)}$. All rows hold, \eqref{eq:act} because
-at most $N^{\mathrm P}_m$ instances do work.
+(a) By \eqref{eq:cover}, each job lies in exactly one selected column and is
+visited once in it; this defines $(\mu_j,s_j)$. On a path type, \eqref{eq:fleet}
+selects $N_{m,r}$ timelines of group $r$, each a sequence of disjoint intervals
+after $r$, so at slot $u$ at most $\sum_{r\le u}N_{m,r}=N_m-\nrun_m(u)$ jobs
+run: capacity holds. Unbounded types cannot violate capacity. Column costs add
+up to $f_1$ and to $f_2$ without fixed costs; \eqref{eq:link} forces $z_m=1$
+for every used $m\in\MU$, so the master pays at least the fixed costs, and the
+cap rows hold with the true $f_1$, $f_2$ on the left. (b) On each path type,
+take jobs in start order and give each to the instance that became free
+latest among those free at its start (\code{\_schedule\_columns}); an instance
+free at a start stays free for later starts, so a feasible schedule always
+fits, and each instance's sequence is an elementary column of its group (idle
+instances get the null column). Jobs on unbounded types take their static
+columns, and $z_m:=\ind{m\in\mu(\J)}$.
 \end{proof}
 
 %======================================================================
-\section{Reduced cost and its decomposition}\label{sec:rc}
+\section{Reduced costs}\label{sec:rc}
 %======================================================================
 
 Let $d=(\sigma,\rho,\nu,\theta,\eta,\beta)$ be a dual vector with the signs
-of \cref{sec:master}. Absent rows have dual $0$; write $\theta_{jm}:=0$ for
-$m\notin\MU$ and $\eta_m:=0$ for $m\notin\MU$.
-
-\paragraph{Path columns} (\code{\_column\_rc}). For $p\in\Om_{m,r}$,
+above; missing rows have dual $0$ ($\theta_{jm}=0$ for $m\notin\MU$, $\eta_m=0$
+outside $\MU\cap\MP$). The \emph{reduced cost} of a variable is its cost minus
+the dual-weighted sum of its row coefficients (\code{\_column\_rc}). For a path
+column $p\in\Om_{m,r}$:
 \begin{equation}\label{eq:rc}
 \rc_p(d)=(\omega_1-\nu_1)c^1_p+(\omega_2-\nu_2)c^2_p
--\sum_{j}a_{jp}\,(\sigma_j+\theta_{jm})
--\eta_m\,\ind{p\ne\emptyset}
--\sum_{c\in\Cuts}\beta_c\,\gamma_c(p)
--\rho_{m,r}.
+-\sum_{j}a_{jp}(\sigma_j+\theta_{jm})-\eta_m\ind{p\ne\emptyset}
+-\sum_{c\in\Cuts}\beta_c\gamma_c(p)-\rho_{m,r}.
 \end{equation}
-For $p=\bigl((j_i,t_i)\bigr)_{i=1}^k$ every term but the last three is a sum
-over arcs. With
-\begin{align}
-B_{jm}&:=(\omega_1-\nu_1)\,w_j, \label{eq:B}\\
-A_{jm}&:=(\omega_1-\nu_1)\,w_j\,(p_{jm}-a_j)+(\omega_2-\nu_2)\,c_{jm}-\sigma_j-\theta_{jm}, \label{eq:A}
-\end{align}
-the processing arc $(j,t)$ costs $A_{jm}+B_{jm}\,t$, and
+Define, for $m\in F_j$,
+\begin{equation}\label{eq:AB}
+B_{jm}:=(\omega_1-\nu_1)w_j,\qquad
+A_{jm}:=(\omega_1-\nu_1)w_j(p_{jm}-a_j)+(\omega_2-\nu_2)c_{jm}-\sigma_j-\theta_{jm},
+\end{equation}
+$\chi^\eta_m:=-\eta_m\ge0$ and $\chi_c:=-\beta_c\ge0$. For
+$p=((j_i,t_i))_{i=1}^k$,
 \begin{equation}\label{eq:rc-decomp}
 \rc_p(d)=\underbrace{-\rho_{m,r}}_{\text{source}}
-+\underbrace{\kappa^{\eta}_m\,\ind{k\ge1}}_{\text{first arc}}
++\underbrace{\chi^{\eta}_m\ind{k\ge1}}_{\text{first arc}}
 +\sum_{i=1}^k\bigl(A_{j_im}+B_{j_im}\,t_i\bigr)
-+\underbrace{\sum_{c\in\Cuts}\kappa_c\,\gamma_c(p)}_{\text{cut states}}
++\underbrace{\sum_{c\in\Cuts}\chi_c\gamma_c(p)}_{\text{cut states}}
 \end{equation}
-with $\kappa^\eta_m:=-\eta_m\ge0$ and $\kappa_c:=-\beta_c\ge0$
-(\code{\_NodePricing.\_inputs} builds $A$, $B$ and the source costs). Wait arcs cost nothing. Since
-$\nu_1\le0$, $B_{jm}\ge0$, but the pricer does not rely on it.
-
-\paragraph{Other variables.}
+(\code{\_NodePricing.\_inputs} builds $A$, $B$ and the source costs). Waiting
+costs nothing. The other variables have
 \begin{align*}
-\rc_q(d)&=(\omega_1-\nu_1)c^1_q+(\omega_2-\nu_2)c^2_q-\sigma_j-\theta_{jm}
-  && q=(j,m,t)\in\Om^\infty,\\
+\rc_q(d)&=(\omega_1-\nu_1)c^1_q+(\omega_2-\nu_2)c^2_q-\sigma_j-\theta_{jm}, && q=(j,m,t)\in\Om^\infty,\\
 \rc_{\alpha_j}(d)&=\bar M-\sigma_j,\\
-\rc_{z_m}(d)&=(\omega_2-\nu_2)\,U_m+\sum_{j:m\in F_j}\theta_{jm}+N^{\mathrm P}_m\,\eta_m
-  && m\in\MU.
+\rc_{z_m}(d)&=(\omega_2-\nu_2)U_m+\textstyle\sum_{j:m\in F_j}\theta_{jm}+N^{\mathrm P}_m\eta_m, && m\in\MU.
 \end{align*}
 
 %======================================================================
 \section{Pricing}\label{sec:pricing}
 %======================================================================
 
-For each path type $m\in\MP$ and each node, the pricing problem is
+For each path type $m$ the \emph{pricing problem} finds columns of negative
+reduced cost:
 \begin{equation}\label{eq:pricing}
-\rc^\star_m(d):=\min\bigl\{\rc_p(d) : p\in\Om_{m,r},\ r\in\Rel_m,\
-p \text{ allowed by the node's decisions}\bigr\},
+\rc^\star_m(d):=\min\bigl\{\rc_p(d):p\in\Om_{m,r},\ r\in\Rel_m,\ p\text{ allowed at the node}\bigr\}.
 \end{equation}
-one problem per type over all its release groups at once. It is a shortest
-path on the DAG $G_m$ with one source per group, made hard by the job-repeat
-restriction, the Ryan--Foster pairs and the cut states. The compiled pricer
-(\code{Pricer::run}) solves it by label setting; the Python pricer
-(\code{\_price\_type}) is the elementary reference implementation.
+By \eqref{eq:rc-decomp} it is a shortest path in the DAG $G_m$ from any source
+$r$ (cost $-\rho_{m,r}$) to $H$, made hard by the rule against repeating jobs,
+by branching pairs and by cut states. The compiled pricer
+(\code{Pricer::run}) solves it by \emph{label setting}: it builds partial
+paths (\emph{labels}) in time order and discards those that another label
+provably beats. The Python pricer \code{\_price\_type} is the elementary
+reference.
 
 \subsection{ng-route relaxation}\label{sec:ng}
-Each job $i$ on type $m$ has a \emph{neighbourhood} $N_i\subseteq\J$ with
-$i\in N_i$ (\code{\_ensure\_ng}): $i$ and the $\texttt{ng\_size}-1$ jobs
-closest to it in the score $|\,\bar t_i-\bar t_{i'}\,|+|\,p_{im}-p_{i'm}|$,
-where $\bar t_i=(\min S_{im}+\max S_{im}+p_{im})/2$ is the centre of $i$'s
-window. Jobs of a Ryan--Foster pair are added to every neighbourhood.
+Forbidding all repeats (elementary paths) needs the set of visited jobs in
+every label, which makes the number of labels exponential. ng-routes
+(Baldacci, Mingozzi and Roberti~\cite{baldacci2011}) forbid only short
+repeats. Each job $i$ of type $m$ has a \emph{neighbourhood}
+$N_i\subseteq\J$ with $i\in N_i$ (\code{\_ensure\_ng}): $i$ and the
+$\texttt{ng\_size}-1$ jobs closest to it in the score
+$|\bar t_i-\bar t_{i'}|+|p_{im}-p_{i'm}|$, where
+$\bar t_i=(\min S_{im}+\max S_{im}+p_{im})/2$ is the centre of $i$'s window.
+Jobs of a Ryan--Foster pair (\cref{sec:tree}) belong to every neighbourhood.
 
-A partial path carries a \emph{memory} $\Pi\subseteq\J$. Extending by job $i$ is
-allowed only if $i\notin\Pi$, and then
-\[
-\Pi\ \leftarrow\ (\Pi\cap N_i)\cup\{i\}.
-\]
-$\Om_{m,r}$ is the set of ng-feasible paths
-(Baldacci, Mingozzi and Roberti~\cite{baldacci2011}). It contains every
-elementary path, and with $N_i=\J$ for all $i$ it is exactly the elementary
-set (\code{ng\_size=None}). A column of $\Om_{m,r}$ may repeat a job $j$ only
-if some job between the two visits does not remember $j$.
+A partial path carries a \emph{memory} $\Pi\subseteq\J$. It may be extended by
+job $i$ only if $i\notin\Pi$, and then $\Pi\leftarrow(\Pi\cap N_i)\cup\{i\}$.
+$\Om_{m,r}$ is the set of paths this rule allows. It contains every elementary
+path; with $N_i=\J$ for all $i$ it is the elementary set (\code{ng\_size=None}).
+A column may repeat $j$ only if some job between the two visits does not have
+$j$ in its neighbourhood.
 
-\paragraph{Dynamic neighbourhoods} (\code{\_augment\_ng}, \code{\_grow\_ng\_and\_drop};
-Roberti and Mingozzi~\cite{roberti2014}). When column generation has converged
-and the LP uses a column that repeats a job $j$ at positions $a<b$, the job
-$j$ is added to $N_i$ for every job $i$ at a position strictly between $a$ and
-$b$ (up to $|N_i|<\texttt{ng\_max}$). That cycle is then infeasible. Every
-repeating column leaves the $\RMP$ and generation resumes. This stops when the
-converged LP is elementary or no neighbourhood can grow.
+\paragraph{Dynamic neighbourhoods} (\code{\_augment\_ng},
+\code{\_grow\_ng\_and\_drop}; Roberti and Mingozzi~\cite{roberti2014}). When
+column generation has converged and the LP still uses a column that visits $j$
+at positions $a<b$, $j$ joins $N_i$ for every job $i$ strictly between them
+(while $|N_i|<\texttt{ng\_max}$). That cycle becomes infeasible, every
+repeating column leaves the $\RMP$, and generation resumes. This ends when the
+converged LP uses only elementary columns or no neighbourhood can grow.
 
-\subsection{Labels}
-A label at node $t$ is $\ell=(t,\ c_\ell,\ \Pi_\ell,\ \pi_\ell,\ s_\ell)$ where
-\begin{itemize}[nosep]
-\item $c_\ell$ is the reduced cost so far;
-\item $\Pi_\ell$ is the ng memory (a bitset over the type's jobs);
-\item $\pi_\ell\in\{0,1\}^{\mathcal{S}}$ is the parity vector of the node's
-  Ryan--Foster \emph{same} pairs $\mathcal S$ (bit $s$ flips when either job of
-  pair $s$ is visited);
-\item $s_\ell\in\{0,1\}^{\Cuts}$ is the state vector of the subset-row cuts.
-\end{itemize}
-For each $r\in\Rel_m$ there is a source label $(r,-\rho_{m,r},\emptyset,0,0)$.
+\subsection{Labels, extension and dominance}
+A label at node $t$ is $\ell=(t,c_\ell,\Pi_\ell,\psi_\ell,s_\ell)$:
+reduced cost so far $c_\ell$; memory $\Pi_\ell$ (a bitset); parity vector
+$\psi_\ell\in\{0,1\}^{\mathcal S}$ over the node's Ryan--Foster \emph{same}
+pairs $\mathcal S$ (bit $s$ flips when either job of pair $s$ is visited); and
+cut-state vector $s_\ell\in\{0,1\}^{\Cuts}$ (\cref{sec:cuts}). For each
+$r\in\Rel_m$ there is a \emph{source label} $(r,-\rho_{m,r},\emptyset,0,0)$.
 
-\paragraph{Extension} along processing arc $(i,t)$, $t\in S_{im}$ allowed at
-this node, from a label $\ell$ at node $t$ (the label is available at every
-node from its own on, so wait arcs are implicit). It is feasible if
-$i\notin\Pi_\ell$ and no Ryan--Foster \emph{differ} partner of $i$ is in
-$\Pi_\ell$. The new label at node $t+p_{im}$ has
+\paragraph{Extension} of $\ell$ along processing arc $(i,t)$, $t\in S_{im}$
+allowed at the node. A label is available at every node from its own on, so
+wait arcs need no labels. The extension is feasible if $i\notin\Pi_\ell$ and no
+\emph{differ} partner of $i$ (\cref{sec:tree}) is in $\Pi_\ell$. The new label
+sits at node $t+p_{im}$ with
 \begin{align*}
-c'&=c_\ell+A_{im}+B_{im}\,t+\kappa^\eta_m\,\ind{\ell\text{ is a source label}}
-   +\sum_{c\in\Cuts:\ i\in S_c,\ \hat s_{\ell,c}=1}\kappa_c,\\
+c'&=c_\ell+A_{im}+B_{im}t+\chi^\eta_m\ind{\ell\text{ is a source label}}
+   +\sum_{c\in\Cuts:\ i\in S_c,\ \hat s_{\ell,c}=1}\chi_c,\\
 \Pi'&=(\Pi_\ell\cap N_i)\cup\{i\},\qquad
-\pi'=\pi_\ell\oplus\tau_i,\qquad
+\psi'=\psi_\ell\oplus\tau_i,\qquad
 s'_c=\hat s_{\ell,c}\oplus\ind{i\in S_c},
 \end{align*}
-where $\tau_i$ flags the same pairs containing $i$, and
-$\hat s_{\ell,c}=s_{\ell,c}\,\ind{i\in M_c}$ is the cut state after the reset
-rule of \cref{sec:cuts}. A label is a \emph{complete column} at any node if
-$\pi_\ell=0$ (each same pair has both jobs or neither); its reduced cost is
-$c_\ell$, because waiting to $H$ is free.
+where $\oplus$ is exclusive or, $\tau_i$ flags the same pairs that contain $i$,
+and $\hat s_{\ell,c}:=s_{\ell,c}\ind{i\in M_c}$ applies the cut's memory reset
+(\cref{sec:cuts}). A label with $\psi_\ell=0$ (each same pair has both jobs or
+neither) is a \emph{complete column} of reduced cost $c_\ell$; waiting to $H$
+is free.
 
-\paragraph{Dominance.} $\ell_1$ dominates $\ell_2$ (\code{Arena::dom}) if
+\paragraph{Dominance.} $\ell_1$ \emph{dominates} $\ell_2$ (\code{Arena::dom})
+if $\ell_1$ is available no later than $\ell_2$,
+$\Pi_{\ell_1}\subseteq\Pi_{\ell_2}$, $\psi_{\ell_1}=\psi_{\ell_2}$ and
 \[
-c_{\ell_1}+\kappa^\eta_m\,\ind{\ell_1\text{ source},\ \ell_2\text{ not}}
-+\sum_{c:\ s_{\ell_1,c}=1,\ s_{\ell_2,c}=0}\kappa_c\ \le\ c_{\ell_2},
-\qquad \Pi_{\ell_1}\subseteq\Pi_{\ell_2},\qquad \pi_{\ell_1}=\pi_{\ell_2},
+c_{\ell_1}+\chi^\eta_m\ind{\ell_1\text{ source},\ \ell_2\text{ not}}
++\sum_{c:\ s_{\ell_1,c}=1,\ s_{\ell_2,c}=0}\chi_c\ \le\ c_{\ell_2}.
 \]
-and $\ell_1$ is available no later than $\ell_2$. Every extension of $\ell_2$
-is then feasible from $\ell_1$, at a cost no greater: $\ell_1$ pays each cut it
-has armed and $\ell_2$ has not at most once more. Labels are kept per node in
-a cost-sorted \emph{active set}, and a label created at node $t$ joins it at
-$t$; there are no copies along wait arcs and no bucket cap.
+Then every extension of $\ell_2$ is feasible from $\ell_1$ at no greater cost
+($\ell_1$ pays each cut it has armed and $\ell_2$ has not at most once more),
+so $\ell_2$ is discarded. Labels live in a cost-sorted \emph{active set}; a
+label created at node $t$ joins it at $t$.
 
 \subsection{Completion bound and exactness}
-Define the cheapest completion from node $t$ with repeats allowed and no
-first-arc or cut cost:
+The cheapest completion from node $t$, with repeats allowed and no first-arc or
+cut cost, is
 \begin{equation}\label{eq:g}
-g(H)=0,\qquad g(t)=\min\Bigl\{g(t+1),\ \min_{i:\,t\in S_{im}}\bigl(A_{im}+B_{im}t+g(t+p_{im})\bigr)\Bigr\}.
+g^+(H)=0,\qquad g^+(t)=\min\Bigl\{g^+(t+1),\ \min_{i:\,t\in S_{im}}\bigl(A_{im}+B_{im}t+g^+(t+p_{im})\bigr)\Bigr\}.
 \end{equation}
-Because $\kappa^\eta_m,\kappa_c\ge0$, every completion of a label $\ell$ at $t$
-costs at least $c_\ell+g(t)$. With threshold $\vartheta=-\texttt{tol}$, a label
-with $c_\ell+g(t)\ge\vartheta$ is retired, and an extension with
-$c'+g(t+p_{im})\ge\vartheta$ is not built. The active set is scanned cheapest
-first, so for a fixed arc the scan stops at the first label with
-$c_\ell+A_{im}+B_{im}t+g(t+p_{im})\ge\vartheta$; all later labels fail too.
+Since $\chi^\eta_m,\chi_c\ge0$, every completion of a label $\ell$ at $t$ costs
+at least $c_\ell+g^+(t)$. With threshold $\vartheta=-\texttt{tol}$, a label
+with $c_\ell+g^+(t)\ge\vartheta$ is retired and an extension with
+$c'+g^+(t+p_{im})\ge\vartheta$ is not built. The active set is scanned
+cheapest first, so for a fixed arc the scan stops at the first label with
+$c_\ell+A_{im}+B_{im}t+g^+(t+p_{im})\ge\vartheta$.
 
-The pricer returns
+The pricer returns up to \texttt{cols\_per\_type} cheapest distinct complete
+labels below $\vartheta$ as new columns, and
 \[
-\underline{\rc}_m:=\min\bigl\{\text{best complete label},\ \text{every retired or skipped bound } c+g\bigr\}
-\ \le\ \rc^\star_m(d),
+\underline{\rc}_m:=\min\bigl\{\text{best complete label},\ \text{every retired or skipped bound } c+g^+\bigr\}\ \le\ \rc^\star_m(d),
 \]
-which is the exact minimum when that minimum is below $\vartheta$, and the
-\texttt{cols\_per\_type} cheapest distinct complete labels below $\vartheta$
-as new columns. If the label budget \texttt{max\_labels} runs out, the call
-is marked inexact and gives no bound.
+a lower bound that is exact when the minimum is below $\vartheta$. If the label
+budget \texttt{max\_labels} runs out, the call is \emph{inexact} and gives no
+bound.
 
-\paragraph{Early stop in the plain case.} Without same pairs and without cuts,
-$\pi=s=0$ for every label. A stored extension by job $i$ from a non-source
-label with memory $\{i\}$ then dominates all costlier candidates of the same
+\paragraph{Early stop in the plain case.} Without same pairs and cuts,
+$\psi=s=0$ for every label. A stored extension by job $i$ from a non-source
+label with memory $\{i\}$ then dominates all costlier candidates on the same
 arc, and the scan stops there.
 
 %======================================================================
@@ -491,37 +733,36 @@ arc, and the scan stops there.
 %======================================================================
 
 \begin{proposition}[\code{\_lagrangian\_bound}]\label{prop:lagr}
-Let $d$ be any dual vector with $\nu_1,\nu_2,\theta,\eta,\beta\le0$ (not
-necessarily optimal for the $\RMP$), and let $\underline{\rc}_m\le\rc^\star_m(d)$
-for every $m\in\MP$. Then the master LP value at the node is at least
+Let $d$ be any dual vector with $\nu,\theta,\eta,\beta\le0$, not necessarily
+optimal for the $\RMP$, and $\underline{\rc}_m\le\rc^\star_m(d)$ for every
+$m\in\MP$. Define
+$\phi_j(d):=\min\{0,\ \bar M-\sigma_j,\ \min_{q\in\Om^\infty_j}\rc_q(d)\}$.
+Then the node's master LP value is at least
 \begin{align}
-L(d)={}&\sum_{j}\sigma_j+\sum_{m\in\MP}\sum_{r\in\Rel_m}N_{m,r}\,\rho_{m,r}
-+\nu_1B_1+\nu_2B_2+\sum_{c\in\Cuts}\beta_c \notag\\
-&+\sum_{m\in\MP}N^{\mathrm P}_m\,\underline{\rc}_m
-+\sum_{j}\min\Bigl\{0,\ \bar M-\sigma_j,\ \min_{q\in\Om^\infty_j}\rc_q(d)\Bigr\}
-+\sum_{m\in\MU}\rc_{z_m}(d)\cdot\begin{cases}\ell_m&\rc_{z_m}\ge0\\ u_m&\rc_{z_m}<0\end{cases}.
+L(d)={}&\sum_{j}\sigma_j+\sum_{m\in\MP}\sum_{r\in\Rel_m}N_{m,r}\rho_{m,r}
++\nu_1B_1+\nu_2B_2+\sum_{c\in\Cuts}\beta_c
++\sum_{m\in\MP}N^{\mathrm P}_m\underline{\rc}_m \notag\\
+&+\sum_{j}\phi_j(d)
++\sum_{m\in\MU}\rc_{z_m}(d)\cdot\begin{cases}z^{\min}_m&\rc_{z_m}(d)\ge0,\\ z^{\max}_m&\rc_{z_m}(d)<0.\end{cases}
 \label{eq:lagr}
 \end{align}
 \end{proposition}
 
 \begin{proof}
-For any feasible master solution, the objective equals $d^\top b$ plus
-$\sum_v \rc_v(d)\,v$ minus the slack of each inequality row times its dual.
-Those slacks are $\ge0$ and their duals are $\le0$, so the objective is at
-least $d^\top b+\sum_v\rc_v v$, where $d^\top b$ is the first line of
-\eqref{eq:lagr} (absent bound rows contribute $0$). For path columns, the
-$\lambda$ of group $(m,r)$ sum to $N_{m,r}$ by \eqref{eq:fleet}, and each has
-$\rc\ge\underline{\rc}_m$; this gives $N^{\mathrm P}_m\underline{\rc}_m$. For
-job $j$, its artificial and its static columns have coefficient $1$ in
-\eqref{eq:cover}, whose other terms are nonnegative, so their total value is at
-most $1$ and they contribute at least $\min\{0,\cdot\}$. Each $z_m$ lies in
-$[\ell_m,u_m]$.
+For a feasible master solution, the objective equals $d^\top b$ (the first
+five sums; absent caps contribute $0$) plus $\sum_v\rc_v(d)\,v$ over all
+variables $v$, minus each inequality's slack times its dual. Slacks are
+$\ge0$ and those duals $\le0$, so the objective is at least
+$d^\top b+\sum_v\rc_v v$. The $\lambda$ of group $(m,r)$ sum to $N_{m,r}$ and
+each has reduced cost $\ge\underline{\rc}_m$. Job $j$'s artificial and static
+columns have coefficient $1$ in \eqref{eq:cover}, whose other terms are
+nonnegative, so their total is at most $1$ and they contribute at least
+$\phi_j$. Each $z_m$ lies in its bounds.
 \end{proof}
 
-At the optimal $\RMP$ duals with exact pricing and no improving column,
-$L(d)$ equals the $\RMP$ value, which is then the master LP value. Since
-every exact pricing round gives a valid $L(d)$, the solver keeps the best
-one, $L^\star$, as the node's bound.
+Every exact pricing round thus gives a valid bound; the solver keeps the best,
+$L^\star$. At optimal $\RMP$ duals with no improving column, $L(d)$ equals the
+$\RMP$ value, which is then the master LP value.
 
 %======================================================================
 \section{Column generation at a node}\label{sec:cg}
@@ -529,264 +770,477 @@ one, $L^\star$, as the node's bound.
 
 \code{\_run\_cg\_compiled} iterates:
 \begin{enumerate}[leftmargin=*]
-\item Solve the $\RMP$ LP. Read its duals $d$.
+\item Solve the $\RMP$ LP and read its duals $d$.
 \item \emph{Smoothing} (Wentges~\cite{wentges1997}). If a stability centre
-  $\bar d$ exists (the duals that gave $L^\star$) and $a=\texttt{smoothing}>0$,
-  price at $\tilde d=a\,\bar d+(1-a)\,d$ (\code{\_Duals.mix}; the sign
-  conditions are preserved by convex combination). Keep the new columns with
-  $\rc_p(d)<-\texttt{tol}$. If there are none (a mispricing), price at $d$.
-  Types are priced in parallel; the result does not depend on the order.
-\item Update $L^\star$ and $\bar d$ with every exact round.
-\item Stop with status
+  $\bar d$ exists (the duals of $L^\star$) and $a=\texttt{smoothing}>0$, price
+  at $\tilde d=a\bar d+(1-a)d$ (convex combinations keep the dual signs) and
+  keep the new columns with $\rc_p(d)<-\texttt{tol}$. If there are none (a
+  \emph{mispricing}), price at $d$. Types are priced in parallel threads; the
+  result does not depend on their order.
+\item Update $L^\star$ and $\bar d$ after every exact round.
+\item Stop as
   \begin{itemize}[nosep]
-  \item \emph{pruned} if $L^\star\ge\text{cutoff}$, the incumbent value minus
-    the pruning gap (\cref{sec:tree});
+  \item \emph{pruned} if $L^\star\ge\zeta$, the cutoff (\cref{sec:tree});
   \item \emph{bound} if $L^\star\ge\RMP-\max(\texttt{tol},10^{-7}|\RMP|)$, or if
     $L^\star$ and the $\RMP$ value round up to the same point of the objective
     grid (below); the node value is then $\min(L^\star,\RMP)$;
   \item \emph{converged} if no new column was found.
   \end{itemize}
-  In the last two cases, first grow ng neighbourhoods if the LP uses a
-  repeating column (\cref{sec:ng}) and continue if they grew.
+  In the last two cases, grow the ng neighbourhoods first if the LP uses a
+  repeating column, and continue if they grew.
 \item Otherwise add the new columns and repeat.
 \end{enumerate}
-At the root, a restricted-master integer heuristic runs on a copy of the
-$\RMP$ at iterations $10,20,40,\dots$ (one second each), so the cutoff can drop
-during root column generation.
+At the root, the restricted-master integer program (all current columns with
+integer $\lambda$, binary $z$; one second) runs on a copy of the $\RMP$ at
+iterations $10,20,40,\dots$, so a better incumbent can lower the cutoff during
+root column generation.
 
-\paragraph{Objective grid} (\code{\_objective\_step}). With integer weights and
-integer completions, $f_1$ moves in multiples of $s_1=\gcd_j w_j$; $f_2$ moves
-in multiples of $s_2=\delta\cdot\gcd\bigl(\{c_{jm}/\delta\}\cup\{U_m/\delta\}\bigr)$.
-Let $x=\omega_1s_1$ and $y=\omega_2s_2$. The grid step is
+\paragraph{Objective grid} (\code{\_objective\_step}). Let $x=\omega_1s_1$,
+$y=\omega_2s_2$ with $s_1,s_2$ from \cref{sec:problem}. The grid step is
 \[
-s=\begin{cases}
+\Delta=\begin{cases}
 x & \omega_2=0\ \text{or}\ y=0,\\
 y & \omega_1=0\ \text{or}\ x=0,\\
 \min(x,y) & \max(x,y)/\min(x,y)\in\Z,\\
 0 & \text{otherwise (no grid)}.
 \end{cases}
 \]
-When $s\ge10^{-3}$, every schedule value lies in $z_0+s\Z$ for a common
-offset, so a node whose bound $L$ satisfies $\lceil (L-\epsilon)/s\rceil\ge
-\lceil(\RMP-\epsilon)/s\rceil$, with $\epsilon=10^{-3}\min(s,1)$, cannot
-contain a schedule cheaper than the grid point above $\RMP$.
+When $\Delta\ge10^{-3}$, all schedule values lie on one translate of $\Delta\Z$,
+so two distinct values differ by at least $\Delta$. A node whose bound
+satisfies $\lceil(L-\epsilon)/\Delta\rceil\ge\lceil(\RMP-\epsilon)/\Delta\rceil$,
+with $\epsilon=10^{-3}\min(\Delta,1)$, cannot hold a schedule cheaper than the
+grid point at or above $\RMP$, so more columns cannot change what it proves.
 
 %======================================================================
 \section{Reduced-cost fixing}\label{sec:fixing}
 %======================================================================
 
-After a node's column generation, with bound $L=L^\star$ at duals $\bar d$ and
-type minima $\underline{\rc}_m$, and a finite cutoff $\zeta$
-(\code{\_rc\_fixing}; Pessoa et al.~\cite{pessoa2010}):
+After a node's column generation, with bound $L=L^\star$ at duals $\bar d$,
+minima $\underline{\rc}_m$ and finite cutoff $\zeta$ (\code{\_rc\_fixing};
+Pessoa et al.~\cite{pessoa2010}):
 
 \begin{proposition}\label{prop:fix}
-Any master solution of value $<\zeta$ that uses a path column $p$ of type $m$
-satisfies $\rc_p(\bar d)<\zeta-L+\underline{\rc}_m$. Any such solution that uses
-a static column $q$ of job $j$ satisfies $\rc_q(\bar d)-\phi_j<\zeta-L$, where
-$\phi_j=\min\{0,\bar M-\sigma_j,\min_{q'\in\Om^\infty_j}\rc_{q'}\}$ is job $j$'s
-term in \eqref{eq:lagr}.
+A master solution of value $<\zeta$ that uses a path column $p$ of type $m$
+has $\rc_p(\bar d)<\zeta-L+\underline{\rc}_m$. One that uses a static column
+$q$ of job $j$ has $\rc_q(\bar d)-\phi_j(\bar d)<\zeta-L$.
 \end{proposition}
 
 \begin{proof}
-In the proof of \cref{prop:lagr}, replacing one instance's charge
-$\underline{\rc}_m$ by its actual $\rc_p\ge\underline{\rc}_m$ raises the bound
-by $\rc_p-\underline{\rc}_m$; with integer $\lambda_p\ge1$ the value is at
-least $L-\underline{\rc}_m+\rc_p$. The static case is the same with $\phi_j$.
+In the proof of Proposition~\ref{prop:lagr}, charging one instance its actual
+$\rc_p\ge\underline{\rc}_m$ instead of $\underline{\rc}_m$ raises the bound by
+$\rc_p-\underline{\rc}_m$ (since $\lambda_p\ge1$ in an integer solution), so
+the value is at least $L-\underline{\rc}_m+\rc_p$. The static case is the same
+with $\phi_j$.
 \end{proof}
 
-The pricer lower-bounds the reduced cost of every column through a processing
-arc $(i,t)$ (\code{Pricer::fixable}) by
-\[
-\Phi_m(i,t)=F(t)+A_{im}+B_{im}t+g(t+p_{im}),
-\]
-where $g$ is \eqref{eq:g} and $F$ is the cheapest prefix from any source,
-$F(r)\le-\rho_{m,r}$, $F(t+1)\le F(t)$, $F(t+p_{im})\le F(t)+A_{im}+B_{im}t$.
-Repeats are allowed and the first-arc and cut costs are dropped, so
-$\Phi_m$ is a lower bound. Every placement $(i,m,t)$ with
-$\Phi_m(i,t)\ge\zeta-L+\underline{\rc}_m$ (plus a $10^{-6}$ relative safety
-margin), and every static placement meeting the second condition, is added
-to the node's forbidden set. Children inherit it: the cutoff only decreases,
-so the fixing stays valid in the whole subtree.
+The pricer lower-bounds the reduced cost of every column through arc $(i,t)$
+(\code{Pricer::fixable}) by $\Phi_m(i,t)=g^-(t)+A_{im}+B_{im}t+g^+(t+p_{im})$,
+where $g^+$ is \eqref{eq:g} and $g^-$ is the cheapest prefix from any source
+($g^-(r)\le-\rho_{m,r}$, $g^-(t+1)\le g^-(t)$,
+$g^-(t+p_{im})\le g^-(t)+A_{im}+B_{im}t$). Repeats are allowed and the
+first-arc and cut costs dropped, so this is a lower bound. Every placement
+$(i,m,t)$ with $\Phi_m(i,t)\ge\zeta-L+\underline{\rc}_m$ (plus a $10^{-6}$
+relative margin), and every static placement meeting the second condition, is
+forbidden at the node and in its subtree; the cutoff only decreases, so this
+stays valid.
 
 %======================================================================
-\section{Search tree}\label{sec:tree}\label{sec:branch}
+\section{Search tree}\label{sec:tree}
 %======================================================================
 
 \subsection{Node decisions}
-A node is described by
-\begin{itemize}[nosep]
-\item a set $\mathcal{F}$ of forbidden placements $(j,m,t)$;
-\item a map of pinned placements $j\mapsto(m,t)$ (only for the variable fallback below);
-\item sets of Ryan--Foster \emph{same} and \emph{differ} pairs (only with \code{branching="rf"});
-\item sets of types with $z_m$ fixed to $0$ ($u_m=0$) or to $1$ ($\ell_m=1$).
-\end{itemize}
-Forbidden and pinned placements remove processing arcs from $G_m$ and static
-columns from the master. Pairs act inside the pricer (\cref{sec:pricing}).
-Fixing $z_m=0$ forces every job-carrying column of $m$ to $0$ through
-\eqref{eq:link}.
+A node of the branch-and-bound tree is described by: a set of forbidden
+placements $(j,m,t)$; pinned placements $j\mapsto(m,t)$ (variable branching
+only); Ryan--Foster \emph{same} and \emph{differ} job pairs (pair branching
+only); and types with $z_m$ fixed to $0$ or $1$. Forbidden and pinned
+placements delete processing arcs from $G_m$ and static columns from the
+master; pairs act inside the pricer; $z_m=0$ forces every job-carrying column
+of $m$ to zero through \eqref{eq:link}.
 
 \subsection{Integrality test}
-Let $x_{jmt}=\sum_{p:(j,t)\in p}\lambda_p$, summed over path and static
-columns of type $m$ (a repeating column contributes once per visit). The node
-is \emph{integral} if every job has $\max_{m,t}x_{jmt}\ge1-10^{-7}$ and every
-$z_m\in\{0,1\}$ up to $10^{-7}$. Then each type's flow on $G_m$ is integral,
-and an integral flow decomposes into integral elementary paths (each job has
-one arc with flow) of the same arc-additive cost. So the extracted assignment
-is a feasible schedule. Its objective is recomputed from the assignment rather
-than taken from the LP, so that a tiny residual of LP mass cannot make it look
-cheaper than it is.
+Let $x_{jmt}:=\sum_{v:(j,t)\in v}\lambda_v$ over the path and static columns $v$
+of type $m$ (a repeating column counts once per visit). The node is
+\emph{integral} if every job has $\max_{m,t}x_{jmt}\ge1-10^{-7}$ and every
+$z_m$ is within $10^{-7}$ of $0$ or $1$. Then each type's flow on $G_m$ is
+integral, and an integral flow decomposes into integral elementary paths (each
+job has one arc with flow) of the same cost, so the extracted assignment is a
+feasible schedule. Its objective is recomputed from the assignment, not taken
+from the LP, so a tiny residual of LP mass cannot make it look cheaper.
 
 \subsection{Branching rules}
-At a fractional node the rules are tried in this order:
+At a fractional node, in this order:
 \begin{enumerate}[leftmargin=*]
-\item \emph{Fixed-cost variable.} If all jobs are settled but some $z_m$ is
-  fractional: children $z_m=1$ and $z_m=0$.
-\item \emph{Type} (\code{\_time\_branch}, default \code{branching="time"}). Let
-  $X_{jm}=\sum_t x_{jmt}$ for unsettled jobs. If some $X_{jm}\in(10^{-6},1-10^{-6})$,
-  take the one closest to $\tfrac12$. Children: \emph{on $m$} (forbid every
-  placement of $j$ on other types) and \emph{off $m$} (forbid every placement of
-  $j$ on $m$).
-\item \emph{Start window} (Kramer et al.~\cite{kramer2020}). Otherwise each
-  unsettled job sits on one type $m$ with mass split over several starts.
-  Choose the job and split point $t^\ast$ whose cumulative mass
-  $\sum_{t\le t^\ast}x_{jmt}$ is closest to $\tfrac12$. Children: $s_j\le t^\ast$
-  (forbid $t>t^\ast$) and $s_j>t^\ast$ (forbid $t\le t^\ast$).
+\item \emph{Fixed-cost variable.} All jobs settled but some $z_m$ fractional:
+  children $z_m=1$ and $z_m=0$.
+\item \emph{Type} (\code{\_time\_branch}, default). With
+  $X_{jm}=\sum_tx_{jmt}$ for unsettled jobs, take the $X_{jm}\in(10^{-6},1-10^{-6})$
+  closest to $\tfrac12$. Children: $j$ on $m$ (forbid $j$ elsewhere) and $j$
+  off $m$.
+\item \emph{Start window} (Kramer et al.~\cite{kramer2020}). Otherwise every
+  unsettled job sits on one type with mass over several starts. Take the job
+  and split point $t^\ast$ whose cumulative mass $\sum_{t\le t^\ast}x_{jmt}$ is
+  closest to $\tfrac12$. Children: $s_j\le t^\ast$ and $s_j>t^\ast$.
 \end{enumerate}
-In rules 2 and 3 the child with more LP mass is explored first. Every decision
-shrinks a finite start set, so the tree is finite, and both children move the
-LP solution. With \code{branching="rf"} the solver instead branches on the job
-pair $(j,k)$ whose joint mass $\sum_{p\ni j,k}\lambda_p$ is closest to $\tfrac12$
-(Ryan and Foster~\cite{ryan1981}). The \emph{same} child forbids columns with
-exactly one of the two; the \emph{differ} child forbids columns with both. If
-no pair is fractional, it branches on the placement $(j,m,t)$ closest to
-$\tfrac12$ (pin vs.\ forbid).
+The child with more LP mass goes first. Every decision shrinks a finite start
+set, so the tree is finite. With \code{branching="rf"}, the solver branches
+instead on the pair $(j,k)$ whose joint mass $\sum_{p\ni j,k}\lambda_p$ is
+closest to $\tfrac12$ (Ryan and Foster~\cite{ryan1981}): \emph{same} forbids
+columns holding exactly one of them, \emph{differ} forbids columns holding
+both; with no fractional pair, it pins or forbids the placement closest to
+$\tfrac12$.
 
-\subsection{Node selection and pruning}
-Open nodes are kept in a priority queue keyed by the parent's bound
-(best-first; deeper nodes first on ties), or as a stack (\code{"dfs"}). With
-incumbent value $z^{\mathrm{inc}}$, the pruning gap is
-\[
-g_{\mathrm{prune}}=\begin{cases}\max\bigl(\texttt{tol},\ s-10^{-3}\min(s,1)\bigr)&s\ge10^{-3},\\ \texttt{tol}&\text{otherwise},\end{cases}
-\]
-and a node is discarded when its bound is $\ge z^{\mathrm{inc}}-g_{\mathrm{prune}}$,
-both before it is solved (parent bound) and during its column generation
-(cutoff $\zeta=z^{\mathrm{inc}}-g_{\mathrm{prune}}$). On the grid, a strictly
-better schedule is at least $s$ cheaper, so this is exact. On a time limit the
-solver reports the minimum of the open bounds and the incumbent as a proven
-lower bound.
+\subsection{Node selection, pruning, incumbents}
+Open nodes are ordered by their parent's bound (best-first; deeper first on
+ties) or kept as a stack (\code{"dfs"}). With incumbent value $z^{\mathrm{inc}}$
+the \emph{pruning gap} is $\max(\texttt{tol},\Delta-10^{-3}\min(\Delta,1))$ if
+$\Delta\ge10^{-3}$, else \texttt{tol}; the cutoff is
+$\zeta=z^{\mathrm{inc}}-\text{gap}$, and a node is discarded when its bound
+reaches $\zeta$, before or during its column generation. On the grid a better
+schedule is at least $\Delta$ cheaper, so this is exact. On a time limit the
+minimum of the open bounds and $z^{\mathrm{inc}}$ is reported as a proven lower
+bound.
 
-\paragraph{Incumbents.} The root starts from list-scheduling heuristics
-(\code{heuristic\_schedules}: earliest completion, on-prem only, a
-threshold-bursting sweep, and optionally an NSGA-II front); the best one
-within the caps is the first incumbent and all their columns seed the root.
-The restricted-master integer program (all current columns with integer
-$\lambda$ and binary $z$) runs at the root and every tenth node; any solution
-with $\alpha=0$ is a feasible schedule.
+The first incumbent is the best within the caps among list-scheduling
+heuristics (\code{heuristic\_schedules}: earliest completion, on-prem only, a
+threshold-bursting sweep, optionally an NSGA-II front); their columns seed the
+root. The restricted-master integer program runs at the root and every tenth
+node.
 
 %======================================================================
 \section{Limited-memory subset-row cuts}\label{sec:cuts}
 %======================================================================
 
-Off by default (\code{PricingOptions.sr\_cuts=0}). A cut $c$ has a job triple
-$S_c$ and a memory $M_c\supseteq S_c$ (Jepsen et al.~\cite{jepsen2008}; Pecin
-et al.~\cite{pecin2017}).
+Off by default (\code{sr\_cuts=0}). A cut $c$ has a job triple $S_c$ and a
+\emph{memory} $M_c\supseteq S_c$ (Jepsen et al.~\cite{jepsen2008}, Pecin et
+al.~\cite{pecin2017}).
 
-\paragraph{Coefficient} (\code{\_lm\_coef}). Walk the column's visits in order with
-a state $\varsigma\in\{0,1\}$, initially $0$. On visiting $i$: if $i\notin M_c$,
-set $\varsigma\leftarrow0$; if $i\in S_c$, add $\varsigma$ to the coefficient
-and set $\varsigma\leftarrow1-\varsigma$. Then $\gamma_c(p)$ is the total.
-With $M_c=\J$ this gives $\gamma_c(p)=\lfloor|S_c\cap p|/2\rfloor$ for an
-elementary $p$, Jepsen et al.'s rank-1 cut with multiplier $\tfrac12$.
+\paragraph{Coefficient} (\code{\_lm\_coef}). Walk the column's visits in order
+with a state bit, initially $0$. Visiting $i$: if $i\notin M_c$, reset the bit
+to $0$; if $i\in S_c$, add the bit to the coefficient and flip it.
+$\gamma_c(p)$ is the total. With $M_c=\J$ and $p$ elementary this is
+$\lfloor|S_c\cap p|/2\rfloor$.
 
-\paragraph{Validity.} For any $M_c$, $\gamma_c(p)\le\lfloor|S_c\cap p|/2\rfloor$
-on elementary columns (a smaller memory only resets the state). In an integer
-solution each job of $S_c$ is covered once, so
+\paragraph{Validity.} A smaller memory only resets the bit more often, so
+$\gamma_c(p)\le\lfloor|S_c\cap p|/2\rfloor$ on elementary columns. In an
+integer solution each job of $S_c$ is covered once, so
 $\sum_p\gamma_c(p)\lambda_p\le\sum_p\lfloor|S_c\cap p|/2\rfloor\lambda_p\le\lfloor3/2\rfloor=1$.
-Repeating columns get some nonnegative coefficient, which is harmless because
-they are never in an integer solution.
+Repeating columns, never in integer solutions, get some nonnegative coefficient.
 
-\paragraph{Pricing.} The state $\varsigma$ is the label's $s_{\ell,c}$ bit, and
-$\kappa_c=-\beta_c\ge0$ is paid when a set bit meets a job of $S_c$
-(\cref{sec:pricing}). Because the bit is forgotten outside $M_c$, labels
-differ in fewer bits and dominance prunes more than with full-memory cuts.
+\paragraph{Pricing.} The bit is the label's $s_{\ell,c}$ and $\chi_c=-\beta_c$
+is paid when a set bit meets a job of $S_c$ (\cref{sec:pricing}). Bits are
+forgotten outside $M_c$, so labels differ in fewer bits and dominance prunes
+more than with full-memory cuts.
 
 \paragraph{Separation} (\code{\_separate\_lm\_src}). At the $\RMP$ solution,
-for every pair of jobs that share a positive column and every third job $k$,
-compute $\sum_p\lambda_p\lfloor|S\cap p|/2\rfloor$ with visit counts. Triples
-with value $>1+\texttt{sr\_min\_viol}$ are candidates, most violated first,
-with no job in more than three cuts per round. The memory is the least that
-keeps the violation: for each positive column with two or more jobs of $S$,
-the jobs it visits between its first and last job of $S$. Cuts are separated
-at nodes of depth $\le\texttt{sr\_depth}$ and stay in every later master.
+for every pair of jobs sharing a positive column and every third job, compute
+$\sum_p\lambda_p\lfloor|S\cap p|/2\rfloor$ with visit counts. Triples above
+$1+\texttt{sr\_min\_viol}$ are added most violated first, no job in more than
+three cuts per round. The memory is the least that keeps the violation: for
+each positive column with two or more jobs of $S$, the jobs it visits between
+its first and last job of $S$. Cuts are separated at depth
+$\le\texttt{sr\_depth}$ and stay in every later master.
 
 %======================================================================
-\section{Lexicographic and Pareto use}\label{sec:lex}
+\section{Strength of the BPC master}\label{sec:strength}
 %======================================================================
 
-\paragraph{Lex-min} (\code{solve\_f1\_bpc}, \code{solve\_f2\_bpc}). For
-$\mathrm{lex\,min}(f_1,f_2)$: solve \eqref{eq:P} with $\omega=(1,0)$ to get
-$f_1^\star$, then with $\omega=(0,1)$ and $B_1=f_1^\star$. The second phase
-starts from the first phase's schedule (feasible for its cap) and its column
-pool. The order is symmetric for $\mathrm{lex\,min}(f_2,f_1)$. If the second
-phase does not finish, the result is only primary-optimal and has status
-\code{"feasible"}.
-
-\paragraph{Box search} (\code{make\_bpc\_lexmin\_bounded}). The Pareto
-algorithms of \code{pareto.py} call a lex-min with an extra cap on one
-objective; both caps are then active in the second phase. Each cap is first
-rounded down to its objective's grid (\code{grid\_floor}). Because the caps
-are aggregate rows, a column is valid under any caps, so all box solves share
-one preprocessing result, one column pool and the list of schedules found so
-far (any of which inside a box is that box's first incumbent).
-
-%======================================================================
-\section{Strength of the master LP}\label{sec:strength}
-%======================================================================
-
-Write $z^{\mathrm{LP}}_{\mathrm{cmp}}$ for the LP of the compact model on the
-same start sets (with the same bound rows), $z^{\mathrm{LP}}_{\mathrm{ng}}$ and
-$z^{\mathrm{LP}}_{\mathrm{el}}$ for the master LP with ng-feasible and with
-elementary columns (without activation rows or cuts), and $z^\star$ for
-\eqref{eq:P}. Then
+Write $z^{\mathrm{LP}}_{\mathrm{cmp}}$ for the compact LP on the same start sets
+(with the same caps), $z^{\mathrm{LP}}_{\mathrm{ng}}$ and
+$z^{\mathrm{LP}}_{\mathrm{el}}$ for the master LP with ng and with elementary
+columns (no activation rows or cuts), and $z^\star$ for \eqref{eq:P}:
 \[
-z^{\mathrm{LP}}_{\mathrm{cmp}}\ \le\ z^{\mathrm{LP}}_{\mathrm{ng}}\ \le\ z^{\mathrm{LP}}_{\mathrm{el}}\ \le\ z^\star .
+z^{\mathrm{LP}}_{\mathrm{cmp}}\le z^{\mathrm{LP}}_{\mathrm{ng}}\le z^{\mathrm{LP}}_{\mathrm{el}}\le z^\star .
 \]
-The first inequality is the Dantzig--Wolfe argument: the compact LP equals the
-master LP over all source-to-sink walks of each $G_m$ with visit-count
-coefficients (an extreme point of each type's flow polytope is an integral
-path flow; Geoffrion~\cite{geoffrion1974}), and every ng column is such a walk.
-The second holds because the elementary set is a subset of the ng set. The
-inequalities can be strict. Activation rows \eqref{eq:act} and cuts
-\eqref{eq:cut} are valid for all integer solutions and can only raise each LP
-value; on the Rm instances the activation rows cut the $f_1+f_2$ root gap from
-about 13\% to 0--2.7\%.
+The first inequality is Dantzig--Wolfe reasoning: each type's flow polytope has
+integral vertices (path flows), so the compact LP equals the master over all
+source-to-sink walks with visit-count coefficients (Geoffrion~\cite{geoffrion1974}),
+and ng columns are such walks. The second holds because elementary columns are
+ng columns. Activation rows and cuts are valid for integer solutions and can
+only raise the LP; on the Rm instances the activation rows cut the
+$f_1+f_2$ root gap from about 13\% to 0--2.7\%.
 
 %======================================================================
-\section{Defaults}\label{sec:defaults}
+\part*{The LP-first engine}
+\addcontentsline{toc}{part}{The LP-first engine}
+%======================================================================
+
+\section{LP-first}\label{sec:lpfirst}
+
+\subsection{Motivation}
+On the real trace instances (964 jobs, hundreds of identical on-prem instances
+per type, $H$ of a few hundred slots) the compact LP is essentially the integer
+optimum (a gap of about $4\cdot10^{-4}\%$ for $\min f_1$). What makes the compact
+MIP slow is the LP size (7.6 million variables), not branching, and BPC's
+per-instance columns do not help when a type has hundreds of identical
+instances. \code{fedhpc.lpfirst} solves the same LP by column generation over
+single placements and then proves integer optimality, usually without a tree.
+It supports multi-node jobs. It does \emph{not} support fixed usage costs
+($U_m>0$ raises an error; BPC handles those).
+
+\subsection{Master}
+A column is a \emph{placement} $(j,m,t)$ with $m\in F_j$, $t\in S_{jm}$ (start
+sets of \cref{sec:reductions}); $X$ is the set of all placements. The
+\emph{capacity profile} of a path type is
+$N_m(\tau):=\sum_{r\in\Rel_m,\,r\le\tau}N_{m,r}$, the instances released by
+slot $\tau$. With $c^1_{jmt}=w_j(t+p_{jm}-a_j)$, the master LP is the
+time-indexed form of the compact LP (Proposition~\ref{prop:capacity}):
+\begin{alignat}{3}
+\min\quad&\sum_{(j,m,t)\in X}\bigl(\omega_1c^1_{jmt}+\omega_2c_{jm}\bigr)x_{jmt}+\bar M\sum_j\alpha_j\notag\\
+\text{s.t.}\quad&\sum_{m,t}x_{jmt}+\alpha_j=1 &\;& j\in\J &\;&[\sigma_j]\label{eq:lp-cover}\\
+&\sum_{j}q_j\!\!\sum_{t:\,t\le\tau<t+p_{jm}}\!\!x_{jmt}\le N_m(\tau) && m\in\MP,\ \tau\in[0,H-1]_\Z&&[\pi_{m\tau}\le0]\label{eq:lp-cap}\\
+&\textstyle\sum c^1_{jmt}x_{jmt}\le B_1,\ \ \sum c_{jm}x_{jmt}\le B_2 && \text{if finite}&&[\nu_1,\nu_2\le0]\notag\\
+&x,\alpha\ge0.\notag
+\end{alignat}
+Unbounded types have no capacity row, and a row is built only for slots some
+placement can occupy. By Proposition~\ref{prop:capacity}, with the release groups as the
+boundary, the LP and integer optima equal those of the compact model on the
+same start sets.
+
+\subsection{Pricing and the Lagrangian bound}
+At duals $d=(\sigma,\pi,\nu)$ a placement has reduced cost
+\begin{equation}\label{eq:lp-rc}
+\rc_{jmt}(d)=(\omega_1-\nu_1)c^1_{jmt}+(\omega_2-\nu_2)c_{jm}-\sigma_j-q_j\sum_{\tau=t}^{t+p_{jm}-1}\pi_{m\tau}
+\end{equation}
+(the last sum only on path types). All placements are priced at once with
+prefix sums of $\pi$ (\code{\_price}); up to \code{per\_job} most negative ones
+per job enter the master. Wentges smoothing is used as in BPC.
+
+\begin{proposition}[\code{\_lagrangian}]\label{prop:lp-lagr}
+For any $\pi,\nu\le0$ and any $\sigma$, with
+$\mu_j(d):=\min_{m,t}\bigl(\rc_{jmt}(d)+\sigma_j\bigr)$,
+\[
+L(d)=\sum_j\mu_j(d)+\sum_{m,\tau}\pi_{m\tau}N_m(\tau)+\nu_1B_1+\nu_2B_2
+\]
+is a lower bound on the LP value, and every feasible schedule $x$ within the
+caps satisfies
+\begin{equation}\label{eq:lp-cert}
+\operatorname{obj}(x)\ \ge\ L(d)+\sum_j\bigl(\rc_{j\mu_js_j}(d)+\sigma_j-\mu_j(d)\bigr).
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+Dualise the capacity and cap rows with multipliers $-\pi,-\nu\ge0$ and keep
+``each job picks one placement''. For a schedule within the caps the dualised
+rows have nonnegative slack, so the objective is at least
+$\sum_j(\rc_{j\mu_js_j}+\sigma_j)+\sum\pi N+\nu B$. Each summand satisfies
+$\rc+\sigma_j\ge\mu_j$, which gives the bound; keeping the excess gives
+\eqref{eq:lp-cert}. The same argument with fractional $x$ bounds the LP.
+\end{proof}
+
+The nonnegative terms $\rc_{jmt}+\sigma_j-\mu_j$ are the \emph{reduced-cost
+gaps}.
+
+\subsection{Proof of optimality without branching}
+With incumbent value $U$ and grid step $\Delta$ (\cref{sec:cg}), let
+$L=L(\bar d)$ be the best bound (\code{solve\_lpfirst}).
+\begin{enumerate}[leftmargin=*]
+\item \emph{Certificate.} If $L>U-\Delta$ (or $L\ge U$ without a grid), the
+  incumbent is optimal. Column generation stops as soon as this holds, usually
+  before the LP converges.
+\item \emph{Primal heuristics} from the converged LP (\code{heuristics}):
+  $\alpha$-point list scheduling for $\alpha\in\{0.5,0.25,0.75,0\}$;
+  fix-and-solve (fix every job the LP places integrally, solve a MIP over the
+  rest); large-neighbourhood search over sliding time windows.
+\item \emph{Restricted-master MIP}: the master's columns as a MIP with cutoff
+  $U-\Delta$; then retry step 1.
+\item \emph{Eligible MIP.} By \eqref{eq:lp-cert}, every schedule cheaper than
+  $U$ uses only placements with gap $<U-L$ (\emph{eligible} placements). A MIP
+  over them with cutoff $U-\Delta$ is exact: it finds the optimum or proves
+  that nothing beats $U$. The eligible set is a small fraction of $X$ because
+  the LP gap is tiny.
+\item \emph{Placement tree} (\code{tree}, fallback). If more than
+  \code{max\_eligible} placements are eligible, or there is no incumbent: a
+  best-first branch-and-price whose nodes restrict the allowed placements,
+  price only those, apply the eligibility filter as reduced-cost fixing, solve a
+  node by its MIP once small enough, and branch like BPC (type, then start
+  window at half the mass).
+\end{enumerate}
+
+\subsection{Job aggregation}
+Two jobs are \emph{identical} (\code{\_TI.classes}) if they have the same
+weight, release slot and node count, and type by type the same start sets,
+durations and costs. Their $c^1$ differ by the constant $w(a_{\mathrm{rep}}-a_j)$
+at every start, so swapping them changes neither objective. Every MIP merges a
+class $k$ of $n_k$ identical free jobs into one coverage row
+$\sum x=n_k$ over its representative's placements with integer $x\le n_k$, and
+spreads the solution back (\code{\_mip}). Optionally (\code{aggregate\_lp})
+column generation itself runs on the aggregated master; the class dual
+$\sigma_k$ maps back as $\sigma_j=\sigma_k+(\omega_1-\nu_1)w(a_{\mathrm{rep}}-a_j)$,
+which gives every member placement its representative's reduced cost, so the
+mapped duals are optimal for the full LP and the bound is recomputed on the
+full set.
+
+\subsection{Reference points and restricted placement sets}\label{sec:lpfirst-refs}
+\code{reference\_points\_lpfirst} computes the points
+$(f_1^T,f_2^T)=\operatorname{lex\,min}(f_1,f_2)$, $f_2^0=\min f_2$ and
+$f_1^0=\min\{f_1:f_2=f_2^0\}$ used to normalise weighted sums
+(\code{pareto.weighted\_sum\_reference}). With nonnegative data each phase runs
+on the placements its optima can use:
+\begin{itemize}[nosep,leftmargin=*]
+\item \code{lex\_f1\_mask}: for a job of positive weight with a placement on an
+  unbounded type, drop every placement completing after its earliest
+  unbounded completion (swapping to it lowers $f_1$ and frees capacity: the
+  LX rule, valid for $\min f_1$ and its lex tie-break);
+\item \code{free\_mask}: for $\min\{f_1:f_2\le0\}$, keep only placements with
+  $c_{jm}=0$. If some job has none, no zero-cost schedule exists and the code
+  computes $f_2^0=\min f_2$ and $f_1^0$ at $f_2=f_2^0$ on all placements.
+\end{itemize}
+
+\subsection{Numerics and backends}
+Every solve works in units where one grid step of the coarser objective term is
+$1$ (\code{weighted\_sum\_scale}); unscaled normalised weights near $10^{-5}$
+let cost differences fall below the LP solver's tolerances. The artificial
+cost starts at $10^3$ times the largest objective coefficient and grows
+100-fold while artificials remain in a converged LP. All LPs and MIPs run on
+Gurobi or HiGHS (\code{lp\_backend.py}); HiGHS duals give the same bounds.
+
+%======================================================================
+\section{Lexicographic and Pareto use of both engines}\label{sec:lex}
+%======================================================================
+
+Both engines expose \eqref{eq:P} with two independent caps, so the box search
+of \cref{sec:problem} needs no change: each capped lex-min is two calls, and in
+the second both caps can be active (the box boundary on one objective, the
+tie-break on the other). Caps are first rounded down to their objective's grid
+(\code{grid\_floor}). Because caps are aggregate rows, every column stays valid
+under any caps, so all box solves share one preprocessing result, one column
+pool (BPC columns or LP-first placements) and the list of schedules found so
+far; any earlier schedule inside a box is that box's first incumbent
+(\code{make\_bpc\_lexmin\_bounded}, \code{make\_lpfirst\_lexmin\_bounded}). If
+the tie-break call does not finish, the result is only primary-optimal and is
+marked \code{"feasible"}, and the box search does not record it as a Pareto
+point.
+
+%======================================================================
+\part*{The extensions}
+\addcontentsline{toc}{part}{The extensions}
+%======================================================================
+
+\section{Multi-node jobs}\label{sec:multinode}
+
+\subsection{What changes in the problem}
+Only three things: a job holds $q_j$ units of capacity
+(Definition~\ref{def:schedule}), $F_j$ requires $q_j\le N_m$, and VM and storage cost
+carry the factor $q_j$ in \eqref{eq:c}; transfers are paid once. In the compact
+model the processing arc carries $q_j$ units (coefficient $q_j$ in
+\eqref{eq:flow}), and Proposition~\ref{prop:capacity} holds unchanged. The unbounded test
+counts units (Definition~\ref{def:unbounded}), and N1, R1, R2 remain exact
+(Proposition~\ref{prop:reductions}). Running jobs may hold $u_k>1$ units; $\nrel_{mv}$ and
+the release groups count units. The LP relaxation can be weaker with $q_j>1$:
+a fractional $x_{jmt}=1/q_j$ uses one unit of capacity.
+
+\subsection{LP-first \status{impl}}
+Fully supported: the node count is the coefficient $q_j$ in the capacity rows
+\eqref{eq:lp-cap} and the reduced cost \eqref{eq:lp-rc}, and $N_m(\tau)$ counts
+units. Identical-job classes require equal node counts. The certificate, the
+eligibility argument and the heuristics are unchanged.
+
+\subsection{BPC: why it refuses, and what an extension would need}
+A BPC column is one instance's timeline. A job with $q_j>1$ would have to appear
+on $q_j$ distinct timelines of the same type \emph{at the same start}. The
+master of \cref{sec:master} cannot express this: coverage \eqref{eq:cover} would
+accept $q_j$ visits from any columns at any times, and the job's costs would be
+counted $q_j$ times. So \code{bpc.py} calls \code{require\_unit\_demand}, which
+rejects $q_j>1$ and also running jobs with $u_k>1$. The latter is stricter than
+necessary: the release groups already count units, so running jobs with
+$u_k>1$ alongside single-node new jobs would fit the master unchanged.
+
+\paragraph{A synchronised master \status{proposed}.} Keep per-instance timeline
+columns, and add the placement variables $x_{jmt}\in\{0,1\}$ to the master as
+linking variables:
+\begin{alignat*}{3}
+&\textstyle\sum_{m,t}x_{jmt}=1 &\;& j\in\J &\;& [\sigma_j]\\
+&\textstyle\sum_{p\in\Om_m:\,(j,t)\in p}\lambda_p-q_j\,x_{jmt}=0 && (j,m,t),\ m\in\MP && [\mu_{jmt}]\\
+&\text{fleet \eqref{eq:fleet}, caps, linking and activation as before.}
+\end{alignat*}
+The job's costs move onto $x_{jmt}$ (paid once) and a timeline carries none.
+A timeline's reduced cost becomes $-\rho_{m,r}-\sum_i\mu_{j_imt_i}$ plus the
+activation and cut terms: still arc-additive, so the pricer of
+\cref{sec:pricing} applies with arc cost $-\mu_{jmt}$. The $x$ variables are
+priced by enumeration, with reduced cost
+$\omega_1c^1_{jmt}+\omega_2c_{jm}-\sigma_j+q_j\mu_{jmt}$, as LP-first prices
+placements. Integrality is tested on $x$, and branching acts on $x$ as in
+\cref{sec:tree}. The price: one row per placement on path types (the
+time-indexed size the decomposition was meant to avoid, though rows can be
+generated lazily), and arc-level duals $\mu$ that are far more degenerate than
+the job-level $\sigma$. For the large instances where multi-node jobs occur,
+LP-first is the better tool.
+
+%======================================================================
+\section{Geo-distributed I/O \status{branch}}\label{sec:geo}
+%======================================================================
+
+\subsection{What changes in the problem}
+Site-aware mode changes only per-pair data: $F_j$ gains the condition
+$\loc(m)\in\Sites_j$ in \eqref{eq:F}, and $\tau_{jm}$, $\kappa_{jm}$ follow
+\eqref{eq:io-geo} and enter $p_{jm}$ and $c_{jm}$ through
+\eqref{eq:pbill}--\eqref{eq:c}. No variable or row of any model changes: the
+compact model, the BPC master and pricer and the LP-first master read only
+$F_j$, $S_{jm}$, $p_{jm}$ and $c_{jm}$. On the branch, \code{formulations.py},
+\code{bpc.py}, \code{lpfirst.py} and the compiled extensions are the same as on
+\code{main}.
+
+\subsection{Effects that matter}
+\begin{itemize}[leftmargin=*]
+\item \emph{Exactness} is unaffected. The reductions need only $w_j\ge0$,
+  $c_{jm}\ge0$, $U_m\ge0$ and start-independent costs, which still hold;
+  $p_{jm}$ is still an integer and $c_{jm}$ a multiple of $\delta$, so the grid
+  property, the pruning gap and LP-first's certificate are unchanged.
+\item \emph{Durations depend on the site.} A remote on-prem site now has a
+  larger $p_{jm}$ than the home site. Normal patterns (N1) get denser (more
+  distinct $p$), so start sets shrink less. BPC's ng neighbourhoods use
+  $p_{jm}$ in their score and adapt automatically.
+\item \emph{On-prem placements may cost money.} With charged links between
+  on-prem sites, $c_{jm}>0$ on some on-prem types, and a zero-cost schedule
+  may not exist. LP-first's \code{free\_mask} phase detects this (some job has
+  no free placement) and switches to $f_2^0=\min f_2$; the Pareto normalisation
+  uses $f_2^0$ in general.
+\item \emph{Unbounded types} may now include a remote on-prem site with few
+  feasible jobs; R1 and R2 apply to it as to the cloud.
+\item \emph{Identical jobs are rarer} for LP-first: jobs with different origins
+  or volumes have different $p_{jm}$ or $c_{jm}$ and fall into different
+  classes, so aggregation removes less symmetry.
+\item \emph{Allowed sites} only remove types from $F_j$, which removes
+  processing arcs (BPC) or placements (LP-first).
+\end{itemize}
+
+\subsection{Multi-node and geo-I/O together}
+They meet only in \eqref{eq:pbill}--\eqref{eq:c}: data move once per job, but
+all $q_j$ instances are held, and in the cloud billed, during staging. No row
+couples sites with node counts, so everything above holds on combined
+instances. LP-first handles them; BPC refuses them because of the node count
+alone.
+
+%======================================================================
+\section{Solver support and defaults}\label{sec:support}
 %======================================================================
 
 \begin{center}
 \small
-\begin{tabular}{@{}lll@{}}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{@{}p{3.0cm}p{2.6cm}p{2.6cm}p{2.6cm}p{2.0cm}@{}}
 \toprule
-Parameter & Default & Meaning \\
+Solver & $q_j>1$ (multi-node) & $u_k>1$ (running) & $U_m>0$ (fixed cost) & geo-I/O \\
 \midrule
-\code{engine} & \code{"cpp"} & compiled label-setting pricer \\
-\code{ng\_size}, \code{ng\_max} & 4, 24 & initial and largest neighbourhood size \\
-\code{smoothing} & 0.5 & Wentges weight $a$ on the stability centre \\
-\code{cols\_per\_type} & 30 & columns returned per type and round \\
-\code{max\_labels} & $2\cdot10^6$ & label budget per pricing call \\
-\code{fixing} & on & reduced-cost fixing (\cref{sec:fixing}) \\
-\code{sr\_cuts} & 0 & subset-row cuts off \\
-\code{threads} & 0 & price types in parallel, $\min(|\MP|,\text{CPUs})$ \\
-\code{node\_selection} & \code{"best"} & best-first \\
-\code{branching} & \code{"time"} & type, then start window \\
-\code{heuristic\_every} & 10 & RMP integer heuristic frequency \\
-\code{root\_cg\_heuristic}, \code{grid\_stop} & on, on & \cref{sec:cg} \\
-\code{tol} & $10^{-5}$ & reduced-cost tolerance \\
+Compact (Gurobi) & yes & yes & yes & yes (branch) \\
+BPC & refuses & refuses & yes & yes (branch) \\
+LP-first & yes & yes & refuses & yes (branch) \\
 \bottomrule
 \end{tabular}
 \end{center}
+
+\paragraph{BPC defaults} (\code{PricingOptions}, \code{TREE\_DEFAULTS}):
+compiled pricer; \code{ng\_size} 4, \code{ng\_max} 24; smoothing $0.5$;
+30 columns per type and round; label budget $2\cdot10^6$; reduced-cost fixing
+on; cuts off; parallel pricing; best-first; type/start-window branching;
+restricted-master heuristic every 10 nodes and during root column generation;
+grid stop on; $\texttt{tol}=10^{-5}$.
+
+\paragraph{LP-first defaults} (\code{LPFirstOptions}): smoothing $0.5$;
+3 placements per job and at most $20\,000$ per round; $\texttt{tol}=10^{-6}$;
+restricted-master MIP 30\,s; at most $400\,000$ eligible placements; heuristics
+on; placement tree on; Gurobi backend; LP aggregation off (on in the
+reference-point options).
 
 \begin{thebibliography}{99}\small
 \bibitem{baldacci2011} R.~Baldacci, A.~Mingozzi, R.~Roberti. New route
@@ -797,6 +1251,9 @@ Parameter & Default & Meaning \\
   Computing} 11(1), 1999.
 \bibitem{geoffrion1974} A.~M.~Geoffrion. Lagrangean relaxation for integer
   programming. \emph{Mathematical Programming Study} 2, 1974.
+\bibitem{hamacher2007} H.~W.~Hamacher, C.~R.~Pedersen, S.~Ruzika. Finding
+  representative systems for discrete bicriterion optimization problems.
+  \emph{Operations Research Letters} 35(3), 2007.
 \bibitem{jepsen2008} M.~Jepsen, B.~Petersen, S.~Spoorendonk, D.~Pisinger.
   Subset-row inequalities applied to the vehicle-routing problem with time
   windows. \emph{Operations Research} 56(2), 2008.
