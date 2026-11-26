@@ -27,13 +27,24 @@ configure_env()
 INF = float("inf")
 
 
+@pytest.fixture(autouse=True, params=[1, 2], ids=["dense", "sparse"])
+def factor(request, monkeypatch):
+    """Every test runs with the dense explicit inverse and with the sparse
+    product-form factor."""
+    monkeypatch.setattr(Mirror, "FACTOR", request.param)
+    return request.param
+
+
 class Mirror:
     """The same LP in fedlp and in Gurobi."""
+
+    FACTOR = 0
 
     def __init__(self, sense, rhs):
         from fedhpc import formulations
         self.sense, self.rhs = list(sense), list(rhs)
         self.lp = _fedlp.Solver(self.sense, self.rhs)
+        self.lp.options.factor = self.FACTOR
         self.g = gp.Model(env=formulations._shared_env)
         self.g.Params.OutputFlag = 0
         gs = {"<": GRB.LESS_EQUAL, ">": GRB.GREATER_EQUAL, "=": GRB.EQUAL}

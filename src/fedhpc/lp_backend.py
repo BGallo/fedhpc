@@ -42,6 +42,13 @@ def available(name: str) -> bool:
 
 
 class GurobiBackend:
+    """Gurobi, built lazily: rows and columns added before the first solve
+    are buffered, then built as one ``addMVar`` and one ``addLConstr`` per
+    row (CSC transposed to CSR in NumPy). One ``addVar`` per placement cost
+    more than the MIPs themselves on pos_congestion's LNS (28 s of 132 s);
+    rows are a few thousand where placements are 10^5. Later additions,
+    the column generation's, go in column by column."""
+
     name = "gurobi"
 
     def __init__(self, threads: int = 0):
@@ -57,21 +64,43 @@ class GurobiBackend:
             self.m.setParam("Threads", threads)
         self.rows: list = []
         self.cols: list = []
+        self.n_rows = self.n_cols = 0
+        self.built = False
+        self._rlo: list = []
+        self._rhi: list = []
+        self._pend: list = []   # buffered (cost, ub, integer, starts, index, value)
 
     def add_rows(self, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
+        lo, hi = np.asarray(lo, float), np.asarray(hi, float)
+        start = self.n_rows
+        self.n_rows += len(lo)
+        if not self.built:
+            self._rlo.append(lo), self._rhi.append(hi)
+            return np.arange(start, self.n_rows)
         gp, m = self.gp, self.m
-        start = len(self.rows)
         for a, b in zip(lo.tolist(), hi.tolist()):
-            if a == b:
-                self.rows.append(m.addConstr(gp.LinExpr() == a))
-            elif a == -INF:
-                self.rows.append(m.addConstr(gp.LinExpr() <= b))
-            else:
-                self.rows.append(m.addConstr(gp.LinExpr() >= a))
+            self.rows.append(m.addConstr(self._expr_bound(gp.LinExpr(), a, b)))
         m.update()
-        return np.arange(start, len(self.rows))
+        return np.arange(start, self.n_rows)
+
+    @staticmethod
+    def _expr_bound(e, a: float, b: float):
+        if a == b:
+            return e == a
+        if a == -INF:
+            return e <= b
+        return e >= a
 
     def add_cols(self, cost, ub, integer, starts, index, value) -> None:
+        n = len(cost)
+        if not n:
+            return
+        self.n_cols += n
+        if not self.built:
+            self._pend.append((np.asarray(cost, float), np.asarray(ub, float),
+                               np.asarray(integer, dtype=bool), np.asarray(starts, dtype=np.int64),
+                               np.asarray(index, dtype=np.int64), np.asarray(value, float)))
+            return
         gp, GRB, m, rows = self.gp, self.GRB, self.m, self.rows
         cost, ub, integer = cost.tolist(), ub.tolist(), np.asarray(integer).tolist()
         starts, index, value = starts.tolist(), index.tolist(), value.tolist()
@@ -82,16 +111,79 @@ class GurobiBackend:
                                       vtype=GRB.INTEGER if integer[c] else GRB.CONTINUOUS,
                                       column=col))
 
+    def _build(self) -> None:
+        if self.built:
+            return
+        gp, m, GRB = self.gp, self.m, self.GRB
+        lo = np.concatenate(self._rlo) if self._rlo else np.zeros(0)
+        hi = np.concatenate(self._rhi) if self._rhi else np.zeros(0)
+        nr = len(lo)
+        if self._pend:
+            cost = np.concatenate([c[0] for c in self._pend])
+            ub = np.concatenate([c[1] for c in self._pend])
+            integer = np.concatenate([c[2] for c in self._pend])
+            index = np.concatenate([c[4] for c in self._pend])
+            value = np.concatenate([c[5] for c in self._pend])
+            nnz = np.concatenate([np.diff(c[3]) for c in self._pend])
+        else:
+            cost = ub = value = np.zeros(0)
+            integer = np.zeros(0, dtype=bool)
+            index = nnz = np.zeros(0, dtype=np.int64)
+        nc = len(cost)
+        if nc:
+            x = m.addMVar(nc, lb=0.0, ub=ub, obj=cost,
+                          vtype=np.where(integer, GRB.INTEGER, GRB.CONTINUOUS))
+            m.update()
+            self.cols = x.tolist()
+        try:
+            import scipy.sparse as sps
+        except ImportError:
+            sps = None
+        if sps is not None and nc and nr:
+            # one sparse matrix build, all in C
+            eq = lo == hi
+            le = ~eq & (lo == -INF)
+            sense = np.where(eq, GRB.EQUAL, np.where(le, GRB.LESS_EQUAL, GRB.GREATER_EQUAL))
+            rhs = np.where(le, hi, lo)
+            A = sps.csc_matrix((value, index, np.r_[0, np.cumsum(nnz)]), shape=(nr, nc)).tocsr()
+            self.rows = m.addMConstr(A, x, sense, rhs).tolist()
+        else:
+            # CSC -> CSR, one LinExpr per row
+            col_of = np.repeat(np.arange(nc), nnz)
+            order = np.argsort(index, kind="stable")
+            rcols, rvals = col_of[order].tolist(), value[order].tolist()
+            rptr = np.r_[0, np.cumsum(np.bincount(index, minlength=nr))].tolist()
+            cols = self.cols
+            for r, (a, b) in enumerate(zip(lo.tolist(), hi.tolist())):
+                p, q = rptr[r], rptr[r + 1]
+                e = gp.LinExpr(rvals[p:q], [cols[j] for j in rcols[p:q]])
+                self.rows.append(m.addLConstr(self._expr_bound(e, a, b)))
+        m.update()
+        self.built = True
+        self._rlo = self._rhi = self._pend = None
+
     def change_costs(self, idx: np.ndarray, cost: np.ndarray) -> None:
-        for i, c in zip(idx.tolist(), cost.tolist()):
-            self.cols[i].Obj = c
+        if not self.built:
+            # the buffered columns, in order
+            flat = np.concatenate([c[0] for c in self._pend])
+            flat[np.asarray(idx)] = cost
+            k = 0
+            for c in self._pend:
+                n = len(c[0])
+                c[0][:] = flat[k:k + n]
+                k += n
+            return
+        self.m.setAttr("Obj", [self.cols[i] for i in np.asarray(idx).tolist()],
+                       np.asarray(cost, float).tolist())
 
     def solve_lp(self) -> str:
+        self._build()
         self.m.optimize()
         return "optimal" if self.m.Status == self.GRB.OPTIMAL else "other"
 
     def solve_mip(self, *, time_limit, cutoff, gap_abs, int_tol=1e-9, focus=0,
                   start: dict[int, float] | None = None) -> str:
+        self._build()
         m, GRB = self.m, self.GRB
         m.setParam("TimeLimit", max(0.0, time_limit))
         if math.isfinite(cutoff):
@@ -101,8 +193,8 @@ class GurobiBackend:
         m.setParam("IntFeasTol", int_tol)
         if focus:
             m.setParam("MIPFocus", focus)
-        for c, v in (start or {}).items():
-            self.cols[c].Start = v
+        if start:
+            m.setAttr("Start", [self.cols[c] for c in start], list(start.values()))
         m.optimize()
         if m.Status in (GRB.CUTOFF, GRB.INFEASIBLE) or (m.Status == GRB.OPTIMAL and m.SolCount == 0):
             return "infeasible"
@@ -111,7 +203,7 @@ class GurobiBackend:
         return "limit"
 
     def has_solution(self) -> bool:
-        return self.m.SolCount > 0
+        return self.built and self.m.SolCount > 0
 
     def objective(self) -> float:
         return self.m.ObjVal
@@ -123,6 +215,7 @@ class GurobiBackend:
         return np.array(self.m.getAttr("Pi", self.rows)) if self.rows else np.zeros(0)
 
     def write(self, path: str) -> None:
+        self._build()
         self.m.write(path)
 
 

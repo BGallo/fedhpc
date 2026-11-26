@@ -30,7 +30,10 @@
 #include <cstdint>
 #include <vector>
 
-#include "dense_inverse.hpp"
+#include <memory>
+#include <string>
+
+#include "factor.hpp"
 #include "model.hpp"
 
 namespace fedlp {
@@ -49,6 +52,11 @@ struct Options {
     // candidate nonbasic columns; the rest stay frozen at their bounds until
     // a pricing pass with the current duals admits them. The working set is
     // capped at max(work_min, work_per_row * rows) nonbasic structurals.
+    // Basis factor: 0 auto (the explicit dense inverse up to
+    // dense_max_rows rows, else the sparse product form), 1 dense, 2 sparse.
+    int factor = 0;
+    int dense_max_rows = 128;
+    int sparse_refactor_interval = 64;   // etas appended before refactorising
     bool sifting = true;
     int work_min = 500;
     double work_per_row = 3.0;
@@ -120,7 +128,7 @@ public:
 
 private:
     Model& M_;
-    DenseInverse binv_;
+    std::unique_ptr<BasisFactor> fac_;
     bool basis_valid_ = false;
     // per variable (logicals first)
     std::vector<char> st_;
@@ -195,7 +203,7 @@ private:
     void shift_basics(int j, double delta) {
         const int m = M_.rows();
         alpha_.resize(m);
-        binv_.ftran(M_, j, alpha_.data());
+        fac_->ftran(M_, j, alpha_.data());
         for (int i = 0; i < m; ++i) xb_[i] -= delta * alpha_[i];
     }
 
@@ -228,14 +236,18 @@ private:
         for (int j = 0; j < n; ++j)
             if (st_[j] != DEAD) admit(j);
         perturbed_ = false;
-        binv_.reset(m);
+        const bool sparse = opt.factor == 2 || (opt.factor == 0 && m > opt.dense_max_rows);
+        if (sparse) fac_ = std::make_unique<SparsePFI>();
+        else fac_ = std::make_unique<DenseFactor>();
+        fac_->reset(m);
         basis_valid_ = refactor();
     }
 
     bool refactor() {
         ++stats_.refactors;
         since_refactor_ = 0;
-        if (!binv_.factorize(M_, head_)) return false;
+        if (!fac_->factorize(M_, head_)) return false;
+        for (int i = 0; i < M_.rows(); ++i) pos_[head_[i]] = i;   // the factor may reorder
         compute_xb();
         compute_y();
         compute_d();
@@ -251,23 +263,15 @@ private:
             const double* v = M_.col_val(j);
             for (int k = 0, nz = M_.col_nnz(j); k < nz; ++k) r[ix[k]] -= v[k] * x_[j];
         }
-        xb_.assign(m, 0.0);
-        for (int i = 0; i < m; ++i) {
-            const double* bi = binv_.row(i);
-            double s = 0.0;
-            for (int k = 0; k < m; ++k) s += bi[k] * r[k];
-            xb_[i] = s;
-        }
+        fac_->ftran_inplace(r.data());
+        xb_ = r;
+        (void)m;
     }
     void compute_y() {
         const int m = M_.rows();
         y_.assign(m, 0.0);
-        for (int i = 0; i < m; ++i) {
-            const double c = M_.obj(head_[i]);
-            if (c == 0.0) continue;
-            const double* bi = binv_.row(i);
-            for (int k = 0; k < m; ++k) y_[k] += c * bi[k];
-        }
+        for (int i = 0; i < m; ++i) y_[i] = M_.obj(head_[i]);
+        fac_->btran_inplace(y_.data());
         update_ymax();
     }
     void compute_d() {
@@ -386,7 +390,8 @@ private:
         bool stable = true;
         if (maintain) {
             const double arq = alpha_[r];
-            rho_.assign(binv_.row(r), binv_.row(r) + m);
+            const double* rr = fac_->row(r);
+            rho_.assign(rr, rr + m);
             const double td = d_[q] / arq;
             const double wq = w_[q];
             const double inv2 = 1.0 / (arq * arq);
@@ -457,10 +462,12 @@ private:
                 next_valid_ = false;
             }
         }
-        binv_.update(r, alpha_.data());
+        fac_->update(r, alpha_.data());
         head_[r] = q, pos_[q] = r, st_[q] = BASIC, xb_[r] = xq, d_[q] = 0.0;
         if (!stable) ++stats_.stability_refactors;
-        if (!stable || ++since_refactor_ >= opt.refactor_interval) {
+        const int interval = std::string(fac_->name()) == "sparse"
+                                 ? opt.sparse_refactor_interval : opt.refactor_interval;
+        if (!stable || ++since_refactor_ >= interval) {
             next_valid_ = false;   // the reduced costs are recomputed
             if (!refactor()) return false;
         }
@@ -559,7 +566,7 @@ private:
             }
             const double dir = d_[q] < 0 ? 1.0 : -1.0;
             alpha_.resize(M_.rows());
-            binv_.ftran(M_, q, alpha_.data());
+            fac_->ftran(M_, q, alpha_.data());
             Step s = ratio_test(q, dir, [&](int i) { return lbw(head_[i]); },
                                 [&](int i) { return ubw(head_[i]); });
             if (s.unbounded) return Status::Unbounded;
@@ -600,12 +607,8 @@ private:
                 any |= c1[i] != 0.0;
             }
             if (!any) return Status::Optimal;
-            std::fill(y1.begin(), y1.end(), 0.0);
-            for (int i = 0; i < m; ++i) {
-                if (c1[i] == 0.0) continue;
-                const double* bi = binv_.row(i);
-                for (int k = 0; k < m; ++k) y1[k] += c1[i] * bi[k];
-            }
+            y1 = c1;
+            fac_->btran_inplace(y1.data());
             int q = -1;
             double best = 0.0, dq = 0.0;
             for (int j = 0, n = M_.cols(); j < n; ++j) {
@@ -620,7 +623,7 @@ private:
             if (q < 0) return Status::Infeasible;
             const double dir = dq < 0 ? 1.0 : -1.0;
             alpha_.resize(m);
-            binv_.ftran(M_, q, alpha_.data());
+            fac_->ftran(M_, q, alpha_.data());
             // an infeasible variable may move up to its violated bound (and
             // leaves the basis there), not past it
             Step s = ratio_test(

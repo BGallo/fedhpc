@@ -1559,9 +1559,18 @@ class PricingOptions:
     ``"fedlp"`` (:mod:`fedhpc._fedlp`, the simplex for column generation
     masters in ``_ext/lp``; compiled pricing without subset-row cuts only,
     Gurobi otherwise) or ``"auto"``: fedlp for masters of at most
-    ``_FEDLP_MAX_ROWS`` rows, where its explicit basis inverse wins, else
-    Gurobi (on rm_M10N50_1's 570 rows Gurobi's sparse LU is faster). The
-    integer heuristic always uses Gurobi.
+    ``_FEDLP_MAX_ROWS`` rows (the largest measured, rm_M10N50_1, has 570;
+    past ~128 rows fedlp switches to its sparse product-form factor), else
+    Gurobi. The integer heuristic always uses Gurobi.
+
+    ``warm_nodes`` — with fedlp masters, keep one master for the whole
+    search: each node re-targets its column and ``z_m`` bounds and
+    warm-starts from the last basis (phase 1 repairs what the branching
+    made infeasible) instead of rebuilding. Off by default: measured
+    2026-11-26 it was neutral to slightly negative (hard tier 6.8 -> 7.1 s,
+    trap_medium's front 1.71 -> 1.83 s). A fedlp node master is cheap to
+    rebuild (one CSC batch, crash, sifting), re-targeting costs about as
+    much, and these trees are 1-15 nodes deep; it should pay on deep trees.
 
     ``purge_checks`` — every 10 column-generation iterations, a non-null
     column found nonbasic with positive reduced cost at this many checks
@@ -1588,6 +1597,7 @@ class PricingOptions:
     sr_min_viol: float = 0.05
     threads: int = 0
     master: str = "auto"
+    warm_nodes: bool = False
     purge_checks: int = 0
 
 
@@ -2350,6 +2360,7 @@ class _FedlpMaster:
         self._fleet = np.array(list(state.fleet.values()), dtype=np.int64)
         self._link = np.array(list(state.fixed_link.values()), dtype=np.int64)
         self._act = np.array(list(state.activation.values()), dtype=np.int64)
+        self._closed: set[int] = set()   # columns at upper bound 0 (retarget)
 
     def solve(self, state: _RmpState) -> tuple[float, int]:
         lp = self.lp
@@ -2418,10 +2429,31 @@ class _FedlpMaster:
         state.vars.extend(range(first, first + n))
         state.columns.extend(cols)
 
+    def retarget(self, state: _RmpState, forbidden, pinned, differ_pairs, same_pairs,
+                 forbidden_types, forced_types) -> None:
+        """Make the master a node's: columns its branching forbids get upper
+        bound 0, allowed ones infinity; ``z_m`` gets the node's bounds."""
+        closed = self._closed
+        for col, v in zip(state.columns, state.vars):
+            ok = _is_elementary(col) and _column_allowed(col, forbidden, pinned, differ_pairs, same_pairs)
+            if ok and v in closed:
+                self.lp.set_bounds(v, 0.0, math.inf)
+                closed.discard(v)
+            elif not ok and v not in closed:
+                self.lp.set_bounds(v, 0.0, 0.0)
+                closed.add(v)
+        for mid, v in state.z.items():
+            lb = 1.0 if mid in forced_types else 0.0
+            ub = 0.0 if mid in forbidden_types else 1.0
+            if state.z_bounds.get(mid) != (lb, ub):
+                self.lp.set_bounds(v, lb, ub)
+                state.z_bounds[mid] = (lb, ub)
+
     def keep(self, state: _RmpState, keep: list[bool]) -> None:
         drop = [v for v, k in zip(state.vars, keep) if not k]
         if not drop:
             return
+        self._closed.difference_update(drop)
         self.lp.remove_columns(drop)
         state.columns[:] = [c for c, k in zip(state.columns, keep) if k]
         state.vars[:] = [v for v, k in zip(state.vars, keep) if k]
@@ -2434,7 +2466,9 @@ class _FedlpMaster:
         """The RMP integer heuristic on a Gurobi master over the current
         columns (fedlp has no MIP)."""
         inst, w1, w2, b1, b2, big_m, forbidden_types, forced_types, prep, activation = self.args
-        mdl, gstate = _build_rmp(inst, w1, w2, b1, b2, big_m, extra_columns=state.columns,
+        cols = (state.columns if not self._closed else
+                [c for c, v in zip(state.columns, state.vars) if v not in self._closed])
+        mdl, gstate = _build_rmp(inst, w1, w2, b1, b2, big_m, extra_columns=cols,
                                  forbidden_types=forbidden_types, forced_types=forced_types,
                                  prep=prep, activation=activation)
         try:
@@ -3029,6 +3063,7 @@ def _solve_node(
     lm_cuts: list[_LmCut] | None = None,
     step: float = 0.0,
     incumbent_cb=None,
+    shared: dict | None = None,
 ) -> _NodeResult:
     """Column generation at one node, then its status and branching choice.
 
@@ -3044,6 +3079,10 @@ def _solve_node(
 
     ``lm_cuts`` — the search's limited-memory subset-row cuts (shared, in
     order). ``step``/``incumbent_cb`` — see :func:`_run_cg_compiled`.
+    ``shared`` — the search's persistent fedlp master: the first node builds
+    it, later ones re-target its column and ``z_m`` bounds to their branching
+    decisions (:meth:`_FedlpMaster.retarget`) and warm-start from the last
+    basis instead of rebuilding.
     Every node's master holds all of them; at depth up to
     ``opts.sr_depth`` the node separates more (:func:`_separate_lm_src`) and
     appends them, re-running column generation after each round. Rounds
@@ -3053,10 +3092,6 @@ def _solve_node(
     opts = opts or DEFAULT_PRICING
     if lm_cuts is None:
         lm_cuts = []
-    valid_seed = [
-        c for c in seed_pool
-        if _is_elementary(c) and _column_allowed(c, forbidden, pinned, differ_pairs, same_pairs)
-    ]
     use_fedlp = (opts.master in ("fedlp", "auto") and _fedlp is not None
                  and _compiled(opts, cuts) and not lm_cuts and opts.sr_cuts == 0)
     if use_fedlp and opts.master == "auto":
@@ -3064,12 +3099,25 @@ def _solve_node(
         n_rows = (len(inst.jobs) + sum(len(prep.releases[m]) for m in prep.path_types)
                   + (bound1_value is not None) + (bound2_value is not None) + len(links) + len(act))
         use_fedlp = n_rows <= _FEDLP_MAX_ROWS
-    mdl, state = _build_rmp(inst, weight1, weight2, bound1_value, bound2_value, big_m,
-                             extra_columns=valid_seed,
-                             forbidden_types=forbidden_types, forced_types=forced_types,
-                             cuts=cuts, prep=prep, activation=_compiled(opts, cuts),
-                             lm_cuts=tuple(lm_cuts) if _compiled(opts, cuts) else (),
-                             master="fedlp" if use_fedlp else "gurobi")
+    persistent = use_fedlp and shared is not None and opts.warm_nodes
+    if persistent and "state" in shared:
+        state = shared["state"]
+        mdl = state.master
+        state.master.retarget(state, forbidden, pinned, differ_pairs, same_pairs,
+                              forbidden_types, forced_types)
+    else:
+        valid_seed = [
+            c for c in seed_pool
+            if _is_elementary(c) and _column_allowed(c, forbidden, pinned, differ_pairs, same_pairs)
+        ]
+        mdl, state = _build_rmp(inst, weight1, weight2, bound1_value, bound2_value, big_m,
+                                 extra_columns=valid_seed,
+                                 forbidden_types=forbidden_types, forced_types=forced_types,
+                                 cuts=cuts, prep=prep, activation=_compiled(opts, cuts),
+                                 lm_cuts=tuple(lm_cuts) if _compiled(opts, cuts) else (),
+                                 master="fedlp" if use_fedlp else "gurobi")
+        if persistent:
+            shared["state"] = state
 
     def generate() -> _CGResult:
         return _run_column_generation(
@@ -3467,7 +3515,7 @@ _POOL_CAP = 50_000   # columns kept across solves (pool_out)
 
 # _branch_and_price's tree options when not given (as DEFAULT_PRICING).
 # Largest master (rows) PricingOptions(master="auto") gives fedlp; see there.
-_FEDLP_MAX_ROWS = 400
+_FEDLP_MAX_ROWS = 2000
 
 # Seconds per RMP integer heuristic run during the root's column generation
 # (see _run_cg_compiled's incumbent_cb); capped by heuristic_time_limit.
@@ -3659,6 +3707,7 @@ def _branch_and_price(
                          root_pool)])
     n_nodes = 0
     lm_cuts: list[_LmCut] = []   # limited-memory SR cuts, valid in the whole tree
+    shared_master: dict = {}     # the persistent fedlp master of this search (_solve_node)
 
     def root_incumbent(state: _RmpState) -> float:
         """The RMP integer heuristic during the root's column generation, so
@@ -3701,7 +3750,7 @@ def _branch_and_price(
                 deadline, timers, pricing, best_obj - prune_gap, branching,
                 depth=depth, lm_cuts=lm_cuts,
                 step=step if step >= 1e-3 and TREE_DEFAULTS["grid_stop"] else 0.0,
-                incumbent_cb=cb,
+                incumbent_cb=cb, shared=shared_master,
             )
         except BPCTimeLimit:
             timers["open_bound"] = open_bound(bound)

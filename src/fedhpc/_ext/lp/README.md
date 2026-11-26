@@ -14,7 +14,8 @@ built for:
 | File | Role |
 |---|---|
 | `model.hpp` | `Model`: the column store, plus an append-only row-wise copy for pivot rows. Row logicals are columns `0..m-1`, so slacks and structurals are handled alike. Columns can be appended, tombstoned and have their bounds changed. |
-| `dense_inverse.hpp` | `DenseInverse`: an explicit B^-1 (Gauss-Jordan refactorisation, rank-1 updates). The sparse-row update and an AVX2 clone of the dense one are picked at load time. Its interface (factorize / ftran / row / update) is what a sparse LU would implement. |
+| `dense_inverse.hpp` | `DenseInverse`: an explicit B^-1 (Gauss-Jordan refactorisation, rank-1 updates). The sparse-row update and an AVX2 clone of the dense one are picked at load time. |
+| `factor.hpp` | `BasisFactor`: the factor interface (factorize, which may reorder the basis positions, plus ftran, btran, row, update). `DenseFactor` wraps the explicit inverse. `SparsePFI` is a product-form inverse (see below). `Options.factor` picks one: by default dense up to `dense_max_rows` = 128 rows, sparse above. |
 | `primal.hpp` | `PrimalSimplex`: the algorithm. |
 | `lp_module.cpp` | `Solver`: the Python façade. It does batch CSC column adds from numpy, and returns duals, primal values, reduced costs, basis status and stats. Solves release the GIL. |
 
@@ -53,7 +54,14 @@ duals, reduced costs and weights carry over.
   between rounds.
 - **Stability.** The pivot element is compared as computed by row and by
   column, and a disagreement triggers refactorisation. There is also a
-  fixed refactorisation interval.
+  fixed refactorisation interval: 200 pivots dense, 64 etas sparse.
+- **Sparse factor (`SparsePFI`).** Left-looking Gauss-Jordan in product
+  form over the basis columns, sparsest first: the master's slacks,
+  artificials and null columns give trivial etas, so only a small bump
+  fills in. Pivot rows use threshold partial pivoting (at least 0.1 of the
+  column maximum), the sparsest row among those. FTRAN skips every eta whose
+  pivot entry is zero, a hyper-sparse solve. A pivot appends one eta, which
+  is O(nnz(alpha)) against the explicit inverse's O(m^2).
 
 ## Validation
 
@@ -90,6 +98,18 @@ duals, reduced costs and weights carry over.
 
   trap_medium's Pareto front is identical, in 0.87 s instead of 1.40 s.
 
+- **End to end with the sparse factor**, every master on fedlp
+  (`lpf2_*`):
+
+  | Suite | Gurobi | fedlp | Change |
+  |---|---|---|---|
+  | hard | 8.84 s | 6.90 s | -22 % |
+  | gap | 6.71 s | 4.85 s | -28 % |
+
+  The LP of rm_M10N50_1 (570 rows) went from 0.74 s with the dense
+  inverse to 0.40 s, level with Gurobi; `auto` now covers masters up to
+  2000 rows.
+
 ## Tried and rejected
 
 - **Lazy reduced costs.** Skipping columns by an exact drift bound skipped
@@ -98,14 +118,24 @@ duals, reduced costs and weights carry over.
 - **Positive Edge.** Not implemented: after perturbation only 14-24 % of
   pivots are degenerate, below the 25 % where Towhidi et al. found it pays.
 
+- **Warm-started tree nodes** (`PricingOptions.warm_nodes`, off). One
+  master for the whole search; each node re-targets its column and `z_m`
+  bounds and continues from the last basis, with phase 1 repairing what
+  branching made infeasible. Exact, but neutral to slightly negative:
+  - hard tier 6.84 -> 7.12 s;
+  - trap_medium's front 1.71 -> 1.83 s.
+
+  A node master is cheap to rebuild, re-targeting costs about as much, and
+  these trees are 1-15 nodes deep.
+
 ## Next steps
 
-- **A sparse LU with Forrest-Tomlin updates.** Above about 400 rows the
-  O(m^2) explicit-inverse update loses to Gurobi: rm_M10N50_1 has 570 rows,
-  mostly fixed-cost link rows. `auto` therefore keeps Gurobi there
-  (`bpc._FEDLP_MAX_ROWS`).
-- **Warm-starting tree nodes.** Keep one master across nodes and start each
-  node from its parent's basis, with a dual simplex after the branching
-  bound changes, instead of rebuilding every node.
-- **Rows for cuts**, so limited-memory subset-row cuts can run on fedlp
-  masters.
+- **A dual simplex for re-targeted nodes.** After branching, the old basis
+  stays dual feasible, so a dual simplex could replace the phase-1 repair.
+  That is the missing half of warm starts, and matters for deep trees.
+- **LU with Forrest-Tomlin updates** in place of the product form. Etas
+  accumulate between refactorisations, and a FT update keeps the factor
+  compact for masters of thousands of rows (lpfirst's 4.5k-row masters).
+- **Rows for cuts.** Logicals are columns `0..m-1`, so added rows need a
+  logical-index map. Subset-row cuts are off by default (a negative result
+  on the Rm instances), so this waits for a use.

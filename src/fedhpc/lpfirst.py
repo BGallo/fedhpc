@@ -153,6 +153,46 @@ scratch takes 15.5 s with HiGHS and 6.5 s with Gurobi. At 180 s the MIP has
 the same dual bound (108210.67) but a worse incumbent (108221.67 vs
 108213.67).
 
+Proof first, and the model build (2026-11-26)
+---------------------------------------------
+Profiling showed lpfirst's time was not in its LPs: on pos_congestion's five
+bench solves only 6 s of 132 s were LP. The rest was the LNS sub-MIPs and
+building their Gurobi models.
+
+- **Proof first** (``LPFirstOptions.quick_proof``). After the α-points, the
+  restricted-master MIP runs for at most ``quick_rmp_time`` (5 s). Then the
+  eligible MIP, when at most ``quick_eligible`` placements are eligible,
+  runs for at most ``quick_proof_time``. Only then fix-and-solve and LNS.
+  The restricted-master MIP runs again after the heuristics if they improved
+  the incumbent: on the zero-cost phases of B_pos_n100_lE_* that is what
+  brings the incumbent to the optimum the eligible MIP then proves. Neither
+  the gap nor the eligible-set size predicts whether the early MIP pays.
+  pos_congestion's boxes start 86-254 % above the bound with every
+  placement eligible, and it finds the near-optimum in 1-2 s. So it always
+  runs, with a short cap.
+- **Batch model build** (:class:`fedhpc.lp_backend.GurobiBackend`). Rows
+  and columns added before the first solve become one ``addMVar`` plus one
+  sparse ``addMConstr`` (scipy), instead of one ``addVar`` per placement
+  (28 s of the 132).
+- **Vectorised placement lookup.** :meth:`_TI.arcs_of` is one
+  ``searchsorted`` over sorted (job, type, start) keys, replacing 3.2 M
+  Python lookups.
+
+Results, five bench solves each, all the same proven optima:
+
+=====================  =========  =========
+Instance               before     after
+=====================  =========  =========
+fedhpc_known (964)     13.6 s     9.3 s
+pos_congestion (3340)  109 s      27 s
+=====================  =========  =========
+
+On the 45 B_pos_n100_* generated solves (3 workers × 4 threads, as P78), the
+total went from 2844 s to 2414 s, and the unproven solves from 2 to 1.
+lex_f1 is 5-15x faster. lex_f2 on the lE instances is slower (137 -> 322 s
+on lE_iH), as their eligible MIP is sensitive to the exact incumbent that
+LNS and the restricted-master MIP reach.
+
 Reference points (:func:`reference_points_lpfirst`)
 ---------------------------------------------------
 The weighted-sum reference points of ``pareto.weighted_sum_reference``,
@@ -231,6 +271,18 @@ class LPFirstOptions:
     ``backend`` — LP/MIP solver for every master and MIP: ``"gurobi"`` or
     ``"highs"`` (:mod:`fedhpc.lp_backend`).
 
+    Proof first (``quick_proof``): after the α-point schedules, the
+    restricted-master MIP (for up to ``quick_rmp_time`` seconds) and, when at
+    most ``quick_eligible`` placements are then eligible, the exact eligible
+    MIP (``quick_proof_time``) run before fix-and-solve and LNS; a proof
+    there skips them.
+    Otherwise the restricted-master MIP runs again after the heuristics, with
+    their incumbent as cutoff — on the zero-cost phases of B_pos_n100_lE_* it
+    is what brings the incumbent to the optimum the eligible MIP then proves. The heuristics only pay when the gap is too
+    wide for that MIP: on pos_congestion they took the five bench solves
+    from 17 s to over 100 s, and on B_pos_n100_lE_iL 30 LNS sub-MIPs (20 s)
+    ended above the optimum the 0.06 s eligible MIP then proved.
+
     ``aggregate_lp`` — run column generation on the class-aggregated master
     (:meth:`_TI.aggregated`) when identical jobs cut the job count by at
     least a fifth, then map its duals and solution back to the jobs. Exact:
@@ -257,6 +309,10 @@ class LPFirstOptions:
     aggregate_lp: bool = False
     node_eligible: int = 60_000
     node_mip_time: float = 60.0
+    quick_proof: bool = True
+    quick_eligible: int = 60_000
+    quick_proof_time: float = 15.0
+    quick_rmp_time: float = 5.0
 
 
 @dataclass
@@ -510,13 +566,36 @@ class _TI:
         i = int(np.searchsorted(ts, t))
         return lo + i if i < len(ts) and ts[i] == t else None
 
+    def _keys(self, jpos, mid_rank, t) -> np.ndarray:
+        return (np.asarray(jpos, dtype=np.int64) * (len(self._mid_rank) + 1)
+                + np.asarray(mid_rank, dtype=np.int64)) * (self.H + 1) + np.asarray(t, dtype=np.int64)
+
     def arcs_of(self, assignment: dict[int, tuple[int, int]]) -> list[int]:
-        out = []
+        """The placements of ``assignment`` (those that exist), in one
+        vectorised lookup over the sorted (job, type, start) keys."""
+        if not assignment:
+            return []
+        if not hasattr(self, "_sorted_keys"):
+            self._mid_rank = {m: r for r, m in enumerate(sorted({int(v) for v in np.unique(self.MID)}))}
+            rank = np.array([self._mid_rank[int(v)] for v in np.unique(self.MID)])
+            mid_rank = rank[np.searchsorted(np.unique(self.MID), self.MID)]
+            keys = self._keys(self.J, mid_rank, self.T)
+            self._key_order = np.argsort(keys, kind="stable")
+            self._sorted_keys = keys[self._key_order]
+        jp, mr, ts = [], [], []
+        jpos, mrank = self.jpos, self._mid_rank
         for jid, (mid, t) in assignment.items():
-            a = self.index(jid, mid, t)
-            if a is not None:
-                out.append(a)
-        return out
+            i, r = jpos.get(jid), mrank.get(mid)
+            if i is None or r is None or not 0 <= t <= self.H:
+                continue
+            jp.append(i), mr.append(r), ts.append(t)
+        if not jp:
+            return []
+        q = self._keys(jp, mr, ts)
+        pos = np.searchsorted(self._sorted_keys, q)
+        pos = np.minimum(pos, len(self._sorted_keys) - 1)
+        hit = self._sorted_keys[pos] == q
+        return self._key_order[pos[hit]].tolist()
 
     def assignment_of(self, arcs) -> dict[int, tuple[int, int]]:
         return {self.jobs[self.J[a]]: (int(self.MID[a]), int(self.T[a])) for a in arcs}
@@ -960,10 +1039,13 @@ def _candidates(ti: _TI, free: np.ndarray, gap_rc: np.ndarray, has: np.ndarray, 
     seg = np.r_[0, np.nonzero(np.diff(jobs))[0] + 1]
     rank = np.arange(len(idx)) - np.repeat(seg, np.diff(np.r_[seg, len(idx)]))
     keep = (rank < per_job) | has[idx]
-    out = set(idx[keep].tolist())
+    out = idx[keep]
     if start:
-        out.update(a for a in ti.arcs_of(start) if free[ti.J[a]])
-    return np.array(sorted(out), dtype=np.int64)
+        sa = np.asarray(ti.arcs_of(start), dtype=np.int64)
+        if len(sa):
+            out = np.union1d(out, sa[free[ti.J[sa]]])
+            return out
+    return np.unique(out)
 
 
 def _lns(ti: _TI, best: dict, ub: float, gap_rc: np.ndarray, has: np.ndarray, w1, w2, b1, b2,
@@ -1380,11 +1462,19 @@ def solve_lpfirst(
         return result("optimal", "bound", best_L)
     st["columns"] = len(master.arcs)
     st["lp"] = rmp / scale
+
+    def eligible_of(u: float) -> np.ndarray:
+        """Placements a schedule below ``u`` may use (rc - min_j < u - L)."""
+        _L, mins_ = _lagrangian(ti, center, center_rc, b1, b2)
+        return np.nonzero(center_rc + center.sigma[ti.J] - mins_[ti.J]
+                          < (u - best_L) + 1e-7 * max(1.0, abs(u)))[0]
+
     if master.artificial() > 1e-6:   # the LP optimum needs artificials: no schedule
         best = None
         return result("infeasible", "lp", best_L)
 
     # --- step 1b: primal heuristics from the LP (α-points, fix-and-solve, LNS)
+    ub_at_rmp, early_rmp = INF, False   # the proof-first restricted-master MIP
     if opts.heuristics and math.isfinite(rmp) and not certified(best_L):
         th = time.perf_counter()
         stop = th + opts.heuristic_time if deadline is None else min(deadline, th + opts.heuristic_time)
@@ -1398,6 +1488,48 @@ def solve_lpfirst(
                 if obj < ub:
                     ub, best = obj, a
         st["alpha_obj"] = ub / scale
+        if certified(best_L):
+            st["fix_obj"] = st["lns_obj"] = ub / scale
+            st["heuristic_s"] = time.perf_counter() - th
+            return result("optimal", "heuristic", best_L)
+        # proof first: the restricted master as a MIP (cheap, and the
+        # incumbent it gives shrinks the eligible set), then the eligible
+        # MIP when that set is small
+        # Neither the gap nor the eligible set says in advance whether this
+        # MIP pays (pos_congestion's boxes: seed 86-254 % above the bound,
+        # every placement eligible, and it finds the near-optimum in 1-2 s);
+        # what it costs when it does not is its time cap, so keep that short.
+        quick = opts.quick_proof
+        if quick and opts.rmp_mip_time > 0 and left() > 0:
+            cut = ub - step + 1e-7 * max(1.0, abs(ub)) if math.isfinite(ub) else INF
+            tm = time.perf_counter()
+            _s, obj, a = _mip(ti, master.arcs, w1, w2, b1, b2, cut,
+                              min(opts.rmp_mip_time, opts.quick_rmp_time, left()), step,
+                              opts.mip_threads, best, backend=opts.backend)
+            st["quick_rmp_mip_s"] = time.perf_counter() - tm
+            if a is not None and obj < ub and _within(inst, a, b1, b2):
+                ub, best = obj, a
+            ub_at_rmp, early_rmp = ub, True
+            if certified(best_L):
+                st["fix_obj"] = st["lns_obj"] = ub / scale
+                st["heuristic_s"] = time.perf_counter() - th
+                return result("optimal", "rmp_mip", best_L)
+        if quick and math.isfinite(ub) and left() > 0:
+            elig = eligible_of(ub)
+            if len(elig) <= opts.quick_eligible:
+                cut = ub - step + 1e-7 * max(1.0, abs(ub)) if step > 0 else ub - 1e-7 * max(1.0, abs(ub))
+                tq = time.perf_counter()
+                status, obj, a = _mip(ti, elig, w1, w2, b1, b2, cut,
+                                      min(opts.quick_proof_time, left()), step, opts.mip_threads,
+                                      backend=opts.backend)
+                st["quick_mip_s"] = time.perf_counter() - tq
+                st["quick_eligible"] = int(len(elig))
+                if a is not None and obj < ub and _within(inst, a, b1, b2):
+                    ub, best = obj, a
+                if status in ("optimal", "none"):
+                    st["heuristic_s"] = time.perf_counter() - th
+                    st["eligible"] = int(len(elig))
+                    return result("optimal", "quick_mip", best_L)
         if not certified(best_L):
             cut = ub - step + 1e-7 * max(1.0, abs(ub)) if math.isfinite(ub) else INF
             a = _fix_and_solve(ti, x, gap_rc, master.has, w1, w2, b1, b2, cut, stop, step,
@@ -1415,8 +1547,9 @@ def solve_lpfirst(
         if certified(best_L):
             return result("optimal", "heuristic", best_L)
 
-    # --- step 2: the restricted master as a MIP
-    if math.isfinite(rmp) and opts.rmp_mip_time > 0:
+    # --- step 2: the restricted master as a MIP, with the heuristics'
+    # incumbent as its cutoff (again, if the proof-first one ran with a worse one)
+    if math.isfinite(rmp) and opts.rmp_mip_time > 0 and (not early_rmp or ub < ub_at_rmp):
         cut = ub - step + 1e-7 * max(1.0, abs(ub)) if math.isfinite(ub) else INF
         tm = time.perf_counter()
         status, obj, a = _mip(ti, master.arcs, w1, w2, b1, b2, cut,
@@ -1447,10 +1580,7 @@ def solve_lpfirst(
         return result("feasible", "", max(best_L, L_open))
 
     # --- step 3: the exact MIP over the eligible placements
-    _L, mins = _lagrangian(ti, center, center_rc, b1, b2)
-    gap = ub - best_L
-    eligible = np.nonzero(center_rc + center.sigma[ti.J] - mins[ti.J]
-                          < gap + 1e-7 * max(1.0, abs(ub)))[0]
+    eligible = eligible_of(ub)
     st["eligible"] = int(len(eligible))
     if agg is not None and opts.tree and len(eligible) > opts.max_eligible and left() > 0:
         return solve_lpfirst(inst, weight1, weight2, bound1_value, bound2_value,

@@ -99,7 +99,9 @@ def test_heuristics_feasible_and_exact(name, w):
     seeds = bpc.heuristic_schedules(inst)
     worst = max(seeds, key=lambda a: lpfirst._objective_of(inst, a, *w))
     st: dict = {}
-    res = lpfirst.solve_lpfirst(inst, *w, seed_schedules=[worst], stats=st)
+    # quick_proof off: the proof-first MIP would otherwise skip the LNS
+    res = lpfirst.solve_lpfirst(inst, *w, seed_schedules=[worst], stats=st,
+                                options=lpfirst.LPFirstOptions(quick_proof=False))
     assert res.status == "optimal"
     assert res.objective == pytest.approx(ref, abs=1e-6)
     inst.check_schedule(res.assignment)
@@ -184,3 +186,21 @@ def test_tree_with_bound_rows(name):
     else:
         assert res.status == "optimal" and res.objective == pytest.approx(ref, abs=1e-6)
         assert inst.f2_of(res.assignment) <= cap + 1e-6
+
+
+@pytest.mark.parametrize("name", ["dup0", "dup1", "dup2", "trap_small", "trap_medium"])
+@pytest.mark.parametrize("w", [(1.0, 0.0), (1.0, 1.0)])
+def test_quick_proof_is_exact(name, w):
+    """The proof-first eligible MIP proves the same optimum, and when it
+    proves, the LNS does not run."""
+    inst = _cases()[name]
+    ref, _ = bpc._branch_and_price(inst, *w)
+    seeds = bpc.heuristic_schedules(inst)
+    worst = max(seeds, key=lambda a: lpfirst._objective_of(inst, a, *w))
+    st: dict = {}
+    res = lpfirst.solve_lpfirst(inst, *w, seed_schedules=[worst], stats=st)
+    assert res.status == "optimal"
+    assert res.objective == pytest.approx(ref, abs=1e-6)
+    inst.check_schedule(res.assignment)
+    if res.how == "quick_mip":
+        assert "lns_obj" not in st

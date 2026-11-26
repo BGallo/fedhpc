@@ -159,6 +159,9 @@ PYBIND11_MODULE(_fedlp, mod) {
         .def_readwrite("refactor_interval", &Options::refactor_interval)
         .def_readwrite("max_iter", &Options::max_iter)
         .def_readwrite("sifting", &Options::sifting)
+        .def_readwrite("factor", &Options::factor)
+        .def_readwrite("dense_max_rows", &Options::dense_max_rows)
+        .def_readwrite("sparse_refactor_interval", &Options::sparse_refactor_interval)
         .def_readwrite("work_min", &Options::work_min)
         .def_readwrite("work_per_row", &Options::work_per_row);
     py::class_<Solver>(mod, "Solver")
