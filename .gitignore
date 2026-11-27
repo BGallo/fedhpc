@@ -46,3 +46,7 @@ data/generated/*.json
 
 # VRPSolver branch-and-price tree dump (vrpsolver/run.jl)
 BaPTree.dot
+
+# Local installer and benchmark archive
+/cos_installer_preview-22.2.0.0.R1-M113VML-linux-x86-64.bin
+/benchmarks/mip/miplib2017/benchmark-v2.zip
