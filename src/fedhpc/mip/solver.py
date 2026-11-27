@@ -31,6 +31,7 @@ import heapq
 import itertools
 import math
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -39,7 +40,7 @@ from .branching import Pseudocosts, select_branch
 from .cuts import CutParams, CutPool, cover_cuts, gomory_cuts
 from .heuristics import (feasibility_pump, fix_and_propagate, guided_dive, locks,
                          rens_problem, simple_rounding)
-from .lp import INFEASIBLE, OPTIMAL, UNBOUNDED, LpRelaxation
+from .lp import INFEASIBLE, ITERATION_LIMIT, OPTIMAL, UNBOUNDED, LpRelaxation
 from .presolve import presolve
 from .problem import INF, MipProblem
 from .propagate import Propagator
@@ -80,6 +81,17 @@ class MipOptions:
     plunge_gap: float = 0.02              # relative to the incumbent gap
     max_stored_bases: int = 4000
     lp_options: dict = field(default_factory=dict)
+    # LP: interval row blocks differenced into network rows (reformulate.py)
+    network_lp: bool = True
+    # Root LP algorithm: "dual", "primal" (partial pricing; from a heuristic
+    # schedule's basis when one is known, else the slack basis), or "auto":
+    # the primal on wide LPs (columns >= root_primal_ratio x rows), where
+    # Kramer's masters solve 2-5x faster with it, falling back to the dual
+    # when its phase 1 passes root_phase1_cap x rows pivots (AF_N50_M2_R4's
+    # composite phase 1 wandered for 7.6 m pivots)
+    root_lp: str = "auto"
+    root_primal_ratio: float = 20.0
+    root_phase1_cap: float = 3.0
     verbose: bool = True
     log_interval: float = 5.0
     sub_mip: bool = False                 # a heuristic's sub-MIP: no recursion, quiet
@@ -158,6 +170,20 @@ class MipSolver:
             return self.inc_obj - 1.0 + 1e-6       # only strictly better integers
         return self.inc_obj - max(self.opt.gap_abs, self.opt.gap_rel * max(1.0, abs(self.inc_obj)))
 
+    @contextmanager
+    def _timed(self, key: str):
+        """Accumulate wall time (and LP pivots) under stats["time"][key]."""
+        t0 = time.perf_counter()
+        it0 = self.lp.stats.iterations if getattr(self, "lp", None) is not None else 0
+        try:
+            yield
+        finally:
+            tt = self.stats.setdefault("time", {})
+            tt[key] = tt.get(key, 0.0) + time.perf_counter() - t0
+            if getattr(self, "lp", None) is not None:
+                ti = self.stats.setdefault("pivots", {})
+                ti[key] = ti.get(key, 0) + self.lp.stats.iterations - it0
+
     def _try(self, x: np.ndarray | None, source: str) -> bool:
         if x is None:
             return False
@@ -201,10 +227,13 @@ class MipSolver:
             return self._result("infeasible", None, INF)
         self.root_lb, self.root_ub = res.lb, res.ub
         self.down_locks, self.up_locks = locks(P)
-        self.lp = LpRelaxation(P, opt.lp_options)
+        self.lp = LpRelaxation(P, opt.lp_options, network=opt.network_lp)
+        if self.lp.net is not None:
+            self.stats["network_rows"] = int(self.lp.net.block_row.sum())
         self.lp.deadline = self.deadline()
         self.lp.set_bounds(self.root_lb, self.root_ub)
-        st = self.lp.solve()
+        with self._timed("root_lp"):
+            st = self._root_lp()
         if st != OPTIMAL and self.lp.past_deadline():
             return self._result("time_limit", None, -INF)
         if st == INFEASIBLE:
@@ -217,11 +246,45 @@ class MipSolver:
         self.stats["root_bound_no_cuts"] = P.reported(root_obj)
         self.log(f"root LP {P.reported(self.lp.objective):.6g} ({self.lp.stats.iterations} its, "
                  f"{self.lp.stats.seconds:.2f}s)", force=True)
-        root_obj = self._root_cuts(root_obj)
+        with self._timed("root_cuts"):
+            root_obj = self._root_cuts(root_obj)
         self.stats["root_bound"] = P.reported(root_obj)
         if opt.heuristics:
             self._root_heuristics()
         return self._branch_and_bound(root_obj)
+
+    def _root_lp(self) -> int:
+        """The cold root LP, by ``root_lp`` (see MipOptions)."""
+        opt, P, lp = self.opt, self.P, self.lp
+        mode = opt.root_lp
+        if mode == "auto":
+            mode = "primal" if P.n >= opt.root_primal_ratio * max(1, P.m) else "dual"
+        self.stats["root_lp_algorithm"] = mode
+
+        def cold():
+            if lp.net is not None:
+                lp.set_basis(lp.slack_basis())
+            else:   # fedlp's crash (logicals, singleton columns on equality rows)
+                lp.set_basis((np.ones(lp.rows, np.int8), np.ones(lp.lp.cols, np.int8)))
+
+        if mode != "primal":
+            if lp.net is not None:
+                cold()
+            return lp.solve()
+        if self.incumbent is None or not lp.basis_from_point(self.incumbent):
+            cold()
+        o = lp.lp.options
+        saved = (o.dual, o.partial_min_cols, o.phase1_limit)
+        o.dual, o.partial_min_cols, o.phase1_limit = False, 2000, int(opt.root_phase1_cap * lp.rows)
+        try:
+            st = lp.solve()
+        finally:
+            o.dual, o.partial_min_cols, o.phase1_limit = saved
+        if st == ITERATION_LIMIT and not lp.past_deadline():
+            self.stats["root_lp_algorithm"] = "primal->dual"
+            cold()
+            st = lp.solve()
+        return st
 
     # ------------------------------------------------------------ root cuts
     def _root_cuts(self, root_obj: float) -> float:
@@ -288,11 +351,15 @@ class MipSolver:
         x = lp.x()
         end = min(self.deadline(), time.perf_counter() + 0.3 * opt.time_limit)
         self._try(simple_rounding(P, x, self.down_locks, self.up_locks), "rounding")
-        self._try(fix_and_propagate(P, self.prop, lp, x, self.root_lb, self.root_ub, end), "fix_and_propagate")
-        self._try(guided_dive(P, self.prop, lp, self.root_lb, self.root_ub, end, self.incumbent), "dive")
+        with self._timed("fix_and_propagate"):
+            self._try(fix_and_propagate(P, self.prop, lp, x, self.root_lb, self.root_ub, end,
+                                        stats=self.stats), "fix_and_propagate")
+        with self._timed("root_dive"):
+            self._try(guided_dive(P, self.prop, lp, self.root_lb, self.root_ub, end, self.incumbent), "dive")
         if self.incumbent is None:
-            self._try(feasibility_pump(P, lp, x, self.root_lb, self.root_ub, end, prop=self.prop),
-                      "feasibility_pump")
+            with self._timed("feasibility_pump"):
+                self._try(feasibility_pump(P, lp, x, self.root_lb, self.root_ub, end, prop=self.prop),
+                          "feasibility_pump")
         if opt.rens and not opt.sub_mip:
             Q = rens_problem(P, x, self.root_lb, self.root_ub)
             if Q is not None:
@@ -300,22 +367,25 @@ class MipSolver:
                 sub = MipSolver(Q, MipOptions(time_limit=budget, node_limit=opt.rens_node_limit,
                                               sub_mip=True, verbose=False, rens=False,
                                               cut_rounds=3, lp_options=opt.lp_options))
-                r = sub.solve()
+                with self._timed("rens"):
+                    r = sub.solve()
                 if r.x is not None:
                     self._try(r.x, "rens")
 
     # ------------------------------------------------------- branch and bound
     def _domain(self, node: _Node):
-        lb, ub = self.root_lb.copy(), self.root_ub.copy()
-        for j, up, v in node.path:
-            if up:
-                lb[j] = max(lb[j], v)
-            else:
-                ub[j] = min(ub[j], v)
-        if np.any(lb > ub):
+        """The node's domain: the root's (a propagation fixed point) with
+        the path's branching bounds, propagated from their rows only."""
+        prop = self.prop
+        prop.reset(self.root_lb, self.root_ub, propagate=False)
+        if not node.path:
+            return prop.lb(), prop.ub()
+        js = np.fromiter((j for j, _u, _v in node.path), dtype=np.int64, count=len(node.path))
+        lo = np.array([v if up else -INF for _j, up, v in node.path])
+        hi = np.array([INF if up else v for _j, up, v in node.path])
+        if not prop.change(js, lo, hi, max_rounds=10):
             return None
-        res = self.prop.propagate(lb, ub, max_rounds=10)
-        return (res.lb, res.ub) if res.feasible else None
+        return prop.lb(), prop.ub()
 
     def _branch_and_bound(self, root_obj: float) -> MipResult:
         opt, P, lp = self.opt, self.P, self.lp
@@ -357,7 +427,8 @@ class MipSolver:
             lp.set_bounds(lb, ub)
             if not warm and node.basis is not None and node.seq != last_solved_seq:
                 lp.set_basis(node.basis)
-            st = lp.solve()
+            with self._timed("node_lp"):
+                st = lp.solve()
             if st not in (OPTIMAL, INFEASIBLE) and lp.past_deadline():
                 heapq.heappush(heap, node)       # still open: its bound stands
                 status = "time_limit"
@@ -400,16 +471,18 @@ class MipSolver:
                 if (opt.dive_frequency and nodes % opt.dive_frequency == 0
                         and dive_used <= opt.dive_budget_start + opt.dive_budget_ratio * node_its):
                     it0 = lp.stats.iterations
-                    self._try(guided_dive(P, self.prop, lp, lb, ub,
-                                          min(self.deadline(), time.perf_counter() + 0.05 * opt.time_limit),
-                                          self.incumbent, max_depth=50, iteration_limit=300), "dive")
+                    with self._timed("node_dive"):
+                        self._try(guided_dive(P, self.prop, lp, lb, ub,
+                                              min(self.deadline(), time.perf_counter() + 0.05 * opt.time_limit),
+                                              self.incumbent, max_depth=50, iteration_limit=300), "dive")
                     self.stats["dive_iterations"] = dive_used + lp.stats.iterations - it0
             it0, t0 = lp.stats.iterations, lp.stats.seconds
             sb_used = self.stats.get("strong_iterations", 0)
             node_its = lp.stats.iterations - sb_used
             sb_ok = sb_used <= opt.strong_budget_start + opt.strong_budget_ratio * node_its
-            dec = select_branch(pc, lp, x, frac, lb, ub, lp.objective, self._cutoff(),
-                                opt.strong_candidates if sb_ok else 0, opt.strong_iteration_limit)
+            with self._timed("branching"):
+                dec = select_branch(pc, lp, x, frac, lb, ub, lp.objective, self._cutoff(),
+                                    opt.strong_candidates if sb_ok else 0, opt.strong_iteration_limit)
             self.stats["strong_iterations"] = self.stats.get("strong_iterations", 0) + lp.stats.iterations - it0
             self.stats["strong_seconds"] = self.stats.get("strong_seconds", 0.0) + lp.stats.seconds - t0
             self.stats["strong_branches"] += 1
@@ -422,7 +495,7 @@ class MipSolver:
                 child = _Node(obj, -node.depth, next(seq), node.depth, node.path + (side,), None, None, lp.objective)
                 nxt = child
                 continue
-            basis = lp.get_basis() if stored < opt.max_stored_bases else None
+            basis = lp.get_state() if stored < opt.max_stored_bases else None
             fj = v - math.floor(v)
             down = _Node(obj, -(node.depth + 1), next(seq), node.depth + 1, node.path + ((j, False, math.floor(v)),),
                          basis, (j, False, fj), lp.objective)

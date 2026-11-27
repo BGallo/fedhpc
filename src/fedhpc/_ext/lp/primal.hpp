@@ -77,6 +77,11 @@ struct Options {
     int degenerate_trigger = 10; // degenerate pivots in a row before perturbing
     int refactor_interval = 200; // pivots between refactorisations
     long long max_iter = 10'000'000;
+    // phase-1 pivots per solve before giving up with ITERATION_LIMIT (0: no
+    // cap): a caller that tries the primal first (Kramer's wide masters,
+    // where it beats the dual 2-5x) falls back to the dual when the
+    // composite phase 1 wanders (AF_N50_M2_R4: 18.7 k phase-1 pivots, 2461 rows)
+    long long phase1_limit = 0;
     // wall-clock seconds per solve (checked every 64 iterations); a solve
     // past it returns ITERATION_LIMIT like one past max_iter
     double time_limit = 1e100;
@@ -274,7 +279,15 @@ private:
     static constexpr double kDseMin = 1e-6, kDseMax = 1e300;
     std::vector<double> wcol_;        // the weights by column, across a refactorisation
     bool dse_exact_ = false;          // dse_ = ||e_i' B^-1||^2, kept by dual pivots only
-    std::vector<std::pair<double, int>> brk_;   // the dual ratio test's breakpoints
+    // the dual ratio test's breakpoints, compact (SoA over candidates k):
+    // column, signed reduced cost (>= 0 when dual feasible), |alpha_rj|,
+    // the reduced cost clamped at 0 (breakpoint t_k = ct_k / ca_k); chunk_
+    // holds (t_k, k) of the chunk being walked, cidx_ its members, thr_ the
+    // chunks' upper thresholds
+    std::vector<int> cj_, cidx_;
+    std::vector<double> cdd_, ca_, ct_, thr_;
+    std::vector<std::pair<double, int>> chunk_;
+    std::vector<char> dfix_;   // per dual phase: dead or fixed (lbw == ubw)
     std::vector<double> flipv_;
     std::vector<int> flipped_, fnz_;
     std::vector<double> infeas_;   // the dual's primal infeasibility by position
@@ -518,6 +531,33 @@ public:
         return true;
     }
     bool has_basis() const { return basis_valid_; }
+    // The DSE weights by model variable (0 for nonbasic), or empty when they
+    // are not exact for the current basis. Branch and bound saves them with
+    // a node's basis: restoring a basis otherwise costs the next dual solve
+    // its exact initialisation (a BTRAN per row, O(m^2)), which on Kramer's
+    // arc-flow masters (m ~ 2.5 k) was most of strong branching's time.
+    std::vector<double> dual_weights() const {
+        const int m = M_.rows();
+        if (!basis_valid_ || !dse_exact_ || (int)dse_.size() != m) return {};
+        std::vector<double> w(M_.cols(), 0.0);
+        for (int i = 0; i < m; ++i) w[head_[i]] = dse_[i];
+        return w;
+    }
+    // weights saved by dual_weights() for this same basis; false (nothing
+    // changes) when the sizes differ or a basic variable has none
+    bool set_dual_weights(const std::vector<double>& w) {
+        const int m = M_.rows();
+        if (!basis_valid_ || (int)w.size() != M_.cols()) return false;
+        std::vector<double> d(m);
+        for (int i = 0; i < m; ++i) {
+            const double v = w[head_[i]];
+            if (!(v > 0.0) || !std::isfinite(v)) return false;
+            d[i] = v;
+        }
+        dse_ = std::move(d);
+        dse_exact_ = true;
+        return true;
+    }
     bool out_of_budget() const {
         if (stats_.iterations >= opt.max_iter) return true;
         if ((stats_.iterations & 63) == 0 && opt.time_limit < 1e99)
@@ -1177,8 +1217,11 @@ private:
     Status phase1() {
         const int m = M_.rows();
         std::vector<double> c1(m), y1(m);
+        const long long p1_start = stats_.phase1_iterations;
         while (true) {
             if (out_of_budget()) return Status::IterationLimit;
+            if (opt.phase1_limit > 0 && stats_.phase1_iterations - p1_start >= opt.phase1_limit)
+                return Status::IterationLimit;
             bool any = false;
             for (int i = 0; i < m; ++i) {
                 const int j = head_[i];
@@ -1357,6 +1400,9 @@ private:
         const bool rp = m >= opt.dual_row_copy_min_rows;
         if (rp) build_nb_rows();
         all_infeas();
+        // bounds stay put through a dual phase (no bound shifting here)
+        dfix_.resize(n);
+        for (int j = 0; j < n; ++j) dfix_[j] = st_[j] == DEAD || lbw(j) == ubw(j);
         std::vector<double> arow(n, 0.0);
         std::vector<int> nzj;
         std::vector<char> inz(n, 0);
@@ -1500,15 +1546,34 @@ private:
             // positive; the breakpoint that ends it enters, chosen Harris-style
             // (largest |a| within the relaxed bound) among those not flipped.
             const double sgn = below ? 1.0 : -1.0, piv = opt.pivot_tol;
-            brk_.clear();
-            for (int j : nzj) {
-                const double a = arow[j];
-                if (std::fabs(a) < piv || lbw(j) == ubw(j)) continue;
-                const double as = sgn * a;
-                if (st_[j] == AT_LB && as < 0) brk_.push_back({std::max(d_[j], 0.0) / std::fabs(a), j});
-                else if (st_[j] == AT_UB && as > 0) brk_.push_back({std::max(-d_[j], 0.0) / std::fabs(a), j});
+            // candidates (sign-eligible, pivotable, not fixed), branch-free
+            // into compact arrays: the row has ~20 k entries on Kramer's
+            // arc-flow masters, where the scattered bound reads of a
+            // per-entry test cost more than the rest of the ratio test
+            int K = 0;
+            {
+                const int nz0 = (int)nzj.size();
+                if ((int)cj_.size() < nz0) cj_.resize(nz0), cdd_.resize(nz0), ca_.resize(nz0), ct_.resize(nz0);
+                const char* st = st_.data();
+                const char* fx = dfix_.data();
+                const double* dv = d_.data();
+                const double* ar = arow.data();
+                int* oj = cj_.data();
+                double* od = cdd_.data();
+                double* oa = ca_.data();
+                for (int j : nzj) {
+                    const double a = ar[j], as = sgn * a, fa = std::fabs(a);
+                    const char sj = st[j];
+                    const bool lo = sj == AT_LB, ok = (fa >= piv) & !fx[j] & ((lo & (as < 0)) | ((sj == AT_UB) & (as > 0)));
+                    oj[K] = j, od[K] = lo ? dv[j] : -dv[j], oa[K] = fa;
+                    K += ok;
+                }
+                // clamped: t_k = cdd_k / ca_k >= 0 (the raw value stays for
+                // Harris's bound, which uses it with the tolerance)
+                double* ot = ct_.data();
+                for (int k = 0; k < K; ++k) ot[k] = od[k] > 0.0 ? od[k] : 0.0;
             }
-            if (brk_.empty()) {
+            if (K == 0) {
                 for (int j : nzj) inz[j] = 0;
                 const int l = head_[r];
                 const double bound = below ? lbw(l) : ubw(l);
@@ -1533,53 +1598,93 @@ private:
                 stats_.dual_exit = 1;
                 return Status::Infeasible;
             }
-            // a min-heap: only the breakpoints passed, and the Harris group
-            // after them, are ever put in order (O(n + k log n))
-            auto later = [](const std::pair<double, int>& x, const std::pair<double, int>& y) {
-                return x.first > y.first || (x.first == y.first && x.second > y.second);
-            };
-            std::make_heap(brk_.begin(), brk_.end(), later);
-            auto pop = [&]() {
-                std::pop_heap(brk_.begin(), brk_.end(), later);
-                const auto e = brk_.back();
-                brk_.pop_back();
-                return e;
+            // Breakpoints in ascending order, a chunk at a time. The chunks'
+            // thresholds are quantiles of a 64-point sample of the t_k
+            // (positions 0, 1, 3, 7, .. of the sorted sample), so the first
+            // chunk holds ~K/64 of the smallest and is usually all the walk
+            // reads: one pass over the candidates and a sort of a few
+            // hundred, where a heap over all of them cost ~70 us a pivot.
+            // Membership tests t_k <= theta as cdd_k <= theta |a_k| (no
+            // division per candidate; monotone in theta, so the chunks
+            // partition the candidates); only a chunk's members get t_k.
+            thr_.clear();
+            if (K > 256) {
+                double smp[64];
+                const int stride = K / 64;
+                for (int i = 0; i < 64; ++i) smp[i] = ct_[(size_t)i * stride] / ca_[(size_t)i * stride];
+                std::sort(smp, smp + 64);
+                for (int i = 1; i <= 64; i *= 2) thr_.push_back(smp[i - 1]);
+            }
+            thr_.push_back(kInf);
+            int ci = -1;
+            size_t cpos = 0, cend = 0;
+            int remaining = K;
+            if ((int)chunk_.size() < K) chunk_.resize(K), cidx_.resize(K);
+            // the next chunk (thr_[ci-1], thr_[ci]], sorted by (t, k); false
+            // past the last
+            auto refill = [&]() {
+                while (cpos == cend) {
+                    if (ci + 1 >= (int)thr_.size()) return false;
+                    ++ci;
+                    const double lo = ci == 0 ? -kInf : thr_[ci - 1], hi = thr_[ci];
+                    const double* ct = ct_.data();
+                    const double* ca = ca_.data();
+                    int* out = cidx_.data();
+                    size_t c = 0;
+                    if (ci == 0) {
+                        for (int k = 0; k < K; ++k) out[c] = k, c += ct[k] <= hi * ca[k];
+                    } else {
+                        for (int k = 0; k < K; ++k) {
+                            const double v = ct[k], a = ca[k];
+                            out[c] = k;
+                            c += (v > lo * a) & (v <= hi * a);
+                        }
+                    }
+                    for (size_t i = 0; i < c; ++i) chunk_[i] = {ct[out[i]] / ca[out[i]], out[i]};
+                    std::sort(chunk_.begin(), chunk_.begin() + c);
+                    cpos = 0, cend = c;
+                }
+                return true;
             };
             flipped_.clear();
             if (opt.bfrt) {
                 double slope = worst;
-                while (brk_.size() > 1) {
-                    const int j = brk_.front().second;
+                while (remaining > 1) {
+                    if (!refill()) break;
+                    const int k = chunk_[cpos].second, j = cj_[k];
                     const double range = ubw(j) - lbw(j);
                     if (!std::isfinite(range)) break;
-                    const double ns = slope - std::fabs(arow[j]) * range;
+                    const double ns = slope - ca_[k] * range;
                     if (ns <= 0.0) break;
                     slope = ns;
-                    flipped_.push_back(pop().second);
+                    flipped_.push_back(j);
+                    ++cpos, --remaining;
                 }
             }
             double tmax = kInf;
             int q = -1;
             double bestpiv = 0.0;
-            // Harris over what is left: pop in order while within the
+            // Harris over what is left: take in order while within the
             // relaxed bound, which only shrinks
             harris_.clear();
-            while (!brk_.empty() && brk_.front().first <= tmax) {
-                const auto e = pop();
+            while (remaining > 0) {
+                if (!refill()) break;
+                const auto e = chunk_[cpos];
+                if (e.first > tmax) break;
+                ++cpos, --remaining;
                 harris_.push_back(e);
-                const int j = e.second;
-                const double fa = std::fabs(arow[j]);
-                tmax = std::min(tmax, (st_[j] == AT_LB ? d_[j] + dtol(j) : dtol(j) - d_[j]) / fa);
+                const int k = e.second;
+                tmax = std::min(tmax, (cdd_[k] + dtol(cj_[k])) / ca_[k]);
             }
             for (const auto& e : harris_) {
-                if (e.first > tmax) break;   // popped in order
-                const double fa = std::fabs(arow[e.second]);
-                if (fa > bestpiv) bestpiv = fa, q = e.second;
+                if (e.first > tmax) break;   // taken in order
+                const double fa = ca_[e.second];
+                if (fa > bestpiv) bestpiv = fa, q = cj_[e.second];
             }
-            if (q < 0) q = harris_.front().second;
-            const size_t k0 = flipped_.size();
-            stats_.d_breaks += (long long)brk_.size();
+            if (q < 0) q = harris_.empty() ? cj_[0] : cj_[harris_.front().second];
+            stats_.d_breaks += (long long)remaining;
             FEDLP_LAP(t_dratio);
+            const size_t k0 = flipped_.size();
             if (k0 > 0) {
                 // the flips' effect on x_B: one FTRAN of their combined column
                 flipv_.assign(m, 0.0);

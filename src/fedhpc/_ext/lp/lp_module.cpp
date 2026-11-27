@@ -134,6 +134,17 @@ public:
         S_->opt = opt_;
         return S_->warm_start(want);
     }
+    // DSE weights per variable (rows' logicals, then structurals; 0 for
+    // nonbasic), empty when not exact for the current basis
+    py::array_t<double> get_dual_weights() const {
+        std::vector<double> w = S_->dual_weights();
+        py::array_t<double> a(w.size());
+        std::copy(w.begin(), w.end(), a.mutable_data());
+        return a;
+    }
+    bool set_dual_weights(py::array_t<double, py::array::c_style | py::array::forcecast> w) {
+        return S_->set_dual_weights(std::vector<double>(w.data(), w.data() + w.size()));
+    }
     // per basis position: >= 0 a structural id, -1 - r the logical of row r
     py::array_t<int> basic_heads() const {
         const int m = M_->rows();
@@ -402,6 +413,7 @@ PYBIND11_MODULE(_fedlp, mod) {
         .def_readwrite("degenerate_trigger", &Options::degenerate_trigger)
         .def_readwrite("refactor_interval", &Options::refactor_interval)
         .def_readwrite("max_iter", &Options::max_iter)
+        .def_readwrite("phase1_limit", &Options::phase1_limit)
         .def_readwrite("time_limit", &Options::time_limit)
         .def_readwrite("sifting", &Options::sifting)
         .def_readwrite("partial_min_cols", &Options::partial_min_cols)
@@ -434,6 +446,8 @@ PYBIND11_MODULE(_fedlp, mod) {
                     "rows lo <= A x <= hi (equal, one-sided or ranged)")
         .def("get_basis", &Solver::get_basis)
         .def("set_basis", &Solver::set_basis, py::arg("row_status"), py::arg("col_status"))
+        .def("get_dual_weights", &Solver::get_dual_weights)
+        .def("set_dual_weights", &Solver::set_dual_weights, py::arg("weights"))
         .def("basic_heads", &Solver::basic_heads)
         .def("tableau_row", &Solver::tableau_row, py::arg("position"))
         .def("logicals", &Solver::logicals)

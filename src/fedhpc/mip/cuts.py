@@ -109,21 +109,39 @@ def gomory_cuts(lp: LpRelaxation, P: MipProblem, x: np.ndarray, par: CutParams) 
             cand.append((abs(f - 0.5), pos))
     cand.sort()
     out = []
+    if not cand:
+        return out
     dense = np.zeros(P.n)
+    ctx = _GmiContext(lp, P)
     for _score, pos in cand[: par.gomory_rows]:
-        row = lp.tableau_row(pos, heads)
+        row = lp.tableau_row(pos, heads, ctx.basis, ctx.xlp)
         if row is None:
             continue
-        cut = _gmi_from_row(lp, P, row, dense, par)
+        cut = _gmi_from_row(lp, P, row, dense, par, ctx)
         if cut is not None and cut.efficacy(x) >= par.min_efficacy:
             out.append(cut)
     return out
 
 
-def _gmi_from_row(lp: LpRelaxation, P: MipProblem, row, dense: np.ndarray, par: CutParams) -> Cut | None:
-    """The GMI cut of one tableau row. Nonbasic columns sit at the LP's
-    installed bounds (lp.lb, lp.ub), which the cut is valid for: global at
-    the root."""
+class _GmiContext:
+    """What every tableau row of one separation round shares: the basis,
+    the LP point, the rows' logical data and their matrix."""
+
+    def __init__(self, lp: LpRelaxation, P: MipProblem):
+        self.basis = lp.get_basis()
+        self.xlp = np.asarray(lp.lp.x())
+        self.sigma, self.rhs, self.s_lo, self.s_hi = lp.logical_arrays()
+        self.m0 = lp.n_base_rows
+        self.A = P.A
+
+
+def _gmi_from_row(lp: LpRelaxation, P: MipProblem, row, dense: np.ndarray, par: CutParams,
+                  ctx: _GmiContext | None = None) -> Cut | None:
+    """The GMI cut of one tableau row, vectorised. Nonbasic columns sit at
+    the LP's installed bounds (lp.lb, lp.ub), which the cut is valid for:
+    global at the root. Logicals are substituted through
+    s_r = sigma_r (rhs_r - a_r'x), a sparse product with their rows."""
+    ctx = ctx or _GmiContext(lp, P)
     lb, ub = lp.lb, lp.ub
     beta = row.value
     f0 = beta - np.floor(beta)
@@ -140,46 +158,36 @@ def _gmi_from_row(lp: LpRelaxation, P: MipProblem, row, dense: np.ndarray, par: 
     g = np.where(is_int,
                  np.where(fk <= f0, fk / f0, (1 - fk) / (1 - f0)),
                  np.where(a >= 0, a / f0, -a / (1 - f0)))
+    nz = g > 1e-12
+    cmask, lmask = nz & is_col, nz & ~is_col
+    jc, gc, uc = row.index[cmask], g[cmask], row.at_upper[cmask]
+    if len(jc) > par.gomory_max_support * P.n + 10:
+        return None                           # too dense before the logicals add more
     # sum g_k v'_k >= 1  ->  pi'x >= 1 - const
-    const = 0.0
-    touched = []
-    for k in np.nonzero(g > 1e-12)[0]:
-        gk = float(g[k])
-        if is_col[k]:
-            j = int(row.index[k])
-            if row.at_upper[k]:
-                if not np.isfinite(ub[j]):
-                    return None
-                dense[j] -= gk
-                const += gk * ub[j]
-            else:
-                if not np.isfinite(lb[j]):
-                    return None
-                dense[j] += gk
-                const -= gk * lb[j]
-            touched.append(j)
-        else:
-            r = int(row.index[k])
-            sigma, rhs, s_lo, s_hi = lp.logical_info(r)
-            cols, coefs = lp.row_coefs(r)
-            # s = sigma (rhs - a_r x)
-            if row.at_upper[k]:     # v' = s_hi - s = s_hi - sigma rhs + sigma a x
-                if not np.isfinite(s_hi):
-                    return None
-                dense[cols] += gk * sigma * coefs
-                const += gk * (s_hi - sigma * rhs)
-            else:                   # v' = s - s_lo = sigma rhs - sigma a x - s_lo
-                dense[cols] -= gk * sigma * coefs
-                const += gk * (sigma * rhs - s_lo)
-            touched.extend(cols.tolist())
-    if not touched:
+    if np.any(uc & ~np.isfinite(ub[jc])) or np.any(~uc & ~np.isfinite(lb[jc])):
         return None
-    cols = np.unique(np.asarray(touched, dtype=int))
+    const = float(np.sum(np.where(uc, gc * np.where(uc, ub[jc], 0.0), -gc * np.where(uc, 0.0, lb[jc]))))
+    dense[jc] += np.where(uc, -gc, gc)          # a tableau row names each column once
+    rr, gl, ul = row.index[lmask], g[lmask], row.at_upper[lmask]
+    if len(rr):
+        sig, rhs, slo, shi = ctx.sigma[rr], ctx.rhs[rr], ctx.s_lo[rr], ctx.s_hi[rr]
+        if np.any(ul & ~np.isfinite(shi)):
+            dense[jc] = 0.0
+            return None
+        # upper: v' = s_hi - s = s_hi - sigma rhs + sigma a'x; lower: v' = sigma rhs - sigma a'x - s_lo
+        w = np.where(ul, gl * sig, -gl * sig)
+        const += float(np.sum(np.where(ul, gl * (np.where(ul, shi, 0.0) - sig * rhs), gl * (sig * rhs - slo))))
+        base = rr < ctx.m0
+        if np.any(base):
+            sub = ctx.A[rr[base]]
+            dense += sub.T @ w[base]
+        for r, wr in zip(rr[~base].tolist(), w[~base].tolist()):
+            cc, cf = lp.cut_coefs[r]
+            np.add.at(dense, cc, wr * cf)
+    cols = np.flatnonzero(dense)
     coef = dense[cols].copy()
     dense[cols] = 0.0
-    nz = coef != 0
-    cols, coef = cols[nz], coef[nz]
-    if len(cols) > par.gomory_max_support * P.n + 10:
+    if len(cols) == 0 or len(cols) > par.gomory_max_support * P.n + 10:
         return None
     return _finish(lb, ub, cols, coef, 1.0 - const, par, "gomory")
 
@@ -253,10 +261,12 @@ class CutPool:
 
     def select(self, cuts: list[Cut], x: np.ndarray, max_cuts: int) -> list[Cut]:
         """The most efficacious cuts, skipping duplicates and near-parallel
-        ones (|cos| > max_parallelism)."""
+        ones (|cos| > max_parallelism). A candidate's dots with the chosen
+        cuts read its scattered dense copy: one gather per chosen cut."""
         scored = sorted(((c.efficacy(x), k) for k, c in enumerate(cuts)), reverse=True)
         chosen: list[Cut] = []
-        dense_chosen: list[dict] = []
+        norms: list[float] = []
+        dense = np.zeros(len(x))
         for eff, k in scored:
             if eff < self.params.min_efficacy or len(chosen) >= max_cuts:
                 break
@@ -264,17 +274,14 @@ class CutPool:
             key = self._key(c)
             if key in self.seen:
                 continue
-            dc = dict(zip(c.cols.tolist(), c.coef.tolist()))
             nc = float(np.linalg.norm(c.coef))
-            parallel = False
-            for d, nd in dense_chosen:
-                dot = sum(v * d.get(j, 0.0) for j, v in dc.items())
-                if abs(dot) > self.params.max_parallelism * nc * nd:
-                    parallel = True
-                    break
+            dense[c.cols] = c.coef
+            lim = self.params.max_parallelism * nc
+            parallel = any(abs(float(d.coef @ dense[d.cols])) > lim * nd for d, nd in zip(chosen, norms))
+            dense[c.cols] = 0.0
             if parallel:
                 continue
             self.seen.add(key)
             chosen.append(c)
-            dense_chosen.append((dc, nc))
+            norms.append(nc)
         return chosen

@@ -74,7 +74,7 @@ def select_branch(pc: Pseudocosts, lp: LpRelaxation, x: np.ndarray, cands: np.nd
     if not to_test:
         k = int(order[0])
         return BranchDecision(int(cands[k]), float(x[cands[k]]))
-    basis = lp.get_basis()
+    basis = lp.get_state()
     best_k, best_s, no_better = int(order[0]), -1.0, 0
     best_bounds = (None, None)
     for k in to_test:

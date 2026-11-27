@@ -63,7 +63,7 @@ def _continuous_completion(P: MipProblem, lp: LpRelaxation, lb, ub, iteration_li
     if not np.any(~P.integer):
         y = lb.copy()
         return y if P.is_feasible(y) else None
-    saved_lb, saved_ub, basis = lp.lb.copy(), lp.ub.copy(), lp.get_basis()
+    saved_lb, saved_ub, basis = lp.lb.copy(), lp.ub.copy(), lp.get_state()
     try:
         lp.set_bounds(lb, ub)
         if lp.solve(iteration_limit) != OPTIMAL:
@@ -77,64 +77,147 @@ def _continuous_completion(P: MipProblem, lp: LpRelaxation, lb, ub, iteration_li
 
 
 def fix_and_propagate(P: MipProblem, prop: Propagator, lp: LpRelaxation, x: np.ndarray,
-                      lb: np.ndarray, ub: np.ndarray, deadline: float, tol: float = 1e-6):
-    """Fix integers and propagate, then complete the continuous part by LP.
+                      lb: np.ndarray, ub: np.ndarray, deadline: float, tol: float = 1e-6,
+                      max_backjumps: int = 200, stats: dict | None = None):
+    """Fix the integers one decision at a time with propagation, then
+    complete the continuous part by LP; a depth-first search with
+    conflict-directed backjumping (Prosser 1993) on dead ends.
 
-    Binaries go first, by LP value descending, each fixed to 1 (in doubling
-    / halving batches) and letting propagation set what the fixing excludes:
-    in assignment and partitioning rows a binary below 1/2 rounds to 0 for
-    every member of the row, while up-fixing the largest keeps the row
-    satisfiable. A binary that cannot take 1 takes 0. General integers then
-    round to their LP value, nearest first."""
-    lb, ub = lb.copy(), ub.copy()
-    binary = P.integer & (lb == 0) & (ub == 1)
-    bj = np.nonzero(binary & (x > tol))[0]
-    order = bj[np.argsort(-x[bj], kind="stable")]
-    k, batch = 0, max(1, int(np.sum(x[bj] >= 1 - tol)) or 1)
-    while k < len(order):
-        if time.perf_counter() > deadline:
-            return None
-        js = [j for j in order[k:k + batch] if lb[j] < ub[j]]
-        if not js:
-            k += batch
-            continue
-        tl, tu = lb.copy(), ub.copy()
-        tl[js] = 1.0
-        res = prop.propagate(tl, tu, max_rounds=10)
-        if res.feasible:
-            lb, ub = res.lb, res.ub
-            k += batch
-            batch = min(max(1, batch * 2), 256)
-            continue
-        if batch > 1:
-            batch = max(1, batch // 2)
-            continue
-        tl, tu = lb.copy(), ub.copy()       # this one cannot be 1
-        tu[js[0]] = 0.0
-        res = prop.propagate(tl, tu, max_rounds=10)
-        if not res.feasible:
-            return None
-        lb, ub = res.lb, res.ub
-        k += 1
-    # the binaries left free at 0, general integers rounded
-    rest = np.nonzero(P.integer & (lb < ub))[0]
-    if len(rest):
-        tl, tu = lb.copy(), ub.copy()
-        v = np.clip(np.round(x[rest]), lb[rest], ub[rest])
-        v = np.where(binary[rest], np.maximum(lb[rest], 0.0), v)
-        tl[rest] = tu[rest] = v
-        res = prop.propagate(tl, tu, max_rounds=10)
-        if not res.feasible:
-            return None
-        lb, ub = res.lb, res.ub
-    return _continuous_completion(P, lp, lb, ub)
+    Order and values: the LP-integral binaries at 1 first, in one batch;
+    then binaries by LP value descending, each tried at 1 then 0 (in
+    assignment and partitioning rows a member at 1 settles the row, where
+    rounding every member below 1/2 down empties it); general integers
+    nearest-rounded, then the other rounding; the remaining binaries at 0
+    in one batch (one by one if that fails). A decision whose both values
+    propagate to an empty domain is a dead end: the search jumps back to
+    the latest earlier decision on a column of the rows that failed (their
+    conflict set; chronologically when none is), flips it, and resumes from
+    there. ``max_backjumps`` bounds the search; ``lb, ub`` must be a
+    propagation fixed point (the caller's domain)."""
+    prop.reset(lb, ub, propagate=False)
+    A = P.A
+    ii = np.nonzero(P.integer & (lb < ub))[0]
+    binary = (lb[ii] == 0) & (ub[ii] == 1)
+    xb = x[ii]
+    one = ii[binary & (xb >= 1 - tol)]
+    up = ii[binary & (xb > tol) & (xb < 1 - tol)]
+    up = up[np.argsort(-x[up], kind="stable")]
+    gen = ii[~binary]
+    gen = gen[np.argsort(np.abs(x[gen] - np.round(x[gen])), kind="stable")]
+    rest = ii[binary & (xb <= tol)]
+    if len(one) and not prop.change(one, np.ones(len(one)), np.ones(len(one))):
+        prop.reset(lb, ub, propagate=False)
+        up = np.r_[one, up]                       # not all together: decide them singly
+    order = np.r_[up, gen].astype(np.int64)
+    first = np.where(np.isin(order, ii[binary]), 1.0, np.clip(np.round(x[order]), lb[order], ub[order]))
+
+    def alt(k, v):
+        j = order[k]
+        if lb[j] == 0 and ub[j] == 1 and P.integer[j]:
+            return 1.0 - v
+        xj = x[j]
+        w = np.floor(xj) if v > xj else np.ceil(xj)
+        if w == v:
+            w = v - 1 if v - 1 >= lb[j] else v + 1
+        return float(np.clip(w, lb[j], ub[j]))
+
+    stack: list[tuple[int, int, float, bool]] = []   # (trail level, order index, value, flipped)
+    k, jumps = 0, 0
+
+    def conflict_cols():
+        r = prop.infeasible_row
+        if r < 0 or r >= P.m:
+            return set()
+        return set(A.indices[A.indptr[r]:A.indptr[r + 1]].tolist())
+
+    def decide(kk, v):
+        j = int(order[kk])
+        return prop.change([j], [v], [v])
+
+    while True:
+        while k < len(order):
+            if time.perf_counter() > deadline:
+                return None
+            j = int(order[k])
+            l_j, u_j = prop.k.bound(j) if hasattr(prop, "k") else (prop.lb()[j], prop.ub()[j])
+            if l_j == u_j:
+                k += 1
+                continue
+            v = float(np.clip(first[k], l_j, u_j))
+            lev = prop.level()
+            if decide(k, v):
+                stack.append((lev, k, v, False))
+                k += 1
+                continue
+            conflict = conflict_cols()
+            prop.undo(lev)
+            w = alt(k, v)
+            if l_j <= w <= u_j and w != v and decide(k, w):
+                stack.append((lev, k, w, True))
+                k += 1
+                continue
+            conflict |= conflict_cols()
+            prop.undo(lev)
+            # dead end at k: jump back to the latest unflipped decision in the conflict
+            jumps += 1
+            if jumps > max_backjumps:
+                return None
+            target = None
+            for t in range(len(stack) - 1, -1, -1):
+                if not stack[t][3] and int(order[stack[t][1]]) in conflict:
+                    target = t
+                    break
+            if target is None:
+                for t in range(len(stack) - 1, -1, -1):
+                    if not stack[t][3]:
+                        target = t
+                        break
+            if target is None:
+                return None                         # every decision flipped: give up
+            lev_t, k_t, v_t, _f = stack[target]
+            del stack[target:]
+            prop.undo(lev_t)
+            w = alt(k_t, v_t)
+            if not decide(k_t, w):
+                # the flip fails at once: revisit k_t trying w first, then
+                # v_t again (as flipped), so the next dead end jumps past it
+                prop.undo(lev_t)
+                first[k_t] = w
+                k = k_t
+                continue
+            stack.append((lev_t, k_t, w, True))
+            k = k_t + 1
+        # the binaries left open at 0 (one batch; singly when it fails)
+        lnow, unow = prop.lb(), prop.ub()
+        open_rest = rest[lnow[rest] < unow[rest]]
+        if len(open_rest):
+            lev = prop.level()
+            if not prop.change(open_rest, np.zeros(len(open_rest)), np.zeros(len(open_rest))):
+                prop.undo(lev)
+                ok = True
+                for j in open_rest:
+                    lj, uj = prop.lb()[j], prop.ub()[j]
+                    if lj == uj:
+                        continue
+                    lv = prop.level()
+                    if not prop.change([j], [0.0], [0.0]):
+                        prop.undo(lv)
+                        if not prop.change([j], [1.0], [1.0]):
+                            ok = False
+                            break
+                if not ok:
+                    return None
+        if stats is not None:
+            stats["fp_backjumps"] = stats.get("fp_backjumps", 0) + jumps
+        return _continuous_completion(P, lp, prop.lb(), prop.ub())
 
 
 def guided_dive(P: MipProblem, prop: Propagator, lp: LpRelaxation, lb, ub, deadline: float,
                 incumbent: np.ndarray | None = None, max_depth: int = 400,
                 iteration_limit: int = 2000, tol: float = 1e-6):
-    saved_lb, saved_ub, basis = lp.lb.copy(), lp.ub.copy(), lp.get_basis()
+    saved_lb, saved_ub, basis = lp.lb.copy(), lp.ub.copy(), lp.get_state()
     lb, ub = lb.copy(), ub.copy()
+    prop.reset(lb, ub, propagate=False)
     try:
         for _depth in range(max_depth):
             if time.perf_counter() > deadline:
@@ -164,19 +247,18 @@ def guided_dive(P: MipProblem, prop: Propagator, lp: LpRelaxation, lb, ub, deadl
             j, go_up = int(cand[k]), bool(up[k])
             ok = False
             for side in (go_up, not go_up):
-                tl, tu = lb.copy(), ub.copy()
-                if side:
-                    tl[j] = np.ceil(x[j])
-                else:
-                    tu[j] = np.floor(x[j])
-                res = prop.propagate(tl, tu, max_rounds=5)
-                if not res.feasible:
+                lev = prop.level()
+                v = np.ceil(x[j]) if side else np.floor(x[j])
+                if not prop.change([j], [v if side else -INF], [INF if side else v], max_rounds=5):
+                    prop.undo(lev)
                     continue
-                lp.set_bounds(res.lb, res.ub)
+                nl, nu = prop.lb(), prop.ub()
+                lp.set_bounds(nl, nu)
                 if lp.solve(iteration_limit) == OPTIMAL:
-                    lb, ub = res.lb, res.ub
+                    lb, ub = nl, nu
                     ok = True
                     break
+                prop.undo(lev)
             if not ok:
                 return None
         return None
@@ -235,7 +317,7 @@ def feasibility_pump(P: MipProblem, lp: LpRelaxation, x: np.ndarray, lb, ub, dea
     cnorm = float(np.linalg.norm(c0))
     scale = np.sqrt(len(binary)) / cnorm if cnorm > 0 else 0.0
     neg = np.nonzero(lp.neg_id >= 0)[0]
-    saved_lb, saved_ub, basis = lp.lb.copy(), lp.ub.copy(), lp.get_basis()
+    saved_lb, saved_ub, basis = lp.lb.copy(), lp.ub.copy(), lp.get_state()
 
     def set_obj(c):
         lp.lp.set_costs(ids, c.tolist())

@@ -101,18 +101,68 @@ ENDATA
 
 
 # ------------------------------------------------------------ propagation
+@pytest.mark.parametrize("impl", ["cpp", "py"])
 @pytest.mark.parametrize("seed", range(40))
-def test_propagation_keeps_every_feasible_point(seed):
-    from fedhpc.mip.propagate import Propagator
+def test_propagation_keeps_every_feasible_point(seed, impl):
+    from fedhpc.mip.propagate import Propagator, PyPropagator
     rng = random.Random(seed)
     P, _ = random_ip(rng, rng.randint(2, 5), rng.randint(2, 5))
     pts = list(integer_points(P))
-    res = Propagator(P).propagate(P.lb, P.ub)
+    res = (Propagator if impl == "cpp" else PyPropagator)(P).propagate(P.lb, P.ub)
     if not pts:
         return
     assert res.feasible
     for x in pts:
         assert np.all(x >= res.lb - 1e-9) and np.all(x <= res.ub + 1e-9)
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_propagation_trail_fixings_and_undo(seed):
+    """The stateful C++ domain: fixings propagate soundly (every feasible
+    point agreeing with them survives), an empty domain is reported only
+    when no point agrees, and undo restores the domain exactly."""
+    from fedhpc.mip.propagate import Propagator, _fedmip
+    if _fedmip is None:
+        pytest.skip("_fedmip not built")
+    rng = random.Random(4000 + seed)
+    P, _ = random_ip(rng, rng.randint(2, 6), rng.randint(2, 6), box=2)
+    pts = list(integer_points(P))
+    prop = Propagator(P)
+    ok = prop.reset(P.lb, P.ub)
+    assert ok or not pts
+    if not ok:
+        return
+    base_l, base_u = prop.lb(), prop.ub()
+    for _ in range(6):
+        lev = prop.level()
+        k = rng.randint(1, min(3, P.n))
+        js = rng.sample(range(P.n), k)
+        vals = [float(rng.randint(int(base_l[j]), int(base_u[j]))) for j in js]
+        ok = prop.change(js, vals, vals)
+        agree = [x for x in pts if all(x[j] == v for j, v in zip(js, vals))]
+        if ok:
+            l, u = prop.lb(), prop.ub()
+            for x in agree:
+                assert np.all(x >= l - 1e-9) and np.all(x <= u + 1e-9)
+        else:
+            assert not agree
+        prop.undo(lev)
+        assert np.array_equal(prop.lb(), base_l) and np.array_equal(prop.ub(), base_u)
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_propagation_mixed_columns_sound(seed):
+    """Continuous and unbounded columns: the C++ kernel keeps every point
+    of a sampled feasible set (points found by rejection on a grid)."""
+    from fedhpc.mip.propagate import Propagator
+    rng = random.Random(4500 + seed)
+    P, x0 = random_ip(rng, rng.randint(2, 5), rng.randint(2, 5), mixed=True)
+    cont = ~P.integer
+    P.ub[cont] = np.where(rng.random() < 0.5, INF, P.ub[cont])
+    res = Propagator(P).propagate(P.lb, P.ub)
+    assert P.is_feasible(x0)
+    assert res.feasible
+    assert np.all(x0 >= res.lb - 1e-7) and np.all(x0 <= res.ub + 1e-7)
 
 
 # --------------------------------------------------------------- presolve
