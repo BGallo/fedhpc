@@ -73,6 +73,14 @@ public:
         lb_[j] = lb, ub_[j] = ub;
     }
 
+    // A ranged row lo <= a'x <= hi is the L row a'x + s = hi with its
+    // logical s in [0, hi - lo]: only an L row's logical upper bound moves.
+    void set_logical_ub(int r, double ub) {
+        if (r < 0 || r >= m_ || sense_[r] != 'L') throw std::invalid_argument("not an L row");
+        if (!(ub >= 0.0)) throw std::invalid_argument("a row range is nonnegative");
+        ub_[r] = ub;
+    }
+
     // nonzeros of the live columns
     long long nnz() const { return live_entries_; }
     double obj(int j) const { return obj_[j]; }

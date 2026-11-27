@@ -71,6 +71,8 @@ public:
         eta_of_row_.assign(m, -1);
         std::vector<int> nz;
         std::vector<char> seen(m, 0);
+        singular_.clear();
+        std::vector<int> sing_pos;
         for (int c : order) {
             const int j = head[c];
             nz.clear();
@@ -85,8 +87,11 @@ public:
             for (int i : nz)
                 if (!taken[i]) mx = std::max(mx, std::fabs(v[i]));
             if (mx < 1e-11) {
+                // dependent on the columns before it: note the position, go
+                // on, and offer the rows left over for a repair
                 for (int i : nz) v[i] = 0.0, seen[i] = 0;
-                return false;
+                sing_pos.push_back(c);
+                continue;
             }
             int p = -1;
             for (int i : nz) {
@@ -111,6 +116,12 @@ public:
             lstart_.push_back((int)lidx_.size());
             taken[p] = 1;
             ord_.push_back(c);
+        }
+        if (!sing_pos.empty()) {
+            size_t k = 0;
+            for (int r = 0; r < m && k < sing_pos.size(); ++r)
+                if (!taken[r]) singular_.push_back({sing_pos[k++], r});
+            return false;
         }
         for (int c = 0; c < m; ++c)
             for (auto [p, x] : ucol_[c]) urow_[p].push_back({c, x});
@@ -370,6 +381,7 @@ public:
     }
     const char* name() const override { return "lu"; }
     const std::vector<int>* last_nz() const override { return &out_nz_; }
+    const std::vector<std::pair<int, int>>* singular() const override { return &singular_; }
     const std::vector<int>* inplace_nz() const override { return inplace_valid_ ? &inplace_nz_ : nullptr; }
     const std::vector<int>* row_nz() const override { return row_valid_ ? &nzb_ : nullptr; }
     int updates() const { return updates_; }
@@ -394,6 +406,7 @@ private:
     std::vector<std::pair<int, int>> stk_;
     std::vector<char> mark_;
     mutable std::vector<int> lheap_;
+    std::vector<std::pair<int, int>> singular_;   // (basis position, free row) of the last failed factorize
     std::vector<int> wnz_;
     bool inplace_valid_ = false, row_valid_ = false, startb_given_ = false;
     // sparse paths below these densities (1/k of m): L and R by pattern,

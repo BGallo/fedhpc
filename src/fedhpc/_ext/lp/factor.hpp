@@ -57,6 +57,10 @@ public:
     // when the factor tracked it (else null)
     virtual const std::vector<int>* inplace_nz() const { return nullptr; }
     virtual const std::vector<int>* row_nz() const { return nullptr; }
+    // after a failed factorize: (basis position, row) pairs, each position's
+    // column dependent on the others and each row covered by none, so the
+    // row's logical can take the position (a basis repair); null if untracked
+    virtual const std::vector<std::pair<int, int>>* singular() const { return nullptr; }
 };
 
 // The explicit dense inverse behind the interface.

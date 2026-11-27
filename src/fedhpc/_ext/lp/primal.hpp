@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
 #include <vector>
 
@@ -76,6 +77,9 @@ struct Options {
     int degenerate_trigger = 10; // degenerate pivots in a row before perturbing
     int refactor_interval = 200; // pivots between refactorisations
     long long max_iter = 10'000'000;
+    // wall-clock seconds per solve (checked every 64 iterations); a solve
+    // past it returns ITERATION_LIMIT like one past max_iter
+    double time_limit = 1e100;
     // Sifting: pivots work on the basic columns plus a working set of
     // candidate nonbasic columns; the rest stay frozen at their bounds until
     // a pricing pass with the current duals admits them. The working set is
@@ -161,6 +165,13 @@ struct Stats {
     long long majors = 0;   // multiple pricing's full re-pricings
     long long parallel_passes = 0;
     long long dual_flips = 0, bfrt_flips = 0;
+    // why the last dual phase stopped short: 1 no entering column (dual
+    // unbounded), 2 refactorisation failed on a tiny pivot, 3 periodic one
+    int dual_exit = 0;
+    long long dse_resets = 0;
+    long long basis_repairs = 0;   // singular bases repaired with logicals   // weights recomputed because violated rows went unscored
+    int dual_status = -1;   // the last dual phase's Status
+    double post_dual_infeas = -1;
     double t_select = 0, t_ftran = 0, t_ratio = 0, t_pivot = 0, t_refactor = 0, t_sift = 0;
     double t_btran = 0, t_rowwise = 0, t_colwise = 0, t_fupdate = 0;
     // dual phase: row choice, BTRAN, PRICE, ratio test, FTRANs (alpha, DSE
@@ -212,6 +223,7 @@ public:
 
     Status solve() {
         auto t0 = std::chrono::steady_clock::now();
+        solve_start_ = t0;
         sync_columns();
         next_valid_ = false;
         degenerate_ = 0;
@@ -254,6 +266,12 @@ private:
     std::vector<double> alpha_, rho_, acc_;
     std::vector<int> anz_, rnz_;   // nonzero positions of alpha_ and rho_
     std::vector<double> dse_, tau_;   // dual steepest-edge weights per basis position
+    // DSE weights stay finite, nothing more: an infinite weight scores its
+    // row zero, and a dual that cannot see a violated row stops short of
+    // feasibility (AF_N100_M10: "optimal" with rows violated by 32). Capping
+    // lower changes real weights - pos_congestion's reach past 1e100, and caps
+    // at 1e12 / 1e100 took its recording from 43 k pivots to 113 k / 73 k.
+    static constexpr double kDseMin = 1e-6, kDseMax = 1e300;
     std::vector<double> wcol_;        // the weights by column, across a refactorisation
     bool dse_exact_ = false;          // dse_ = ||e_i' B^-1||^2, kept by dual pivots only
     std::vector<std::pair<double, int>> brk_;   // the dual ratio test's breakpoints
@@ -442,13 +460,90 @@ private:
         for (int j = 0; j < n; ++j)
             if (st_[j] != DEAD) admit(j);
         perturbed_ = false;
+        make_factor();
+        basis_valid_ = refactor();
+    }
+
+    void make_factor() {
+        const int m = M_.rows();
         if (opt.factor == 3 || (opt.factor == 0 && m > opt.dense_max_rows))
             fac_ = std::make_unique<LuFT>();
         else if (opt.factor == 2) fac_ = std::make_unique<SparsePFI>();
         else fac_ = std::make_unique<DenseFactor>();
         fac_->reset(m);
-        basis_valid_ = refactor();
     }
+
+public:
+    // Start from a given basis (status per model column: BASIC, AT_LB or
+    // AT_UB; a nonbasic is placed at the bound it names, or at its finite
+    // one). A basis of the wrong size or a singular one falls back to the
+    // crash; returns whether the given basis was taken. Branch and bound
+    // restores a node's parent basis this way, and a model rebuilt with
+    // new rows (cuts) keeps its basis with the new logicals basic.
+    bool warm_start(const std::vector<char>& want) {
+        sync_columns();
+        dse_exact_ = false;
+        const int m = M_.rows(), n = M_.cols();
+        if ((int)want.size() != n) {
+            crash();
+            return false;
+        }
+        head_.clear();
+        for (int j = 0; j < n; ++j) {
+            if (st_[j] == DEAD) continue;
+            pos_[j] = -1, w_[j] = 1.0, pl_[j] = pu_[j] = 0.0;
+            if (want[j] == BASIC) {
+                head_.push_back(j);
+                continue;
+            }
+            char s = want[j] == AT_UB ? AT_UB : AT_LB;
+            if (s == AT_UB && !std::isfinite(M_.ub(j))) s = AT_LB;
+            if (s == AT_LB && !std::isfinite(M_.lb(j))) s = AT_UB;
+            st_[j] = s, x_[j] = rest_value(j, s);
+        }
+        if ((int)head_.size() != m) {
+            crash();
+            return false;
+        }
+        for (int i = 0; i < m; ++i) st_[head_[i]] = BASIC, pos_[head_[i]] = i;
+        for (int j = 0; j < n; ++j)
+            if (st_[j] != DEAD) admit(j);
+        perturbed_ = false;
+        make_factor();
+        basis_valid_ = refactor();
+        if (!basis_valid_) {
+            crash();
+            return false;
+        }
+        return true;
+    }
+    bool has_basis() const { return basis_valid_; }
+    bool out_of_budget() const {
+        if (stats_.iterations >= opt.max_iter) return true;
+        if ((stats_.iterations & 63) == 0 && opt.time_limit < 1e99)
+            return std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start_).count() > opt.time_limit;
+        return false;
+    }
+    std::chrono::steady_clock::time_point solve_start_ = std::chrono::steady_clock::now();
+    // the column basic at position i
+    int head(int i) const { return head_[i]; }
+    // The nonbasic part of row i of B^-1 A (logicals included), for cut
+    // separation: x_head(i) + sum_j abar_j x_j = xbar_i.
+    void tableau_row(int i, std::vector<int>& cols, std::vector<double>& vals) {
+        cols.clear(), vals.clear();
+        if (!basis_valid_) return;
+        const int m = M_.rows(), n = M_.cols();
+        const double* rr = fac_->row(i);
+        rho_.assign(rr, rr + m);
+        for (int j = 0; j < n; ++j) {
+            const char sj = st_[j];
+            if (sj == BASIC || sj == DEAD) continue;
+            const double a = M_.dot(rho_.data(), j);
+            if (std::fabs(a) > 1e-12) cols.push_back(j), vals.push_back(a);
+        }
+    }
+
+private:
 
     // all_d: recompute every column's reduced cost; otherwise only the
     // working set's (primal pivoting looks at no other column, and sifting
@@ -465,12 +560,40 @@ private:
             if ((int)wcol_.size() < M_.cols()) wcol_.resize(M_.cols());
             for (int i = 0; i < m; ++i) wcol_[head_[i]] = dse_[i];
         }
-        if (!fac_->factorize(M_, head_)) {
+        bool ok = fac_->factorize(M_, head_);
+        bool repaired = false;
+        for (int attempt = 0; !ok && attempt < 3; ++attempt) {
+            // basis repair (as HiGHS and Clp): dependent columns leave for
+            // their bounds, the logicals of the rows they left uncovered come
+            // in; x_B is recomputed below and the running phase restores
+            // feasibility
+            const auto* sg = fac_->singular();
+            if (!sg || sg->empty()) break;
+            bool fine = true;
+            for (auto [c, r] : *sg)
+                if (st_[r] == BASIC) fine = false;
+            if (!fine) break;
+            for (auto [c, r] : *sg) {
+                const int j = head_[c];
+                const char sj = std::isfinite(M_.lb(j)) ? AT_LB : AT_UB;
+                st_[j] = sj, x_[j] = rest_value(j, sj), pos_[j] = -1;
+                head_[c] = r, st_[r] = BASIC;
+            }
+            ++stats_.basis_repairs;
+            repaired = true;
+            cand_valid_ = false, next_valid_ = false;
+            ok = fac_->factorize(M_, head_);
+        }
+        if (!ok) {
             dse_exact_ = false;
             return false;
         }
         if (keep_w)
             for (int i = 0; i < m; ++i) dse_[i] = wcol_[head_[i]];
+        if (repaired) {   // the repaired positions' weights are not theirs
+            if (keep_w) std::fill(dse_.begin(), dse_.end(), 1.0);
+            dse_exact_ = false;
+        }
         for (int i = 0; i < M_.rows(); ++i) pos_[head_[i]] = i;   // the factor may reorder
         compute_xb();
         compute_y();
@@ -511,12 +634,16 @@ private:
     }
 
     // largest bound violation of a basic variable, against working bounds
+    // the largest bound violation of a basic variable, relative to the
+    // bound (v / (1 + |bound|)): the measure every phase's per-row test uses,
+    // so a basis one phase accepts the others do too
     double infeasibility() const {
         double v = 0.0;
         for (int i = 0; i < M_.rows(); ++i) {
             const int j = head_[i];
-            v = std::max(v, lbw(j) - xb_[i]);
-            v = std::max(v, xb_[i] - ubw(j));
+            const double l = lbw(j), u = ubw(j);
+            if (xb_[i] < l) v = std::max(v, (l - xb_[i]) / (1.0 + std::fabs(l)));
+            else if (xb_[i] > u) v = std::max(v, (xb_[i] - u) / (1.0 + std::fabs(u)));
         }
         return v;
     }
@@ -980,7 +1107,7 @@ private:
             ~Flag() { f = false; }
         } only_work(maintain_work_only_);
         while (true) {
-            if (stats_.iterations >= opt.max_iter) return Status::IterationLimit;
+            if (out_of_budget()) return Status::IterationLimit;
             int q;
             {
                 FEDLP_TIME(t_select);
@@ -1051,7 +1178,7 @@ private:
         const int m = M_.rows();
         std::vector<double> c1(m), y1(m);
         while (true) {
-            if (stats_.iterations >= opt.max_iter) return Status::IterationLimit;
+            if (out_of_budget()) return Status::IterationLimit;
             bool any = false;
             for (int i = 0; i < m; ++i) {
                 const int j = head_[i];
@@ -1139,6 +1266,7 @@ private:
             d_[j] += sh;   // nonbasic: y is unchanged
         }
         Status st = dual_phase_core();
+        stats_.dual_status = (int)st;
         for (auto [j, c] : saved) M_.set_obj(j, c);
         compute_y(), compute_d();
         cand_valid_ = false, next_valid_ = false;
@@ -1235,7 +1363,7 @@ private:
         ++stats_.dual_solves;
         cand_valid_ = false;
         while (true) {
-            if (stats_.iterations >= opt.max_iter) return Status::IterationLimit;
+            if (out_of_budget()) return Status::IterationLimit;
             FEDLP_LAP_START;
             // leaving row: the largest violation^2 / beta_i (dual steepest
             // edge, beta_i ~ |e_i' B^-1|^2) or the largest violation
@@ -1251,7 +1379,7 @@ private:
                         const double* rr = fac_->row(i);
                         double w = 0.0;
                         for (int k = 0; k < m; ++k) w += rr[k] * rr[k];
-                        dse_[i] = std::max(w, 1e-6);
+                        dse_[i] = std::isfinite(w) ? std::min(std::max(w, kDseMin), kDseMax) : 1.0;
                     }
                 }
                 dse_exact_ = opt.dse_exact;
@@ -1259,17 +1387,64 @@ private:
             int r = -1;
             double worst = 0.0, best = 0.0;
             bool below = false;
+            bool any = false;
             {
                 const double* inf = infeas_.data();
                 const double* w = dse_.data();
                 for (int i = 0; i < m; ++i) {
                     const double v = inf[i];
                     if (v == 0.0) continue;
+                    any = true;
                     const double sc = dse ? v * v / w[i] : std::fabs(v);
                     if (sc > best) best = sc, worst = std::fabs(v), r = i, below = v < 0;
                 }
             }
-            if (r < 0) return Status::Optimal;
+            if (r < 0 && any) {
+                // violated rows, none scored: the weights went bad (overflow
+                // or NaN). Never stop on that: exact weights, choose again.
+                ++stats_.dse_resets;
+                if (dse && opt.dse_exact) {
+                    for (int i = 0; i < m; ++i) {
+                        const double* rr = fac_->row(i);
+                        double w = 0.0;
+                        for (int k = 0; k < m; ++k) w += rr[k] * rr[k];
+                        dse_[i] = std::isfinite(w) ? std::min(std::max(w, kDseMin), kDseMax) : 1.0;
+                    }
+                } else {
+                    std::fill(dse_.begin(), dse_.end(), 1.0);
+                }
+                const double* inf = infeas_.data();
+                for (int i = 0; i < m; ++i) {
+                    const double v = inf[i];
+                    if (v == 0.0) continue;
+                    const double sc = dse ? v * v / dse_[i] : std::fabs(v);
+                    if (!(sc > best)) continue;
+                    best = sc, worst = std::fabs(v), r = i, below = v < 0;
+                }
+                if (r < 0) {   // the scores themselves are not numbers
+                    for (int i = 0; i < m; ++i)
+                        if (inf[i] != 0.0 && std::fabs(inf[i]) > worst) worst = std::fabs(inf[i]), r = i, below = inf[i] < 0;
+                }
+            }
+            if (r < 0) {
+                // primal feasible on x_B carried through updates: confirm on
+                // a fresh factor before declaring it (drift over a long
+                // interval would otherwise hand the primal a basis it sees as
+                // infeasible)
+                if (since_refactor_ > 0) {
+                    if (!refactor(!ws)) { stats_.dual_exit = 2; return Status::Numerical; }
+                    all_infeas();
+                    continue;
+                }
+#ifdef FEDLP_DEBUG_DUAL
+                for (int i = 0, shown = 0; i < m && shown < 8; ++i) {
+                    const int j = head_[i];
+                    if (xb_[i] < lbw(j) - 1e-6 || xb_[i] > ubw(j) + 1e-6)
+                        fprintf(stderr, "dual-opt violation pos %d col %d xb %g [%g, %g] infeas %g st %d\n", i, j, xb_[i], lbw(j), ubw(j), infeas_[i], st_[j]), ++shown;
+                }
+#endif
+                return Status::Optimal;
+            }
             FEDLP_LAP(t_dchuzr);
             // pivot row over the nonbasic columns
             {
@@ -1343,8 +1518,20 @@ private:
                     nzj.clear();
                     continue;
                 }
-                // dual unbounded: the primal phase 1 proves infeasibility
-                return Status::Numerical;
+                // Dual unbounded: no nonbasic move within its bounds can
+                // reduce row r's violation, a proof that the LP is primal
+                // infeasible (its working bounds contain the true ones). On a
+                // fresh factor first (x_B and the row exact), then trust it:
+                // handing it to phase 1 cycled for millions of pivots on a
+                // degenerate infeasible node LP (csched008).
+                if (since_refactor_ > 0) {
+                    if (!refactor(!ws)) { stats_.dual_exit = 2; return Status::Numerical; }
+                    all_infeas();
+                    nzj.clear();
+                    continue;
+                }
+                stats_.dual_exit = 1;
+                return Status::Infeasible;
             }
             // a min-heap: only the breakpoints passed, and the Harris group
             // after them, are ever put in order (O(n + k log n))
@@ -1371,7 +1558,6 @@ private:
                     flipped_.push_back(pop().second);
                 }
             }
-            const size_t k0 = flipped_.size();
             double tmax = kInf;
             int q = -1;
             double bestpiv = 0.0;
@@ -1391,6 +1577,7 @@ private:
                 if (fa > bestpiv) bestpiv = fa, q = e.second;
             }
             if (q < 0) q = harris_.front().second;
+            const size_t k0 = flipped_.size();
             stats_.d_breaks += (long long)brk_.size();
             FEDLP_LAP(t_dratio);
             if (k0 > 0) {
@@ -1423,7 +1610,7 @@ private:
             const bool stable = std::fabs(arow[q] - arq) <= 1e-9 * (1.0 + std::fabs(arq));
             if (std::fabs(arq) < piv) {
                 for (int j : nzj) inz[j] = 0;
-                if (!refactor(!ws)) return Status::Numerical;
+                if (!refactor(!ws)) { stats_.dual_exit = 2; return Status::Numerical; }
                 all_infeas();   // x_B recomputed
                 continue;
             }
@@ -1440,9 +1627,13 @@ private:
                     if (i == r) continue;
                     const double ratio = alpha_[i] / arq;
                     double b = dse_[i] - 2.0 * ratio * tau_[i] + ratio * ratio * br;
-                    dse_[i] = std::max(b, std::max(1e-6, ratio * ratio));
+                    b = std::max(b, std::max(kDseMin, ratio * ratio));
+                    dse_[i] = std::isfinite(b) ? std::min(b, kDseMax) : kDseMax;
                 }
-                dse_[r] = std::max(br / (arq * arq), 1e-6);
+                {
+                    const double b = std::max(br / (arq * arq), kDseMin);
+                    dse_[r] = std::isfinite(b) ? std::min(b, kDseMax) : kDseMax;
+                }
             }
             const int l = head_[r];
             const double target = below ? lbw(l) : ubw(l);
@@ -1473,7 +1664,7 @@ private:
             const int interval = fac_->name()[0] == 'l' ? opt.dual_refactor_interval : refactor_interval();
             if (!stable || !ok) ++stats_.stability_refactors;
             if (!stable || !ok || ++since_refactor_ >= interval) {
-                if (!refactor(!ws)) return Status::Numerical;
+                if (!refactor(!ws)) { stats_.dual_exit = 3; return Status::Numerical; }
                 all_infeas();   // x_B recomputed
             }
             FEDLP_LAP(t_dfactor);
@@ -1526,6 +1717,7 @@ private:
             if (!df && opt.dual_flip && M_.rows() >= opt.dual_flip_min_rows) df = flip_to_dual_feasible();
             if (df && infeasibility() > opt.primal_tol) {
                 Status s = dual_phase();
+                stats_.post_dual_infeas = infeasibility();
                 if (s == Status::Infeasible) return s;
                 // Optimal, or trouble: the primal path below finishes the job
             }

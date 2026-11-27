@@ -2,6 +2,10 @@
 
 Multi-objective MIP scheduler for HPC jobs in federated multi-platform environments (on-premises + cloud). Minimizes total turnaround time and monetary cost jointly, subject to resource capacity and horizon constraints.
 
+External optimization benchmarks are catalogued by problem family in
+[`benchmarks/README.md`](benchmarks/README.md). Existing FED-HPC input data
+remains in `data/`; experiment outputs are in `results/` and `pareto_runs/`.
+
 ## Problem Formulation
 
 Space-time network flow MIP formulation (non-preemptive, elastic provisioning).
