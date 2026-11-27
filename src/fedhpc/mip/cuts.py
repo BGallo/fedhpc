@@ -33,6 +33,7 @@ distance from the point to the cut's hyperplane.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -98,7 +99,10 @@ def _finish(lb: np.ndarray, ub: np.ndarray, cols: np.ndarray, coef: np.ndarray, 
 
 
 # ---------------------------------------------------------------- Gomory
-def gomory_cuts(lp: LpRelaxation, P: MipProblem, x: np.ndarray, par: CutParams) -> list[Cut]:
+def gomory_cuts(lp: LpRelaxation, P: MipProblem, x: np.ndarray, par: CutParams,
+                impint: np.ndarray | None = None) -> list[Cut]:
+    """GMI cuts from the tableau rows of fractional integer basics;
+    ``impint`` (implied integers) strengthens the nonbasic coefficients."""
     heads = lp.basic_heads()
     cand = []
     for pos, h in enumerate(heads):
@@ -113,6 +117,7 @@ def gomory_cuts(lp: LpRelaxation, P: MipProblem, x: np.ndarray, par: CutParams) 
         return out
     dense = np.zeros(P.n)
     ctx = _GmiContext(lp, P)
+    ctx.integer = P.integer if impint is None else impint
     for _score, pos in cand[: par.gomory_rows]:
         row = lp.tableau_row(pos, heads, ctx.basis, ctx.xlp)
         if row is None:
@@ -133,6 +138,7 @@ class _GmiContext:
         self.sigma, self.rhs, self.s_lo, self.s_hi = lp.logical_arrays()
         self.m0 = lp.n_base_rows
         self.A = P.A
+        self.integer = P.integer
 
 
 def _gmi_from_row(lp: LpRelaxation, P: MipProblem, row, dense: np.ndarray, par: CutParams,
@@ -153,7 +159,7 @@ def _gmi_from_row(lp: LpRelaxation, P: MipProblem, row, dense: np.ndarray, par: 
         return None
     is_col = row.kind == 0
     is_int = np.zeros(len(a), bool)
-    is_int[is_col] = P.integer[row.index[is_col]]
+    is_int[is_col] = ctx.integer[row.index[is_col]]
     fk = a - np.floor(a)
     g = np.where(is_int,
                  np.where(fk <= f0, fk / f0, (1 - fk) / (1 - f0)),
@@ -247,6 +253,374 @@ def cover_cuts(P: MipProblem, x: np.ndarray, lb: np.ndarray, ub: np.ndarray, par
             if cut is not None and cut.efficacy(x) >= par.min_efficacy:
                 out.append(cut)
     return out
+
+
+# ---------------------------------------------------------------- c-MIR
+def _mir(a: np.ndarray, b: float, isint: np.ndarray, xs: np.ndarray, delta: float, min_frac: float):
+    """MIR of  sum a_k v_k <= b  (v >= 0; integers where isint, continuous
+    otherwise) divided by delta: coefficients g and right-hand side beta of
+    sum g_k v_k <= beta, or None when frac(b / delta) is too close to 0/1.
+    Continuous terms with a > 0 relax away; those with a < 0 make
+    s = sum |a| v and enter as -s / (delta (1 - f0))."""
+    bd = b / delta
+    f0 = bd - np.floor(bd)
+    if f0 < min_frac or f0 > 1 - min_frac:
+        return None
+    ad = a / delta
+    fl = np.floor(ad)
+    fj = ad - fl
+    g = np.where(isint, fl + np.maximum(fj - f0, 0.0) / (1 - f0),
+                 np.where(a < 0, a / (delta * (1 - f0)), 0.0))
+    return g, float(np.floor(bd))
+
+
+def cmir_cuts(P: MipProblem, x: np.ndarray, lb: np.ndarray, ub: np.ndarray, par: CutParams,
+              max_rows: int = 300, max_aggr: int = 5, deadline: float = np.inf) -> list[Cut]:
+    """Complemented mixed-integer rounding cuts (Marchand & Wolsey 2001),
+    the separator SCIP's and Gurobi's flow-cover and MIR cuts share.
+
+    From each tight row (side) holding fractional integers, a path of
+    aggregations: while the aggregated row has a continuous column strictly
+    inside its bounds, the tight row through the farthest-inside one with
+    the fewest entries is added with the multiplier that cancels it (any
+    sign for an equality, the sign that keeps a <= row valid otherwise),
+    up to ``max_aggr`` rows. After each step: bound substitution (every
+    column to its nearest finite bound, integers complemented when nearer
+    the upper one), then MIR with the divisors delta taken from the
+    integers strictly inside their bounds (their |a|, up to 8, and 1), the
+    best one also halved up to three times; the most efficacious cut of the
+    path is kept. Bounds are the given (root) ones: the cuts are global."""
+    A, C = P.A, P.csc
+    m, n = P.m, P.n
+    act = A @ x
+    tol_r = 1e-6 * (1 + np.abs(np.where(np.isfinite(P.row_hi), P.row_hi, 0.0)))
+    tight_hi = np.isfinite(P.row_hi) & (P.row_hi - act <= 1e-6 * (1 + np.abs(np.nan_to_num(P.row_hi, posinf=0))))
+    tight_lo = np.isfinite(P.row_lo) & (act - P.row_lo <= 1e-6 * (1 + np.abs(np.nan_to_num(P.row_lo, neginf=0))))
+    del tol_r
+    fracint = P.integer & (np.abs(x - np.round(x)) > 1e-6)
+    if not np.any(fracint):
+        return []
+    rows = np.unique(C[:, np.nonzero(fracint)[0]].indices)
+    rows = rows[tight_hi[rows] | tight_lo[rows]]
+    if len(rows) == 0:
+        return []
+    # fewest entries first: short rows give sparse cuts
+    rows = rows[np.argsort(np.diff(A.indptr)[rows], kind="stable")][:max_rows]
+    rn = np.diff(A.indptr)
+    inside = ~P.integer & (x > lb + 1e-6) & (x < ub - 1e-6)
+    dist = np.where(inside, np.minimum(x - lb, ub - x), 0.0)
+    dense = np.zeros(n)
+    out = []
+
+    def side_rows(i):
+        a, b = A.indices[A.indptr[i]:A.indptr[i + 1]], A.data[A.indptr[i]:A.indptr[i + 1]]
+        res = []
+        if tight_hi[i]:
+            res.append((a, b, float(P.row_hi[i]), P.row_lo[i] == P.row_hi[i]))
+        if tight_lo[i] and P.row_lo[i] != P.row_hi[i]:
+            res.append((a, -b, -float(P.row_lo[i]), False))
+        return res
+
+    for i in rows:
+        if time.perf_counter() > deadline:
+            break
+        for cols0, a0, b0, _eq in side_rows(i):
+            used = {int(i)}
+            dense[cols0] += a0
+            touched = set(cols0.tolist())
+            rhs = b0
+            best = None
+            for _step in range(max_aggr + 1):
+                cols = np.fromiter(touched, dtype=np.int64)
+                coef = dense[cols]
+                nzm = np.abs(coef) > 1e-12
+                cols, coef = cols[nzm], coef[nzm]
+                cut = _cmir_from_row(cols, coef, rhs, P, x, lb, ub, par)
+                if cut is not None and (best is None or cut[0] > best[0]):
+                    best = cut
+                # aggregate along the continuous column farthest inside
+                cand = cols[inside[cols]]
+                if len(cand) == 0 or _step == max_aggr:
+                    break
+                j = int(cand[np.argmax(dist[cand])])
+                aj = dense[j]
+                rr = C.indices[C.indptr[j]:C.indptr[j + 1]]
+                vv = C.data[C.indptr[j]:C.indptr[j + 1]]
+                pick = None
+                for r, v in sorted(zip(rr.tolist(), vv.tolist()), key=lambda t: rn[t[0]]):
+                    if r in used:
+                        continue
+                    if P.row_lo[r] == P.row_hi[r] and tight_hi[r]:
+                        pick = (r, -aj / v, float(P.row_hi[r]))
+                        break
+                    lam = -aj / v                     # on the <= form a_r x <= hi
+                    if lam > 0 and tight_hi[r]:
+                        pick = (r, lam, float(P.row_hi[r]))
+                        break
+                    if lam < 0 and tight_lo[r]:     # -a_r x <= -lo with multiplier -lam
+                        pick = (r, lam, float(P.row_lo[r]))
+                        break
+                if pick is None:
+                    break
+                r, lam, bound = pick
+                ar = A.indices[A.indptr[r]:A.indptr[r + 1]]
+                dense[ar] += lam * A.data[A.indptr[r]:A.indptr[r + 1]]
+                dense[j] = 0.0                        # exact cancellation
+                rhs += lam * bound
+                touched.update(ar.tolist())
+                used.add(r)
+            dense[np.fromiter(touched, dtype=np.int64)] = 0.0
+            if best is not None and best[0] >= par.min_efficacy:
+                out.append(best[1])
+    return out
+
+
+def _cmir_from_row(cols, coef, rhs, P, x, lb, ub, par):
+    """(efficacy, Cut) of the best c-MIR of  coef'x <= rhs, or None."""
+    if len(cols) == 0:
+        return None
+    l, u, xv = lb[cols], ub[cols], x[cols]
+    isint = P.integer[cols]
+    # bound substitution: v = x - l (lower) or u - x (upper, complemented)
+    use_up = np.where(np.isfinite(u) & (~np.isfinite(l) | (u - xv < xv - l)), True, False)
+    if np.any(~use_up & ~np.isfinite(l)):
+        return None
+    bnd = np.where(use_up, u, l)
+    a = np.where(use_up, -coef, coef)
+    b = rhs - float(coef @ bnd)
+    vs = np.where(use_up, u - xv, xv - l)          # the point in v
+    if not np.isfinite(b):
+        return None
+    inner = isint & (vs > 1e-6) & (np.where(use_up, u - l, u - l) - vs > 1e-6)
+    if not np.any(inner):
+        return None
+    cand = np.unique(np.abs(a[inner]))
+    cand = cand[cand > 1e-6][-8:]
+    deltas = list(cand) + [1.0]
+    best = None
+
+    def evaluate(delta):
+        r = _mir(a, b, isint, vs, delta, par.gomory_min_frac)
+        if r is None:
+            return None
+        g, beta = r
+        # back to x: v = x - l -> g x, beta + g l; v = u - x -> -g x, beta - g u
+        pi = np.where(use_up, -g, g)
+        bt = beta + float(np.sum(np.where(use_up, -g * u, g * l)))
+        viol = float(pi @ xv) - bt
+        nrm = float(np.linalg.norm(pi))
+        if nrm <= 0 or viol <= 0:
+            return None
+        return viol / nrm, pi, bt
+
+    for d in deltas:
+        e = evaluate(d)
+        if e is not None and (best is None or e[0] > best[0]):
+            best = (e[0], d, e[1], e[2])
+    if best is None:
+        return None
+    d0 = best[1]
+    for k in (2.0, 4.0, 8.0):
+        e = evaluate(d0 / k)
+        if e is not None and e[0] > best[0]:
+            best = (e[0], d0 / k, e[1], e[2])
+    _eff, _d, pi, bt = best
+    keep = pi != 0
+    # pi'x <= bt  as  -pi'x >= -bt
+    cut = _finish(lb, ub, cols[keep], -pi[keep], -bt, par, "cmir")
+    if cut is None:
+        return None
+    return cut.efficacy(x), cut
+
+
+# ------------------------------------------------------- implied integers
+def implied_integers(P: MipProblem, rounds: int = 5) -> np.ndarray:
+    """Columns integral in every feasible point: the integers, and a
+    continuous column with integral bounds that sits in an equality row
+    with an integral right-hand side whose other entries are integral
+    coefficients on such columns, its own coefficient +-1 (an arc-flow
+    model's loss arcs: flow conservation over integral arcs). Repeated, as
+    one detection can enable another. For cut separation only: branching
+    never needs them."""
+    A = P.A
+    imp = P.integer.copy()
+    with np.errstate(invalid="ignore"):
+        eq = (P.row_lo == P.row_hi) & np.isfinite(P.row_hi) & (np.abs(P.row_hi - np.round(P.row_hi)) < 1e-9)
+    intcoef_e = np.abs(A.data - np.round(A.data)) < 1e-9
+    rr = np.repeat(np.arange(P.m), np.diff(A.indptr))
+    unit = np.abs(np.abs(A.data) - 1.0) < 1e-12
+    int_bounds = ((~np.isfinite(P.lb)) | (np.abs(P.lb - np.round(P.lb)) < 1e-9)) & \
+        ((~np.isfinite(P.ub)) | (np.abs(P.ub - np.round(P.ub)) < 1e-9))
+    for _ in range(rounds):
+        # per row: number of entries not (integral coefficient on an implied-integer column)
+        bad_e = ~(intcoef_e & imp[A.indices])
+        nbad = np.bincount(rr, weights=bad_e.astype(float), minlength=P.m)
+        # an equality row with exactly one bad entry, that entry unit on a
+        # continuous column with integral bounds: the column is implied
+        cand = eq[rr] & (nbad[rr] == 1) & bad_e & unit & ~imp[A.indices] & int_bounds[A.indices]
+        new = np.unique(A.indices[cand])
+        if len(new) == 0:
+            break
+        imp[new] = True
+    return imp
+
+
+# ------------------------------------------------------------- zero-half
+def zerohalf_cuts(P: MipProblem, x: np.ndarray, lb: np.ndarray, ub: np.ndarray, par: CutParams,
+                  impint: np.ndarray | None = None, max_rows: int = 4000, max_cols: int = 4000,
+                  deadline: float = np.inf, max_work: int = 2_000_000) -> list[Cut]:
+    """{0, 1/2}-Chvatal-Gomory cuts (Caprara & Fischetti 1996) by Gaussian
+    elimination over GF(2) (Koster, Zymolka & Kutschka 2009).
+
+    Rows with integral coefficients over (implied) integer columns and an
+    integral right-hand side, in <= form, columns complemented to their
+    nearest bound (v >= 0, value y*). Half the sum of a row set S, rounded
+    down, is valid; with u = sum_S a_i (v-space) and beta = sum_S b_i odd,
+
+        sum_j floor(u_j / 2) v_j <= (beta - 1) / 2,
+
+    violated by (1 - sum_S slack_i - sum_{u_j odd} y*_j) / 2. So S is
+    sought with odd beta and a small weight sum_S slack + sum_odd y*: rows
+    of slack >= 1 never help; columns at their bound (y* = 0) are free. The
+    columns with y* > 0 are eliminated in order of decreasing y* (each by
+    XOR of the pivot row - least slack - into the others holding it); after
+    every elimination, rows of odd parity and weight < 1 give cuts.
+    ``max_work`` (row visits) bounds the elimination deterministically; the
+    deadline is only a safety net."""
+    impint = P.integer if impint is None else impint
+    A = P.A
+    act = A @ x
+    use_up = np.isfinite(ub) & (~np.isfinite(lb) | (ub - x < x - lb))
+    y = np.where(use_up, ub - x, x - lb)
+    y = np.where(np.abs(y) < 1e-9, 0.0, y)
+    rr = np.repeat(np.arange(P.m), np.diff(A.indptr))
+    ok_e = (np.abs(A.data - np.round(A.data)) < 1e-9) & impint[A.indices] & \
+        np.isfinite(np.where(use_up, ub, lb)[A.indices])
+    ok_row = np.bincount(rr, weights=(~ok_e).astype(float), minlength=P.m) == 0
+    ok_row &= np.diff(A.indptr) > 0
+    # sides: (row, sign, rhs, slack)
+    sides = []
+    for sgn, bnd in ((1.0, P.row_hi), (-1.0, P.row_lo)):
+        with np.errstate(invalid="ignore"):
+            fin = np.isfinite(bnd) & ok_row & (np.abs(bnd - np.round(bnd)) < 1e-9)
+        if sgn < 0:
+            fin &= P.row_lo != P.row_hi                     # an equality once
+        sl = sgn * (bnd - act)
+        good = fin & (sl < 1 - 1e-6)
+        for i in np.nonzero(good)[0]:
+            sides.append((int(i), sgn, float(sgn * bnd[i]), max(float(sl[i]), 0.0)))
+    if not sides:
+        return []
+    sides = sorted(sides, key=lambda t: t[3])[:max_rows]
+    # v-space row: a_v = a (lower) or -a (upper); b_v = b - a'bound
+    bnd_v = np.where(use_up, ub, lb)
+    fr = np.nonzero(y > 1e-9)[0]
+    if len(fr) > max_cols:
+        fr = fr[np.argsort(-y[fr])[:max_cols]]
+    pos = np.full(P.n, -1, np.int64)
+    pos[fr] = np.arange(len(fr))
+    rows = []      # [colbits, parity, slack, rowbits]
+    for k, (i, sgn, b, sl) in enumerate(sides):
+        cols = A.indices[A.indptr[i]:A.indptr[i + 1]]
+        a = sgn * A.data[A.indptr[i]:A.indptr[i + 1]]
+        av = np.where(use_up[cols], -a, a)
+        bv = b - float(a @ bnd_v[cols])
+        odd = (np.round(av).astype(np.int64) % 2) != 0
+        bits = 0
+        for c in pos[cols[odd]].tolist():
+            if c >= 0:
+                bits |= 1 << c
+        # odd columns at their bound (y* = 0) cost nothing: not tracked
+        par_ = int(round(bv)) % 2
+        rows.append([bits, par_, sl, 1 << k])
+    out, seen = [], set()
+    yw = y[fr]
+
+    def weight(r):
+        w, bits = r[2], r[0]
+        while bits and w < 1:
+            low = bits & -bits
+            w += yw[low.bit_length() - 1]
+            bits ^= low
+        return w
+
+    def emit(r):
+        if r[3] in seen:
+            return
+        seen.add(r[3])
+        cut = _zerohalf_from_set(r[3], sides, A, P, x, lb, ub, use_up, par)
+        if cut is not None and cut.efficacy(x) >= par.min_efficacy:
+            out.append(cut)
+
+    active = [r for r in rows if r[2] < 1 - 1e-6]
+    for r in active:
+        if r[1] == 1 and r[0] == 0:
+            emit(r)
+    order = np.argsort(-yw)
+    work = 0
+    for c in order.tolist():
+        work += len(active)
+        if work > max_work or time.perf_counter() > deadline or len(out) >= 200:
+            break
+        bit = 1 << c
+        if not active:
+            break
+        holders = [r for r in active if r[0] & bit]
+        if not holders:
+            continue
+        piv = min(holders, key=lambda r: r[2])
+        nxt = []
+        for r in active:
+            if r is piv:
+                continue
+            if r[0] & bit:
+                r = [r[0] ^ piv[0], r[1] ^ piv[1], r[2] + piv[2], r[3] ^ piv[3]]
+                if r[2] >= 1 - 1e-6:
+                    continue
+            nxt.append(r)
+        active = nxt
+        for r in active:
+            if r[1] == 1 and r[2] < 1 - 1e-6 and (r[0] == 0 or weight(r) < 1 - 1e-6):
+                emit(r)
+    return out
+
+
+def _zerohalf_from_set(rowbits: int, sides, A, P, x, lb, ub, use_up, par) -> Cut | None:
+    """The {0,1/2}-cut of the sides whose bits are set, in x-space."""
+    ks = []
+    k = 0
+    while rowbits:
+        if rowbits & 1:
+            ks.append(k)
+        rowbits >>= 1
+        k += 1
+    dense: dict[int, float] = {}
+    beta = 0.0
+    for k in ks:
+        i, sgn, b, _sl = sides[k]
+        cols = A.indices[A.indptr[i]:A.indptr[i + 1]]
+        a = sgn * A.data[A.indptr[i]:A.indptr[i + 1]]
+        for j, v in zip(cols.tolist(), a.tolist()):
+            dense[j] = dense.get(j, 0.0) + v
+        beta += b
+    cols = np.fromiter(dense.keys(), dtype=np.int64)
+    u = np.fromiter(dense.values(), dtype=float)
+    up = use_up[cols]
+    bnd = np.where(up, ub[cols], lb[cols])
+    uv = np.where(up, -u, u)                          # v-space coefficients
+    bv = beta - float(u @ bnd)
+    bvi = int(round(bv))
+    if bvi % 2 == 0:
+        return None
+    g = np.floor(np.round(uv) / 2.0)                  # sum g v <= (bv - 1) / 2
+    rhs_v = (bvi - 1) / 2
+    # back to x: v = x - l -> g x, rhs + g l;  v = u - x -> -g x, rhs - g u
+    pi = np.where(up, -g, g)
+    bt = rhs_v + float(np.sum(np.where(up, -g * ub[cols], g * lb[cols])))
+    keep = pi != 0
+    if not np.any(keep):
+        return None
+    return _finish(lb, ub, cols[keep], -pi[keep], -bt, par, "zerohalf")
 
 
 # ------------------------------------------------------------------- pool

@@ -166,3 +166,25 @@ def test_gomory_cuts_from_the_network_lp_are_valid(seed):
         lp.add_rows([(c.cols, c.coef, c.rhs, INF) for c in cuts])
     if pts and lp.solve() == OPTIMAL:
         assert lp.objective <= min(P.c @ p for p in pts) + 1e-6
+
+
+@pytest.mark.parametrize("seed", range(10))
+def test_list_schedules_are_feasible_ti_and_af(seed):
+    """The interval (TI) and the arc-flow (AF) list schedulers on small
+    Kramer-style models: whatever they return is feasible; on TI a
+    schedule always exists (the horizon fits every job in sequence)."""
+    import time as _t
+
+    from fedhpc.mip.scheduling import best_schedule, detect, detect_flow_structure, orders
+    rng = random.Random(500 + seed)
+    nj, T = rng.randint(3, 6), 40
+    machines = nj if seed % 2 else rng.randint(1, 3)
+    P, _ = ti_problem(rng, nj, T, machines)
+    S = detect(P, detect_interval_blocks(P, min_len=4).blocks)
+    assert S is not None
+    x, v = best_schedule(P, S, orders(S), _t.perf_counter() + 0.5)
+    if x is not None:
+        assert P.is_feasible(x)
+    if machines == nj:                    # every job on its own machine always fits
+        assert x is not None
+    assert detect_flow_structure(P) is None

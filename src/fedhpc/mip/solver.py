@@ -37,13 +37,14 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .branching import Pseudocosts, select_branch
-from .cuts import CutParams, CutPool, cover_cuts, gomory_cuts
+from .cuts import CutParams, CutPool, cmir_cuts, cover_cuts, gomory_cuts, implied_integers, zerohalf_cuts
 from .heuristics import (feasibility_pump, fix_and_propagate, guided_dive, locks,
-                         rens_problem, simple_rounding)
+                         rens_problem, rins_problem, simple_rounding)
 from .lp import INFEASIBLE, ITERATION_LIMIT, OPTIMAL, UNBOUNDED, LpRelaxation
 from .presolve import presolve
 from .problem import INF, MipProblem
 from .propagate import Propagator
+from .scheduling import best_schedule, detect as detect_schedule, orders as schedule_orders
 
 
 @dataclass
@@ -59,13 +60,35 @@ class MipOptions:
     cuts_per_round: int = 200
     gomory: bool = True
     covers: bool = True
+    cmir: bool = True
+    zerohalf: bool = True
     cut_stall_rounds: int = 3
     cut_min_improvement: float = 1e-4     # relative bound gain counting as progress
+    cut_time_share: float = 0.1           # the root cut loop stops past this share of the limit
     heuristics: bool = True
     rens: bool = True
     rens_node_limit: int = 300
     rens_time_share: float = 0.2
+    # RINS at the root once there is an incumbent, then every
+    # rins_frequency nodes after the incumbent changed (or 4x that), all
+    # sub-MIPs together within rins_total_share of the time limit
+    rins: bool = True
+    rins_frequency: int = 50
+    rins_node_limit: int = 500
+    rins_total_share: float = 0.15
     dive_frequency: int = 25
+    fp_time_share: float = 0.05           # fix-and-propagate's budget at the root
+    # list scheduling on interval structure (scheduling.py): at the root,
+    # orders from the LP's start times plus insertion local search within
+    # schedule_root_share of the time limit (at most 5 s); then every
+    # schedule_frequency nodes from the node LP, with a short search
+    schedule_heuristic: bool = True
+    schedule_root_share: float = 0.03
+    schedule_frequency: int = 10
+    # a Smith-rule schedule before the root LP, crashing the primal's basis
+    # from it (off: on TI_N50_M2_R0 the crash from a near-optimal schedule
+    # took the primal 9.9 s against 8.0 s from the slack basis)
+    schedule_crash: bool = False
     # node dives' LP pivots stay within this share of the node LPs' (plus a
     # start-up allowance): unbudgeted, csched008 spent 18.5 M pivots diving
     dive_budget_ratio: float = 0.1
@@ -89,9 +112,13 @@ class MipOptions:
     # Kramer's masters solve 2-5x faster with it, falling back to the dual
     # when its phase 1 passes root_phase1_cap x rows pivots (AF_N50_M2_R4's
     # composite phase 1 wandered for 7.6 m pivots)
+    # (on a network-reformulated LP the cap is root_phase1_cap_network: TI's
+    # phase 1 repairs only the assignment rows, 3-6 x rows pivots at a cheap
+    # pivot each, and the primal still won 2.5-6x on the R0 instances)
     root_lp: str = "auto"
     root_primal_ratio: float = 20.0
     root_phase1_cap: float = 3.0
+    root_phase1_cap_network: float = 10.0
     verbose: bool = True
     log_interval: float = 5.0
     sub_mip: bool = False                 # a heuristic's sub-MIP: no recursion, quiet
@@ -232,6 +259,15 @@ class MipSolver:
             self.stats["network_rows"] = int(self.lp.net.block_row.sum())
         self.lp.deadline = self.deadline()
         self.lp.set_bounds(self.root_lb, self.root_ub)
+        self.sched = None
+        if opt.heuristics and opt.schedule_heuristic:
+            self.sched = detect_schedule(P, self.lp.net.blocks if self.lp.net is not None else [])
+            if self.sched is not None:
+                self.stats["schedule_structure"] = type(self.sched).__name__
+            if self.sched is not None and opt.schedule_crash:
+                with self._timed("list_schedule"):
+                    xs, _v = best_schedule(P, self.sched, schedule_orders(self.sched), 0.0, improve=False)
+                self._try(xs, "list_schedule")
         with self._timed("root_lp"):
             st = self._root_lp()
         if st != OPTIMAL and self.lp.past_deadline():
@@ -275,7 +311,8 @@ class MipSolver:
             cold()
         o = lp.lp.options
         saved = (o.dual, o.partial_min_cols, o.phase1_limit)
-        o.dual, o.partial_min_cols, o.phase1_limit = False, 2000, int(opt.root_phase1_cap * lp.rows)
+        cap = opt.root_phase1_cap_network if lp.net is not None else opt.root_phase1_cap
+        o.dual, o.partial_min_cols, o.phase1_limit = False, 2000, int(cap * lp.rows)
         try:
             st = lp.solve()
         finally:
@@ -292,8 +329,11 @@ class MipSolver:
         par = CutParams()
         pool = CutPool(par)
         stall, best = 0, root_obj
+        t_cuts = time.perf_counter()
+        impint = implied_integers(P)
+        self.stats["implied_integers"] = int(impint.sum() - P.integer.sum())
         for rnd in range(opt.cut_rounds):
-            if self.elapsed() > 0.5 * opt.time_limit:
+            if self.elapsed() > 0.5 * opt.time_limit or time.perf_counter() - t_cuts > opt.cut_time_share * opt.time_limit:
                 break
             x = lp.x()
             if not self._fractional(x).size:
@@ -302,9 +342,17 @@ class MipSolver:
             self._try(simple_rounding(P, x, self.down_locks, self.up_locks), "rounding")
             cuts = []
             if opt.gomory:
-                cuts += gomory_cuts(lp, P, x, par)
+                cuts += gomory_cuts(lp, P, x, par, impint)
             if opt.covers:
                 cuts += cover_cuts(P, x, self.root_lb, self.root_ub, par)
+            if opt.zerohalf:
+                with self._timed("zerohalf"):
+                    cuts += zerohalf_cuts(P, x, self.root_lb, self.root_ub, par, impint,
+                                          deadline=time.perf_counter() + 0.05 * opt.time_limit)
+            if opt.cmir:
+                with self._timed("cmir"):
+                    cuts += cmir_cuts(P, x, self.root_lb, self.root_ub, par,
+                                      deadline=time.perf_counter() + 0.02 * opt.time_limit)
             sel = pool.select(cuts, x, opt.cuts_per_round)
             if not sel:
                 break
@@ -351,11 +399,23 @@ class MipSolver:
         x = lp.x()
         end = min(self.deadline(), time.perf_counter() + 0.3 * opt.time_limit)
         self._try(simple_rounding(P, x, self.down_locks, self.up_locks), "rounding")
+        if self.sched is not None:
+            budget = min(5.0, opt.schedule_root_share * opt.time_limit)
+            with self._timed("list_schedule"):
+                xs, _v = best_schedule(P, self.sched, schedule_orders(self.sched, x),
+                                       min(end, time.perf_counter() + budget))
+            self._try(xs, "list_schedule")
         with self._timed("fix_and_propagate"):
-            self._try(fix_and_propagate(P, self.prop, lp, x, self.root_lb, self.root_ub, end,
+            self._try(fix_and_propagate(P, self.prop, lp, x, self.root_lb, self.root_ub,
+                                        min(end, time.perf_counter() + opt.fp_time_share * opt.time_limit),
                                         stats=self.stats), "fix_and_propagate")
         with self._timed("root_dive"):
             self._try(guided_dive(P, self.prop, lp, self.root_lb, self.root_ub, end, self.incumbent), "dive")
+        if self.incumbent is None:
+            with self._timed("root_dive"):
+                self._try(guided_dive(P, self.prop, lp, self.root_lb, self.root_ub,
+                                      min(end, time.perf_counter() + 0.05 * opt.time_limit), None,
+                                      rule="nearest"), "dive_nearest")
         if self.incumbent is None:
             with self._timed("feasibility_pump"):
                 self._try(feasibility_pump(P, lp, x, self.root_lb, self.root_ub, end, prop=self.prop),
@@ -371,6 +431,30 @@ class MipSolver:
                     r = sub.solve()
                 if r.x is not None:
                     self._try(r.x, "rens")
+        self._rins(x, self.root_lb, self.root_ub)
+
+    def _rins(self, x, lb, ub) -> None:
+        """One RINS sub-MIP around the incumbent, within the budget."""
+        opt, P = self.opt, self.P
+        if not opt.rins or opt.sub_mip or self.incumbent is None:
+            return
+        used = self.stats.get("time", {}).get("rins", 0.0)
+        left = opt.rins_total_share * opt.time_limit - used
+        if left < 0.5:
+            return
+        Q = rins_problem(P, x, self.incumbent, lb, ub)
+        if Q is None:
+            return
+        self._rins_inc = self.inc_obj
+        budget = min(left, 0.25 * (self.deadline() - time.perf_counter()))
+        sub = MipSolver(Q, MipOptions(time_limit=max(0.5, budget), node_limit=opt.rins_node_limit, sub_mip=True,
+                                      verbose=False, rens=False, rins=False, cut_rounds=3,
+                                      lp_options=opt.lp_options, network_lp=opt.network_lp))
+        with self._timed("rins"):
+            r = sub.solve()
+        self.stats["rins_calls"] = self.stats.get("rins_calls", 0) + 1
+        if r.x is not None:
+            self._try(r.x, "rins")
 
     # ------------------------------------------------------- branch and bound
     def _domain(self, node: _Node):
@@ -466,6 +550,15 @@ class MipSolver:
                 continue
             if opt.heuristics:
                 self._try(simple_rounding(P, x, self.down_locks, self.up_locks), "rounding")
+                if (opt.rins_frequency and self.incumbent is not None and nodes % opt.rins_frequency == 0
+                        and (self.inc_obj < getattr(self, "_rins_inc", INF) or nodes % (4 * opt.rins_frequency) == 0)):
+                    self._rins(x, lb, ub)
+                    lp.set_bounds(lb, ub)          # the sub-MIP has its own LP: ours is untouched
+                if self.sched is not None and opt.schedule_frequency and nodes % opt.schedule_frequency == 0:
+                    with self._timed("list_schedule"):
+                        xs, _v = best_schedule(P, self.sched, schedule_orders(self.sched, x)[:2],
+                                               time.perf_counter() + 0.5, max_evals=100)
+                    self._try(xs, "list_schedule")
                 dive_used = self.stats.get("dive_iterations", 0)
                 node_its = lp.stats.iterations - dive_used - self.stats.get("strong_iterations", 0)
                 if (opt.dive_frequency and nodes % opt.dive_frequency == 0

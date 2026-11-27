@@ -3,17 +3,18 @@
 - ``simple_rounding``: round each fractional integer in a direction no row
   locks (Achterberg 2007, sec. 9.1). Trivially cheap; finds a point only
   when the locks allow it.
-- ``fix_and_propagate``: fix integers to their rounded LP values in batches
-  (integral ones first, then by fractionality), propagating after each
-  batch and halving a batch that fails; the last continuous part is an LP.
-  Close to SCIP's and Gurobi's fix-and-propagate / shift-and-propagate
-  family.
+- ``fix_and_propagate``: fix integers one decision at a time with
+  propagation (binaries by LP value, at 1 first), a depth-first search with
+  conflict-directed backjumping on dead ends; the continuous part is an
+  LP. Close to SCIP's and Gurobi's fix-and-propagate family.
 - ``guided_dive``: repeatedly fix the integer closest to integrality (in
   the incumbent's direction when there is one), propagate, re-solve the LP
   warm with an iteration limit; one flip on infeasibility (Achterberg 2007,
   sec. 9.2; Danna, Rothberg & Le Pape 2005 for the guidance).
 - ``rens``: a sub-MIP with the LP-integral integers fixed and the others
   bounded to their LP value's floor and ceiling (Berthold 2014).
+- ``rins``: a sub-MIP with the integers fixed where the LP point and the
+  incumbent agree (Danna, Rothberg & Le Pape 2005).
 
 All work on the problem the solver holds (presolved), never on its LP's
 state permanently: the dive restores bounds and basis.
@@ -196,7 +197,9 @@ def fix_and_propagate(P: MipProblem, prop: Propagator, lp: LpRelaxation, x: np.n
                 prop.undo(lev)
                 ok = True
                 for j in open_rest:
-                    lj, uj = prop.lb()[j], prop.ub()[j]
+                    if time.perf_counter() > deadline:
+                        return None
+                    lj, uj = prop.k.bound(j) if hasattr(prop, "k") else (prop.lb()[j], prop.ub()[j])
                     if lj == uj:
                         continue
                     lv = prop.level()
@@ -214,7 +217,10 @@ def fix_and_propagate(P: MipProblem, prop: Propagator, lp: LpRelaxation, x: np.n
 
 def guided_dive(P: MipProblem, prop: Propagator, lp: LpRelaxation, lb, ub, deadline: float,
                 incumbent: np.ndarray | None = None, max_depth: int = 400,
-                iteration_limit: int = 2000, tol: float = 1e-6):
+                iteration_limit: int = 2000, tol: float = 1e-6, rule: str = "up"):
+    """rule (without an incumbent): "up" rounds binaries up, the largest
+    first (partitioning rows); "nearest" rounds the most nearly integral
+    integer to its nearest value (fractional diving)."""
     saved_lb, saved_ub, basis = lp.lb.copy(), lp.ub.copy(), lp.get_state()
     lb, ub = lb.copy(), ub.copy()
     prop.reset(lb, ub, propagate=False)
@@ -240,7 +246,7 @@ def guided_dive(P: MipProblem, prop: Propagator, lp: LpRelaxation, lb, ub, deadl
             else:
                 # binaries round up, the largest first (a partitioning
                 # row's member at 1 settles the row); others to nearest
-                isbin = (lb[cand] == 0) & (ub[cand] == 1)
+                isbin = (lb[cand] == 0) & (ub[cand] == 1) & (rule == "up")
                 up = np.where(isbin, True, fc >= 0.5)
                 dist = np.where(isbin, 1 - fc, np.minimum(fc, 1 - fc))
             k = int(np.argmin(dist))
@@ -286,6 +292,26 @@ def rens_problem(P: MipProblem, x: np.ndarray, lb, ub, tol: float = 1e-6, min_fi
         return None
     Q = P.copy()
     Q.lb, Q.ub = nl, nu
+    Q._csc = P._csc
+    return Q
+
+
+def rins_problem(P: MipProblem, x: np.ndarray, incumbent: np.ndarray, lb, ub, tol: float = 1e-6,
+                 min_fixed: float = 0.5):
+    """The RINS sub-MIP (Danna, Rothberg & Le Pape 2005): integers on which
+    the LP point and the incumbent agree are fixed there; the rest keep the
+    domain. None when fewer than ``min_fixed`` of the open integers agree
+    (the sub-MIP would be the problem again)."""
+    ii = np.nonzero(P.integer & (lb < ub))[0]
+    if len(ii) == 0:
+        return None
+    agree = np.abs(x[ii] - incumbent[ii]) <= tol
+    if np.mean(agree) < min_fixed or np.all(agree):
+        return None
+    Q = P.copy()
+    Q.lb, Q.ub = lb.copy(), ub.copy()
+    fj = ii[agree]
+    Q.lb[fj] = Q.ub[fj] = np.clip(np.round(incumbent[fj]), lb[fj], ub[fj])
     Q._csc = P._csc
     return Q
 

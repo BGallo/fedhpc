@@ -256,6 +256,24 @@ duals, reduced costs and weights carry over.
   | gap | 6.71 s | 4.95 s |
   | base | 3.68 s | 2.84 s |
 
+## Round 2 (MIP root and node LPs)
+
+- **Ratio test over compact candidates.** The dual's breakpoints go into
+  SoA arrays branch-free (column, signed reduced cost, |alpha|), without a
+  division per candidate (t <= theta tested as d <= theta |alpha|); they
+  are walked in chunks bounded by quantiles of a 64-point sample, so the
+  first chunk (~K/64 of the smallest) is usually all a pivot reads. On
+  Kramer's arc-flow masters (20-56 k entries a pivot row) the ratio test
+  went 4.9 -> 1.4 s (AF_N50_M5_R0, same pivots); pos_congestion's replay
+  3.38 -> 2.86 s.
+- **DSE weights with the basis** (`dual_weights`, `set_dual_weights`):
+  branch and bound restores them with a node's basis instead of paying
+  the exact initialisation (a BTRAN per row) at every restore.
+- **Partial pricing in phase 1** (with `partial_min_cols`): a phase-1
+  pivot priced all 163 k columns of AF_N50_M2_R9 (0.85 ms a pivot).
+- **`phase1_limit`**: the MIP root tries the primal first on wide LPs and
+  falls back to the dual past it.
+
 ## Tried and rejected
 
 - **Row-indexed R etas in FTRAN.** Each row listed the Forrest-Tomlin row

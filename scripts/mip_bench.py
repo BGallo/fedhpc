@@ -93,7 +93,8 @@ def _solve(solver: str, path: str, tl: float, gap: float) -> dict:
                     seconds=time.perf_counter() - t0,
                     extra={k: st.get(k) for k in ("root_bound_no_cuts", "root_bound", "cuts_added",
                                                   "lp_iterations", "lp_seconds", "strong_iterations",
-                                                  "heuristic_solutions")})
+                                                  "heuristic_solutions", "root_lp_algorithm", "time",
+                                                  "network_rows", "implied_integers")})
     if solver == "highs":
         import highspy
         h = highspy.Highs()

@@ -312,6 +312,7 @@ private:
     std::vector<int> mp_list_;          // its current candidates
     int mp_minor_ = 0;
     size_t ppos_ = 0;                   // partial pricing's position in the working set
+    size_t p1pos_ = 0;                  // phase 1's partial pricing position
     std::vector<int> hint_;        // crash hint (set_hint)
     int next_q_ = -1;           // entering column chosen by the last fused pivot row
     bool next_valid_ = false;
@@ -1235,15 +1236,31 @@ private:
             fac_->btran_inplace(y1.data());
             int q = -1;
             double best = 0.0, dq = 0.0;
-            for (int j = 0, n = M_.cols(); j < n; ++j) {
-                const char s = st_[j];
-                if (s == BASIC || s == DEAD || lbw(j) == ubw(j)) continue;
-                const double d = -M_.dot(y1.data(), j);
-                if ((s == AT_LB && d < -1e-12) || (s == AT_UB && d > 1e-12)) {
-                    const double sc = d * d / w_[j];
-                    if (sc > best) best = sc, q = j, dq = d;
+            // pricing: every column, or with partial pricing (wide LPs) a
+            // rotating section, extended section by section until it holds a
+            // candidate (each full pass priced 163 k columns per phase-1
+            // pivot on AF_N50_M2_R9: 0.85 ms a pivot)
+            const int n = M_.cols();
+            const bool part = opt.partial_min_cols > 0 && n > 4 * opt.partial_min_cols;
+            const int sec = part ? std::max(opt.partial_min_cols, n / 16) : n;
+            int scanned = 0;
+            int j = part ? (int)(p1pos_ % (size_t)n) : 0;
+            while (scanned < n) {
+                const int stop = std::min(n - scanned, sec);
+                for (int t = 0; t < stop; ++t, ++j) {
+                    if (j == n) j = 0;
+                    const char s = st_[j];
+                    if (s == BASIC || s == DEAD || lbw(j) == ubw(j)) continue;
+                    const double d = -M_.dot(y1.data(), j);
+                    if ((s == AT_LB && d < -1e-12) || (s == AT_UB && d > 1e-12)) {
+                        const double sc = d * d / w_[j];
+                        if (sc > best) best = sc, q = j, dq = d;
+                    }
                 }
+                scanned += stop;
+                if (q >= 0) break;
             }
+            p1pos_ = (size_t)j;
             if (q < 0) {
                 // nothing reduces the infeasibility: rounding-sized
                 // violations are accepted (snapped), larger ones prove

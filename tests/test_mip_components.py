@@ -273,3 +273,140 @@ def test_lp_relaxation_free_columns_and_bounds(seed):
         assert lp.objective == pytest.approx(r.fun + P.offset, abs=1e-6 * (1 + abs(r.fun)))
         x = lp.x()
         assert np.all(x >= lb - 1e-7) and np.all(x <= ub + 1e-7)
+
+
+# ------------------------------------------------------------------ c-MIR
+@needs_lp
+@pytest.mark.parametrize("seed", range(60))
+def test_cmir_cuts_never_cut_off_an_integer_point(seed):
+    """Pure integer: every feasible point satisfies every c-MIR cut,
+    through rounds where cuts are added to the LP."""
+    from fedhpc.mip.cuts import CutParams, cmir_cuts
+    from fedhpc.mip.lp import OPTIMAL, LpRelaxation
+    rng = random.Random(7000 + seed)
+    P, _ = random_ip(rng, rng.randint(2, 5), rng.randint(3, 7), box=1 if seed % 2 else 3)
+    pts = list(integer_points(P))
+    lp = LpRelaxation(P)
+    par = CutParams(min_efficacy=1e-7)
+    for _round in range(3):
+        if lp.solve() != OPTIMAL:
+            break
+        x = lp.x()
+        cuts = cmir_cuts(P, x, P.lb, P.ub, par)
+        for cut in cuts:
+            for pt in pts:
+                assert cut.coef @ pt[cut.cols] >= cut.rhs - 1e-7, cut
+            assert cut.violation(x) > 0
+        if not cuts:
+            break
+        lp.add_rows([(c.cols, c.coef, c.rhs, INF) for c in cuts])
+
+
+@needs_lp
+@pytest.mark.parametrize("seed", range(40))
+def test_cmir_cuts_valid_with_continuous_columns(seed):
+    """Mixed: for every integer assignment, the cut's minimum over the
+    continuous part of the feasible set (an LP) is >= its right-hand side;
+    aggregation along continuous columns is exercised."""
+    from scipy.optimize import linprog
+
+    from fedhpc.mip.cuts import CutParams, cmir_cuts
+    from fedhpc.mip.lp import OPTIMAL, LpRelaxation
+    rng = random.Random(7500 + seed)
+    P, _ = random_ip(rng, rng.randint(2, 5), rng.randint(3, 7), box=2, mixed=True)
+    lp = LpRelaxation(P)
+    if lp.solve() != OPTIMAL:
+        return
+    x = lp.x()
+    cuts = cmir_cuts(P, x, P.lb, P.ub, CutParams(min_efficacy=1e-7))
+    if not cuts:
+        return
+    ii = np.nonzero(P.integer)[0]
+    cc = np.nonzero(~P.integer)[0]
+    A = P.A.toarray()
+    for vals in itertools.product(*[range(int(P.lb[j]), int(P.ub[j]) + 1) for j in ii]):
+        xi = np.zeros(P.n)
+        xi[ii] = vals
+        base = A[:, ii] @ np.asarray(vals, float)
+        Aub, bub = [], []
+        for r in range(P.m):
+            if np.isfinite(P.row_hi[r]):
+                Aub.append(A[r, cc]), bub.append(P.row_hi[r] - base[r])
+            if np.isfinite(P.row_lo[r]):
+                Aub.append(-A[r, cc]), bub.append(base[r] - P.row_lo[r])
+        for cut in cuts:
+            w = np.zeros(P.n)
+            w[cut.cols] = cut.coef
+            if len(cc) == 0:
+                continue
+            res = linprog(w[cc], A_ub=np.array(Aub) if Aub else None, b_ub=np.array(bub) if bub else None,
+                          bounds=[(P.lb[j], P.ub[j]) for j in cc], method="highs")
+            if res.status == 0:
+                assert w[ii] @ np.asarray(vals, float) + res.fun >= cut.rhs - 1e-6, cut
+
+
+@needs_lp
+@pytest.mark.parametrize("seed", range(80))
+def test_zerohalf_cuts_never_cut_off_an_integer_point(seed):
+    from fedhpc.mip.cuts import CutParams, zerohalf_cuts
+    from fedhpc.mip.lp import OPTIMAL, LpRelaxation
+    rng = random.Random(8000 + seed)
+    P, _ = random_ip(rng, rng.randint(3, 6), rng.randint(3, 7), box=1 if seed % 2 else 2)
+    pts = list(integer_points(P))
+    lp = LpRelaxation(P)
+    par = CutParams(min_efficacy=1e-7)
+    for _round in range(3):
+        if lp.solve() != OPTIMAL:
+            break
+        x = lp.x()
+        cuts = zerohalf_cuts(P, x, P.lb, P.ub, par)
+        for cut in cuts:
+            for pt in pts:
+                assert cut.coef @ pt[cut.cols] >= cut.rhs - 1e-7, cut
+            assert cut.violation(x) > 0
+        if not cuts:
+            break
+        lp.add_rows([(c.cols, c.coef, c.rhs, INF) for c in cuts])
+
+
+def test_implied_integers_on_a_flow_row():
+    from fedhpc.mip.cuts import implied_integers
+    # x0 + x1 - z = 1 (x integer, z continuous in [0, 5]) -> z implied integer;
+    # 2 x0 + w = 3 with w coefficient 1 -> w implied; 0.5 x1 + u = 1 -> u not
+    A = sp.csr_matrix(np.array([[1, 1, -1, 0, 0], [2, 0, 0, 1, 0], [0, 0.5, 0, 0, 1]], float))
+    P = MipProblem(A, np.array([1.0, 3.0, 1.0]), np.array([1.0, 3.0, 1.0]), np.zeros(5),
+                   np.array([1, 1, 5, 9, 9], float), np.zeros(5), np.array([1, 1, 0, 0, 0], bool))
+    assert implied_integers(P).tolist() == [True, True, True, True, False]
+
+
+@needs_lp
+def test_fix_and_propagate_backjumping_finds_more_and_stays_feasible():
+    """Random binary problems: every point returned is feasible, and the
+    search with backjumps succeeds at least as often as the greedy pass
+    (max_backjumps=0), strictly more often over the sample."""
+    import time as _t
+
+    from fedhpc.mip.heuristics import fix_and_propagate
+    from fedhpc.mip.lp import OPTIMAL, LpRelaxation
+    from fedhpc.mip.propagate import Propagator
+    wins = {0: 0, 200: 0}
+    for seed in range(150):
+        rng = random.Random(9000 + seed)
+        P, _ = random_ip(rng, rng.randint(3, 6), rng.randint(4, 8), box=1)
+        if not list(integer_points(P)):
+            continue
+        prop = Propagator(P)
+        res = prop.propagate(P.lb, P.ub)
+        if not res.feasible:
+            continue
+        lp = LpRelaxation(P)
+        lp.set_bounds(res.lb, res.ub)
+        if lp.solve() != OPTIMAL:
+            continue
+        x = lp.x()
+        for mb in wins:
+            y = fix_and_propagate(P, prop, lp, x, res.lb, res.ub, _t.perf_counter() + 5, max_backjumps=mb)
+            if y is not None:
+                assert P.is_feasible(y)
+                wins[mb] += 1
+    assert wins[200] > wins[0], wins
