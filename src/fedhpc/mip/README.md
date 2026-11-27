@@ -28,6 +28,23 @@ r.status, r.objective, r.bound, r.x
 
 ## Mathematics
 
+**LP-first in the tree: reduced-cost fixing and restarts.** lpfirst proves
+optimality by solving the LP, then keeping only the placements whose
+reduced cost is below the incumbent-bound gap and solving the MIP over
+those. Inside a general MIP that argument is reduced-cost fixing (Dantzig;
+Nemhauser & Wolsey): with the root LP's value z, its reduced costs d and the
+cutoff U (the incumbent, less one step when the objective is integral), a
+column nonbasic at its lower bound l satisfies x_j <= l + (U - z) / d_j in
+every improving solution (symmetrically at an upper bound). The root's
+duals are kept; at every new incumbent the global domain is tightened and
+propagated, and every node rebuilds its domain from it. When the fixings
+reach `restart_min_fixed` (30 %) of the integer columns, the problem
+restricted to that domain is presolved again (the fixed columns leave the
+LP) and solved with the incumbent's value as cutoff: lpfirst's MIP over the
+eligible placements. Nothing better there proves the incumbent optimal. On
+Kramer's models the root fixes 72-95 % of the columns (TI_N50_M5_R0: 28,219
+of 31,412).
+
 **Presolve.** The rounds apply:
 - removal of fixed, empty and singleton columns and rows;
 - propagation, with redundant-row removal;
@@ -37,8 +54,23 @@ r.status, r.objective, r.bound, r.x
   a′x ≤ b with a_j > 0 and maxact − a_j < b, set a_j −= d and b −= d with
   d = b − (maxact − a_j).
 
-Every reduction fixes, tightens or deletes, so postsolve only scatters the
-kept and fixed values back. There are no aggregations.
+- parallel rows (hashed after normalisation, compared exactly);
+- doubleton equations a_i x_i + a_j x_j = b, substituted in batches as one
+  sparse product A T (the eliminated column continuous, or integer with
+  integral ratios);
+- implied-free continuous column singletons in equality rows, with their
+  row;
+- probing on binaries on the C++ propagator's trail, within a work budget
+  (a value that empties the domain fixes the other; bounds both values
+  imply hold);
+- coefficient tightening also on complemented binaries (x - M y <= 0 with
+  x <= U becomes x - U y <= 0).
+
+Substitutions push affine records x_j = const + sum coef x onto a
+postsolve stack, replayed in reverse; every other reduction fixes, tightens
+or deletes. Each is a `presolve()` switch (`MipOptions.presolve_options`).
+On Kramer's TI/AF models presolve finds nothing to do: they are evaluated
+with the general MIPLIB set (`miplib_general`).
 
 **Propagation** (Brearley, Mitra & Williams 1975). Residual activities
 without an entry's own contribution bound each column. Infinite
@@ -126,6 +158,16 @@ coefficient in an equality row with integral right-hand side over
 otherwise integral terms, is integral in every feasible point (arc-flow
 loss arcs). Used by the cut separators, never by branching.
 
+**c-MIR with variable bounds.** A continuous column with a variable bound
+(x_j <= d y_k + e, from a two-entry row over a continuous and an integer
+column: a fixed-charge link) is substituted through it when that bound is
+the closest to the LP point; y_k then joins the integer part of the MIR,
+which is what flow-cover cuts are (Marchand & Wolsey 2001). Base rows
+include flow rows whose columns have variable bounds on fractional
+integers; aggregation measures "inside" against variable bounds too.
+Root bounds: exp-1-500-5-5 52,698 -> 64,694 (optimum 65,887), beasleyC3 346
+-> 476 (754), tr12-30 -> 122,125 (130,596).
+
 **c-MIR** (Marchand & Wolsey 2001). From tight rows with fractional
 integers: aggregation along the continuous column farthest inside its
 bounds (up to 5 rows), bound substitution, divisors from the coefficients
@@ -198,6 +240,37 @@ limit). Labels `k20_v4`, `k50_mip_v4` (v2: before this round).
 | MIPLIB scheduling + packing (10) | 120 s | 0/10 | 0/10 | 1/10 | 5/10 |
 | N = 50 and MIPLIB together (28) | 120 s | 13/28, 31.6 s | 14/28, **27.9 s** | 15/28, 30.3 s | 22/28, 12.0 s |
 
+v5 (`k50_mip_v5`, the faster dual pivot below): 14/28 at 28.1 s, N = 20
+18/18 at 0.75 s; the unsolved Kramer instances end closer (AF_N50_M2_R0
+0.13 %, TI_N50_M2_R0 0.095 %), mcsched at 212,920 (optimum 211,913).
+
+**v6** (`k20_v6`, `k50_mip_v6`, `k100_v1`, `general_v2`: reduced-cost
+fixing and restarts, deeper presolve, c-MIR with variable bounds, batched
+crossings, the feasibility-check fix):
+
+| Set | Limit | fedhpc.mip v6 | HiGHS | Gurobi |
+|---|---|---|---|---|
+| Kramer N = 20 (18) | 60 s | **18/18, 0.65 s** | 18/18, 1.40 s | 18/18, 0.48 s |
+| Kramer N = 50 + MIPLIB sched/pack (28) | 120 s | 14/28, **23.8 s** | 15/28, 30.3 s | 22/28, 12.0 s |
+| Kramer N = 100 (18, new) | 120 s | **10/18**, 47.8 s | 6/18, 65.8 s | 11/18, 26.1 s |
+| MIPLIB general (24, new) | 60 s | 1/24 | 12/24 | 14/24 |
+
+- Kramer N = 50: AF_N50_M5_R4 6 s (v5 23 s), TI_N50_M5_R0 14 s, TI_N50_M5_R4
+  16 s; TI_N50_M2_R4 ends at 156,051, Gurobi's value at its limit.
+- Kramer N = 100: **TI_N100_M2_R0 470,664 at 0.42 % against Gurobi's
+  604,220 at 22 %** (HiGHS: no incumbent); TI_N100_M2_R9 and TI_N100_M5_R9
+  level with Gurobi (58 s, 21 s); HiGHS solves none of the TI models.
+- MIPLIB general: the engine's weakest family - fixed charge and network
+  design need flow-path and network cuts, the knapsack families stronger
+  MIR; presolve depth changes little there yet (A/B in `general_v1`).
+
+**A correctness fix.** `MipProblem.violations` computed a one-sided row's
+infinite side as -inf / inf = NaN, and np.maximum then hid the other side's
+violation: a violated <= row read as satisfied. On neos859080 (infeasible)
+the feasibility pump's point was accepted and the solve reported "optimal
+0". Earlier benchmark objectives all matched the reference solvers, so no
+reported optimum was wrong; the check is now NaN-free and tested.
+
 Every Kramer N = 50 instance now has an incumbent; the four unsolved ones
 end at gaps of 0.22-0.28 % (v2: no incumbent at all). On TI_N50_M2_R4
 fedhpc.mip (156,091) and Gurobi (156,051) both hit the limit; HiGHS is at
@@ -228,6 +301,133 @@ TI_N50_M5_R0 took 15 s in one version and 118 s in the next from a
 different root vertex (6 against 206 nodes). On MIPLIB: physiciansched's
 root LP does not finish, and csched, gfd, lectsched and the fhnw bin
 packing find no incumbent.
+
+## Profiling
+
+`scripts/profile.py` (perf from the system; py-spy and pybind11 are dev
+dependencies):
+
+- `build timers|perf|native`: standalone `_fedlp`/`_fedmip` builds
+  (fedlp's phase timers; frame pointers and symbols; `-march=native`),
+  selected per run with `--build` (via `FEDLP_DIR`).
+- `mip FILE -t 60 --build timers`: per-phase wall time and pivots of the
+  MIP (`stats["time"]`, `stats["pivots"]`; nested phases such as `cmir`
+  inside `root_cuts` overlap) and fedlp's timers and per-pivot sizes
+  summed over every LP solve (`stats["fedlp"]`).
+- `lp FILE "" "dual=0,partial_min_cols=2000" --build timers`: the root LP
+  under option sets.
+- `perf FILE --build perf`: perf record with Python's perf trampolines; time
+  by component (interpreter, fedlp, fedmip, NumPy/SciPy, libc, kernel) and
+  the top symbols; `perf report -i results/profile/<label>/perf.data` for
+  more (`perf annotate` for instruction-level hot spots).
+- `pyspy FILE --build perf`: py-spy --native stacks, the native time
+  attributed to its innermost Python frame.
+
+## Python and C++: where the time goes, and what the split costs
+
+The engine is Python orchestration over two C++ kernels: fedlp (the LP,
+`_ext/lp`) and fedmip (propagation, `_ext/mip`). Presolve, cuts,
+heuristics, branching and the tree are Python (NumPy/SciPy for the vector
+work). `scripts/profile.py perf` measures the split with hardware sampling
+(Python 3.12+ `-X perf` frames); self time by component:
+
+| Instance (60 s, one thread) | LP size | fedlp | fedmip | Python interpreter | NumPy/SciPy | node cost |
+|---|---|---|---|---|---|---|
+| csched008 | 351 x 1.3 k | 91.0 % | - | 2.2 % | 0.2 % | 6.2 ms (LP 5.2) |
+| AF_N50_M2_R4_1 | 2.5 k x 100 k | 87.1 % | - | 3.3 % | 2.8 % | ~0.9 s |
+| TI_N50_M2_R0_1 (network form) | 1.6 k x 70 k | 73.6 % | 1.5 % | 9.4 % | 6.4 % | ~1.5 s |
+| bppc4-08 | 111 x 1.5 k | 49.0 % | 6.1 % | 24.4 % | 5.7 % | 2.9 ms (LP 1.0) |
+
+**What this says.**
+- On the benchmark's big LPs (Kramer N = 50, the MIPLIB scheduling set) the
+  split is not the bottleneck: 85-95 % of the time is in C++, most of it
+  inside dual pivots. Moving Python code to C++ would buy at most the
+  remaining 5-15 %.
+- On small LPs it is: bppc4-08's nodes cost 2.9 ms, of which the LP is
+  1.0 ms. The interpreter's quarter is per-node bookkeeping - the node's
+  domain arrays, the heap of nodes, pseudocost NumPy ops on tiny arrays,
+  rounding's Python loop over fractional columns, `lp.x()` copies and the
+  per-column `set_bounds` calls. SCIP and HiGHS process such nodes in tens
+  of microseconds of overhead; here each crossing costs a few microseconds
+  and each NumPy call on a tiny array ~1-5 us, dozens of them per node.
+- Python hurt most where a loop ran per element: GMI's per-entry
+  substitution and the cut pool's dict dot products took 18-25 s per
+  root cut round on TI/AF until vectorised (now < 1 s); the vectorised
+  NumPy propagator re-derived every row each round (now C++, event
+  driven). Both cases are the same lesson: Python is fine per *phase*,
+  per *node* it is marginal, per *entry* it is fatal.
+- py-spy (`profile.py pyspy`) attributes native time to the Python call
+  sites (which heuristic, which separator); its totals include idle pool
+  threads, so the split above is taken from perf.
+
+**Costs of the boundary itself**, small but structural:
+- every LP call converts arguments and returns copies (`x()`, bases,
+  DSE weights: O(n) per call);
+- the GIL is released in `solve()` only;
+- state lives on both sides (the LP's bounds in fedlp and in
+  `LpRelaxation`, the domain in the propagator's trail and in NumPy
+  arrays), copied at every node.
+
+**Options.**
+1. *Keep the split, batch the crossings* (cheapest): vector calls
+   (`set_bounds_many` is the first), the domain kept in the propagator and
+   handed to fedlp in C++ without a Python round trip, rounding and
+   fractionality in C++. Recovers most of the small-LP overhead.
+2. *A C++ node engine, Python as plug-ins* (what SCIP's plug-in design and
+   HiGHS's MIP solver look like from PySCIPOpt / highspy): node selection,
+   domain via the trail, LP warm start, pseudocost branching and the
+   node-level heuristics in C++; Python callbacks for root heuristics,
+   structure detection (list scheduling), separators under development, at
+   a controlled frequency. Node overhead drops to microseconds; the
+   research loop (new heuristics, new separators in NumPy) stays in Python.
+3. *All C++*: what the commercial and the open-source codes do; the
+   fastest, and the costliest to change. Not warranted while the LP's
+   pivots are 70-90 % of the time on the target models.
+
+Recommendation: 1 now (it is mechanical), 2 when the small-LP families
+(MIPLIB packing, scheduling with small LPs) become the target. The direct
+Python integration is worth keeping as the plug-in surface either way.
+
+## Against full-scale MILP solvers: the biggest missing features
+
+HiGHS (open source; Huangfu & Hall's simplex, Achterberg-style branch and
+cut), SCIP (open source; the reference academic framework, Achterberg 2007
+and the SCIP Optimization Suite reports) and Gurobi (commercial; features as
+its documentation and logs report). Ordered by how much each is worth on
+general MILP, with what it would take here.
+
+| # | Feature | HiGHS | SCIP | Gurobi | fedhpc.mip | Expected effect |
+|---|---|---|---|---|---|---|
+| 1 | **Presolve depth**: aggregation (doubleton/tripleton equations, free column substitution), dominated columns, parallel rows/columns, implied free columns, probing, clique extraction and merging, coefficient strengthening on all rows, sparsification; restarts | yes (most) | yes (all) | yes (all, plus more) | removals, FBBT, dual fixing, Savelsbergh on binary rows; no aggregation, no probing, no cliques, no restarts | the largest single factor on MIPLIB: presolve often removes 30-70 % of rows and columns and tightens the LP bound before the first pivot |
+| 2 | **Cuts at scale and in the tree**: c-MIR over all aggregations, flow cover, lifted knapsack cover, clique, implied bound, multi-commodity flow, zero-half, GMI with a stable selection, mod-k, lift-and-project; separation at nodes; a cut pool with ageing; cut selection by efficacy, parallelism, integral support and objective parallelism | MIR, cover, clique, implied bound, GMI, path aggregation; local cuts | all of these and more | all, plus network/MCF, RLT, BQP | GMI, cover, zero-half, c-MIR (root only), efficacy and parallelism | Gurobi reports cuts as the second largest factor after presolve (often 2-10x on MIPLIB) |
+| 3 | **Conflict analysis** (infeasible and bound-exceeding nodes, propagation conflicts, CDCL-style learned constraints) | yes (since 1.3) | yes (graph and dual-ray conflicts) | yes | none | prunes trees by 10-30 % on average, much more on scheduling/combinatorial models (csched) |
+| 4 | **Symmetry handling**: orbital fixing, orbitopes, symretopes, symmetry-breaking inequalities, orbital branching; automorphism detection (bliss/nauty) | orbitopes and orbital fixing | full (Pfetsch & Rehn; Hojny) | yes | none | decisive on bin packing and identical-machine models (fhnw-binpack, bppc): orders of magnitude |
+| 5 | **LP engine for MIP**: dual simplex with bound flipping tuned for re-solves, presolve and scaling inside the LP, crash bases, interior point with crossover for cold large roots, concurrent root solves, stabilised pricing, parallel PRICE | dual + IPX + PDLP | SoPlex / any LP | dual, primal, barrier, concurrent, PDLP | fedlp: primal/dual simplex, no scaling, no LP presolve, no barrier | physiciansched's root LP does not finish; per pivot fedlp's dual is ~3x Gurobi's on the Kramer masters |
+| 6 | **Primal heuristics portfolio**: RINS, RENS, local branching, crossover, DINS, proximity search, feasibility pump with stage 3, ZI round, shifting, octane, alternating (MIP-start repair), CP-style probing dives, adaptive large neighbourhood search; scheduling by frequency and success | RINS, RENS, feasibility pump, ZI round, shifting, randomized rounding | ~50 heuristics with ALNS | many, plus solution improvement in parallel | rounding, fix-and-propagate with backjumping, two dives, pump, RENS, RINS, list scheduling | gfd, lectsched, csched, fhnw: no incumbent here |
+| 7 | **Branching**: reliability branching with hybrid inference/conflict scores, pseudocost initialisation by strong branching on the LP's best candidates with domain propagation, lookahead, cloud branching, multi-aggregated branching; node selection with estimates (best estimate, BFS/DFS interleaving), restarts, root reoptimisation | reliability + more | reliability with conflict/inference scores, best estimate with plunging | proprietary, strong | reliability pseudocosts, best bound with plunging | 10-30 % of tree size typically |
+| 8 | **Parallelism**: deterministic parallel tree search, concurrent heuristics, racing/concurrent root | parallel LP and some tree parallelism | UG (ParaSCIP/FiberSCIP) | deterministic parallel B&B | none (one thread by design here) | 2-8x on 8-16 cores for Gurobi |
+| 9 | **Numerical safety**: scaling, exact/safe dual bounds (SCIP exact), tolerance management, feasibility repair of solutions (polishing), cut numerics (dynamism, scaling, relaxation) | yes | yes, plus exact mode | yes, NumericFocus | cut safeguards only; no scaling | robustness on MIPLIB's numerically hard instances |
+| 10 | **Model features**: general constraints (SOS1/2, indicators, semicontinuous, quadratic/MIQP/MIQCP, nonlinear in SCIP), objective-cutoff, MIP starts, callbacks, warm starts, solution pools, multi-objective | most | most (MINLP) | all | linear MILP only, MPS without SC/SOS/QP; no callbacks | coverage, not speed |
+
+**What closes the most gap per effort, for this code base.**
+1. *Presolve aggregation and probing* (item 1): self-contained, in Python
+   on sparse matrices with a postsolve stack; probing on binaries reuses
+   the C++ propagator's trail directly (fix, propagate, undo).
+2. *Conflict analysis* (item 3): the propagator already knows the failing
+   row; with reasons recorded on its trail (which row implied each bound)
+   it can derive a conflict clause as SCIP does, and the solver can add it
+   as a cut or a propagation constraint.
+3. *Cuts in the tree and a pool with ageing* (item 2): the separators exist;
+   the solver needs local cuts (valid in a subtree), a pool, and row
+   management in fedlp (already incremental).
+4. *Symmetry* (item 4): orbitopes for identical machines/bins need the
+   permutation structure; detection via bliss/nauty would be a new
+   dependency (could be installed as `pynauty` or by building bliss).
+5. *LP robustness* (item 5): scaling and an LP presolve inside fedlp;
+   barrier is a large project (HiGHS's IPX could be called through highspy
+   for cold roots instead).
+6. *Heuristic portfolio scheduled by success* (item 6), *branching scores
+   with conflicts and inference* (item 7).
 
 ## Analysis: what the engine has, what it lacks
 
@@ -286,15 +486,17 @@ packing find no incumbent.
 
 ## Next steps
 
-1. **The dual's cost per pivot on node LPs**: fuse the column-wise PRICE
-   with the ratio test's candidate pass (both stream the row), and
-   density-predicted U solves (see `_ext/lp/README.md`).
-2. **Cuts in the tree**: zero-half and c-MIR at nodes, a global pool with
-   ageing.
-3. **Conflict analysis** from infeasible nodes and propagation failures.
-4. **Symmetry** (orbital fixing) for the bin-packing instances.
-5. **Presolve aggregation** with a postsolve stack, probing, cliques.
-6. **Big LPs** (physiciansched): scaling, a triangular crash, barrier.
-7. **Reproducible budgets**: the remaining wall-clock budgets (dives,
-   pump, cut loop) as work limits, as zero-half's and the schedule search's
-   already are.
+1. **Network and path cuts** for fixed-charge/network design (p200x1188c,
+   sp150x300d, mc11, beasleyC3: Gurobi's root closes them with flow cover,
+   flow path and network cuts; our c-MIR with variable bounds gets part).
+2. **The dual on huge LPs** (gfd, physiciansched: 100-250 k rows, the root
+   LP does not finish): scaling, a crash, an LP presolve, or IPX through
+   highspy for cold roots.
+3. **Node-local reduced-cost fixing and in-tree restarts**: the root's
+   fixing is global only.
+4. **Conflict analysis** from the propagator's failing rows.
+5. **The C++ node engine** when small-LP families become the target (the
+   Python/C++ section above).
+6. **Kramer N = 100 M = 2 AF**: no incumbent on AF_N100_M2_R0 (the root LP
+   and the restart's sub-solve take the time); the flow list scheduler runs
+   only after the root LP.

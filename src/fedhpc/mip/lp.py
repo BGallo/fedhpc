@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time as _time
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -50,6 +51,9 @@ class LpStats:
     iterations: int = 0
     seconds: float = 0.0
     rebuilds: int = 0
+    # fedlp's own counters and phase timers (t_*: a -DFEDLP_PROFILE build),
+    # summed over solves
+    fedlp: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -92,6 +96,8 @@ class LpRelaxation:
             k += len(self.net.slack_row)
         self.n_lp = k
         self.options = dict(options or {})
+        # sum fedlp's full stats over solves (scripts/profile.py turns it on)
+        self.collect_stats = bool(os.environ.get("FEDHPC_LP_STATS"))
         self.deadline = float("inf")        # perf_counter time no solve may pass
         self._build(P.row_lo, P.row_hi)
         self.lb = P.lb.copy()
@@ -133,32 +139,33 @@ class LpRelaxation:
         """Install the domain lb <= x <= ub (only changed columns move)."""
         ch = np.nonzero((lb != self.lb) | (ub != self.ub))[0]
         lp = self.lp
-        for j in ch:
+        fr = self.free[ch]
+        plain = ch[~fr]
+        if len(plain):          # one call for the lot
+            lp.set_bounds_many(plain.astype(np.int32), lb[plain].astype(float), ub[plain].astype(float))
+        for j in ch[fr]:
             l, u = float(lb[j]), float(ub[j])
-            if self.free[j]:
-                # l <= x+ - x- <= u: x+ in [max(l,0), max(u,0)], x- in
-                # [max(-u,0), max(-l,0)] (every sign case; inf stays inf)
-                lp.set_bounds(int(self.pos_id[j]), max(l, 0.0), max(u, 0.0))
-                lp.set_bounds(int(self.neg_id[j]), max(-u, 0.0), max(-l, 0.0))
-            else:
-                lp.set_bounds(int(j), l, u)
+            # l <= x+ - x- <= u: x+ in [max(l,0), max(u,0)], x- in
+            # [max(-u,0), max(-l,0)] (every sign case; inf stays inf)
+            lp.set_bounds(int(self.pos_id[j]), max(l, 0.0), max(u, 0.0))
+            lp.set_bounds(int(self.neg_id[j]), max(-u, 0.0), max(-l, 0.0))
         self.lb = lb.copy()
         self.ub = ub.copy()
 
     # --------------------------------------------------------------- solve
     def solve(self, iteration_limit: int | None = None) -> int:
         """ITERATION_LIMIT also when the deadline passes mid-solve."""
-        import time
-        lp = self.lp
-        lp.options.max_iter = int(iteration_limit) if iteration_limit else 1 << 62
-        left = self.deadline - time.perf_counter()
-        lp.options.time_limit = max(0.01, left) if np.isfinite(left) else 1e100
-        lp.reset_stats()
-        st = lp.solve()
-        s = lp.stats()
+        left = self.deadline - _time.perf_counter()
+        st, its, secs = self.lp.solve_counted(int(iteration_limit) if iteration_limit else 1 << 62,
+                                              max(0.01, left) if left < 1e100 else 1e100)
         self.stats.solves += 1
-        self.stats.iterations += s["iterations"]
-        self.stats.seconds += s["seconds"]
+        self.stats.iterations += its
+        self.stats.seconds += secs
+        if self.collect_stats:            # fedlp's full counters and timers (profiling)
+            acc = self.stats.fedlp
+            for k, v in self.lp.stats().items():
+                if k not in ("dual_exit", "dual_status", "post_dual_infeas") and v:
+                    acc[k] = acc.get(k, 0) + v
         self.status = st
         return st
 
@@ -211,7 +218,7 @@ class LpRelaxation:
         restore skips their O(m^2) re-initialisation."""
         rs, cs = self.get_basis()
         w = np.asarray(self.lp.get_dual_weights())
-        return rs, cs, (w.astype(np.float32) if len(w) else None)
+        return rs, cs, (np.minimum(w, 3e38).astype(np.float32) if len(w) else None)
 
     def slack_basis(self):
         """The basis of the rows' logicals (a reformulated block's slacks in

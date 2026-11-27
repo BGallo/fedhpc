@@ -72,6 +72,17 @@ public:
     int rounds() const { return rounds_; }
     long long work() const { return work_; }
 
+    // the columns whose bounds changed since level (each once)
+    std::vector<int> changed_since(size_t level) {
+        std::vector<int> out;
+        for (size_t t = level; t < trail_.size(); ++t) {
+            const int j = trail_[t].j;
+            if (!inq_col_mark(j)) out.push_back(j);
+        }
+        for (int j : out) colmark_[j] = 0;
+        return out;
+    }
+
     // a fresh domain (clears the trail)
     void reset(const double* lb, const double* ub) {
         lb_.assign(lb, lb + n_), ub_.assign(ub, ub + n_);
@@ -145,6 +156,13 @@ private:
     std::vector<Change> trail_;
     std::vector<int> queue_, next_;
     std::vector<char> inq_;
+    std::vector<char> colmark_;
+    bool inq_col_mark(int j) {
+        if ((int)colmark_.size() != n_) colmark_.assign(n_, 0);
+        if (colmark_[j]) return true;
+        colmark_[j] = 1;
+        return false;
+    }
     int bad_row_ = -1, rounds_ = 0;
     long long tightened_ = 0, work_ = 0;
 

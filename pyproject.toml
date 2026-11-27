@@ -45,6 +45,8 @@ cache-keys = [
 [dependency-groups]
 dev = [
     "highspy>=1.16",
+    "py-spy>=0.4.4",
+    "pybind11>=3.1.0",
     "pytest>=9.0.2",
 ]
 

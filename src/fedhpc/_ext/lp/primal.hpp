@@ -36,6 +36,55 @@
 
 #include "factor.hpp"
 #include "lu_ft.hpp"
+
+#if defined(__x86_64__) || defined(__i386__)
+#include <immintrin.h>
+#define FEDLP_X86 1
+#endif
+
+namespace fedlp {
+namespace kern {
+// a[j] = v0[j] rho[i0[j]] + v1[j] rho[i1[j]] + v2[j] rho[i2[j]] over a padded
+// 3-wide ELLPACK copy of the columns (padding: index m, where rho is 0). The
+// dual's column-wise PRICE ran at 3.7 instructions a cycle, ~45 a column:
+// instruction-bound, so 4 columns a step with AVX2 gathers and FMAs.
+inline void ell3_scalar(const int* i0, const int* i1, const int* i2, const double* v0, const double* v1,
+                        const double* v2, const double* rho, double* a, int n) {
+    for (int j = 0; j < n; ++j) a[j] = v0[j] * rho[i0[j]] + v1[j] * rho[i1[j]] + v2[j] * rho[i2[j]];
+}
+#ifdef FEDLP_X86
+__attribute__((target("avx2,fma"))) inline void ell3_avx2(const int* i0, const int* i1, const int* i2,
+                                                            const double* v0, const double* v1, const double* v2,
+                                                            const double* rho, double* a, int n) {
+    int j = 0;
+    for (; j + 4 <= n; j += 4) {
+        const __m256d r0 = _mm256_i32gather_pd(rho, _mm_loadu_si128((const __m128i*)(i0 + j)), 8);
+        const __m256d r1 = _mm256_i32gather_pd(rho, _mm_loadu_si128((const __m128i*)(i1 + j)), 8);
+        const __m256d r2 = _mm256_i32gather_pd(rho, _mm_loadu_si128((const __m128i*)(i2 + j)), 8);
+        __m256d s = _mm256_mul_pd(_mm256_loadu_pd(v0 + j), r0);
+        s = _mm256_fmadd_pd(_mm256_loadu_pd(v1 + j), r1, s);
+        s = _mm256_fmadd_pd(_mm256_loadu_pd(v2 + j), r2, s);
+        _mm256_storeu_pd(a + j, s);
+    }
+    for (; j < n; ++j) a[j] = v0[j] * rho[i0[j]] + v1[j] * rho[i1[j]] + v2[j] * rho[i2[j]];
+}
+inline bool has_avx2_fma() {
+    static const bool b = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+    return b;
+}
+#else
+inline bool has_avx2_fma() { return false; }
+#endif
+inline void ell3(const int* i0, const int* i1, const int* i2, const double* v0, const double* v1, const double* v2,
+                 const double* rho, double* a, int n, bool simd) {
+#ifdef FEDLP_X86
+    if (simd) return ell3_avx2(i0, i1, i2, v0, v1, v2, rho, a, n);
+#endif
+    (void)simd;
+    ell3_scalar(i0, i1, i2, v0, v1, v2, rho, a, n);
+}
+}  // namespace kern
+}  // namespace fedlp
 #include "parallel.hpp"
 #include "model.hpp"
 
@@ -142,6 +191,8 @@ struct Options {
     // exact initial DSE weights when the dual starts from a basis it did
     // not build (else unit weights)
     bool dse_exact = true;
+    // above this many rows the dual starts from unit DSE weights instead
+    int dse_exact_max_rows = 20000;
     // the dual prices only the sifting working set (every dual-infeasible
     // column joins it first); the final optimality check over all columns
     // hands anything else to the primal
@@ -288,6 +339,11 @@ private:
     std::vector<double> cdd_, ca_, ct_, thr_;
     std::vector<std::pair<double, int>> chunk_;
     std::vector<char> dfix_;   // per dual phase: dead or fixed (lbw == ubw)
+    // per dual phase: the columns as a padded 3-wide ELLPACK (SoA; columns
+    // with more entries are padded out and summed apart from ell_long_),
+    // the dot products' buffer, and rho with a 0 appended for the padding
+    std::vector<int> ell_i_[3], ell_long_;
+    std::vector<double> ell_v_[3], adot_, rhop_;
     std::vector<double> flipv_;
     std::vector<int> flipped_, fnz_;
     std::vector<double> infeas_;   // the dual's primal infeasibility by position
@@ -410,7 +466,8 @@ private:
     }
     void rho_pattern() {
         rnz_.clear();
-        if (const std::vector<int>* nz = fac_->row_nz()) {   // the factor's pattern
+        const std::vector<int>* nz = fac_->row_nz();
+        if (nz && (int)nz->size() * 8 < M_.rows()) {   // the factor's pattern, when sparse
             for (int k : *nz)
                 if (std::fabs(rho_[k]) >= 1e-14) rnz_.push_back(k);
             // ascending, as a scan gives: pivot rows then sum in a fixed
@@ -559,9 +616,44 @@ public:
         dse_exact_ = true;
         return true;
     }
+    // DSE weights ||e_i' B^-1||^2: 1 for a basis of logicals (B = +-I);
+    // above dse_exact_max_rows unit weights (each BTRAN clears and copies
+    // O(m) vectors: an exact pass is O(m^2), hours on gfd's 250 k-row root);
+    // else one BTRAN per row, the time limit checked every 64 rows. Returns
+    // whether the weights are exact.
+    bool exact_dse_weights() {
+        const int m = M_.rows();
+        dse_.assign(m, 1.0);
+        bool logical = true;
+        for (int i = 0; i < m && logical; ++i) logical = head_[i] < m;
+        if (logical) return true;
+        if (m > opt.dse_exact_max_rows) return false;
+        for (int i = 0; i < m; ++i) {
+            if ((i & 63) == 63 && opt.time_limit < 1e99 &&
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start_).count() > opt.time_limit) {
+                std::fill(dse_.begin(), dse_.end(), 1.0);
+                return false;
+            }
+            const double* rr = fac_->row(i);
+            double w = 0.0;
+            if (const std::vector<int>* nz = fac_->row_nz()) {
+                for (int k : *nz) w += rr[k] * rr[k];
+            } else {
+                for (int k = 0; k < m; ++k) w += rr[k] * rr[k];
+            }
+            dse_[i] = std::isfinite(w) ? std::min(std::max(w, kDseMin), kDseMax) : 1.0;
+        }
+        return true;
+    }
+
+    // the clock is read every 64 calls, not every 64 pivots: a loop that
+    // refactors without completing a pivot (a tiny pivot element, the same
+    // row again) kept the count still and never looked at the time
+    // (physiciansched3-3's root LP ran 400 s past a 120 s limit)
+    mutable unsigned budget_calls_ = 0;
     bool out_of_budget() const {
         if (stats_.iterations >= opt.max_iter) return true;
-        if ((stats_.iterations & 63) == 0 && opt.time_limit < 1e99)
+        if ((++budget_calls_ & 63) == 0 && opt.time_limit < 1e99)
             return std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start_).count() > opt.time_limit;
         return false;
     }
@@ -1310,7 +1402,11 @@ private:
     // The true costs come back afterwards, with fresh duals and reduced
     // costs, and the primal path cleans up what they leave.
     Status dual_phase() {
-        if (!opt.dual_perturb) return dual_phase_core();
+        if (!opt.dual_perturb) {
+            Status st = dual_phase_core();
+            compute_d();   // fixed columns' reduced costs were not maintained
+            return st;
+        }
         const int n = M_.cols();
         std::vector<std::pair<int, double>> saved;
         unsigned long long h = 0x9E3779B97F4A7C15ull;
@@ -1420,8 +1516,26 @@ private:
         // bounds stay put through a dual phase (no bound shifting here)
         dfix_.resize(n);
         for (int j = 0; j < n; ++j) dfix_[j] = st_[j] == DEAD || lbw(j) == ubw(j);
+        {
+            const int* cs = M_.col_starts();
+            const int* ci = M_.idx_data();
+            const double* cv = M_.val_data();
+            ell_long_.clear();
+            for (int t = 0; t < 3; ++t) ell_i_[t].assign(n, m), ell_v_[t].assign(n, 0.0);
+            for (int j = 0; j < n; ++j) {
+                const int e = cs[j], len = cs[j + 1] - e;
+                if (len > 3) {
+                    ell_long_.push_back(j);
+                    continue;
+                }
+                for (int t = 0; t < len; ++t) ell_i_[t][j] = ci[e + t], ell_v_[t][j] = cv[e + t];
+            }
+            adot_.resize(n);
+            rhop_.assign(m + 1, 0.0);
+        }
         std::vector<double> arow(n, 0.0);
         std::vector<int> nzj;
+        int stall_refactors = 0;   // refactorisations in a row without a pivot
         std::vector<char> inz(n, 0);
         ++stats_.dual_solves;
         cand_valid_ = false;
@@ -1438,14 +1552,10 @@ private:
                 dse_.assign(m, 1.0);
                 if (opt.dse_exact) {
                     FEDLP_TIME(t_dseinit);
-                    for (int i = 0; i < m; ++i) {
-                        const double* rr = fac_->row(i);
-                        double w = 0.0;
-                        for (int k = 0; k < m; ++k) w += rr[k] * rr[k];
-                        dse_[i] = std::isfinite(w) ? std::min(std::max(w, kDseMin), kDseMax) : 1.0;
-                    }
+                    dse_exact_ = exact_dse_weights();
+                } else {
+                    dse_exact_ = false;
                 }
-                dse_exact_ = opt.dse_exact;
             }
             int r = -1;
             double worst = 0.0, best = 0.0;
@@ -1467,12 +1577,7 @@ private:
                 // or NaN). Never stop on that: exact weights, choose again.
                 ++stats_.dse_resets;
                 if (dse && opt.dse_exact) {
-                    for (int i = 0; i < m; ++i) {
-                        const double* rr = fac_->row(i);
-                        double w = 0.0;
-                        for (int k = 0; k < m; ++k) w += rr[k] * rr[k];
-                        dse_[i] = std::isfinite(w) ? std::min(std::max(w, kDseMin), kDseMax) : 1.0;
-                    }
+                    exact_dse_weights();
                 } else {
                     std::fill(dse_.begin(), dse_.end(), 1.0);
                 }
@@ -1516,6 +1621,7 @@ private:
                 rho_pattern();
             }
             FEDLP_LAP(t_dbtran);
+            int fusedK = -1;   // candidates already collected by a fused PRICE
             long long rowcost = 0;
             if (rp) for (int k : rnz_) rowcost += rp_nb_[k];
             else for (int k : rnz_) rowcost += (long long)M_.row(k).size();
@@ -1547,11 +1653,56 @@ private:
                     if (a != 0.0) inz[j] = 1, nzj.push_back(j), arow[j] = a;
                 }
             } else {
-                for (int j = 0; j < n; ++j) {
-                    if (st_[j] == BASIC || st_[j] == DEAD) continue;
-                    const double a = M_.dot(rho_.data(), j);
-                    if (a != 0.0) inz[j] = 1, nzj.push_back(j), arow[j] = a;
+                // Column-wise over every nonbasic column, the dot products
+                // inlined on the raw column store and fused with the ratio
+                // test's candidate pass: st_, d_ and dfix_ stream in column
+                // order here, where the separate pass gathered them at the
+                // row's 20-85 k scattered entries (AF_N50_M2_R4: rho is 44 %
+                // dense, so this path prices most pivots)
+                const int* cs = M_.col_starts();
+                const int* ci = M_.idx_data();
+                const double* cv = M_.val_data();
+                const double* rh = rho_.data();
+                const char* st = st_.data();
+                const char* fx = dfix_.data();
+                const double* dv = d_.data();
+                const double sg = below ? 1.0 : -1.0, pv = opt.pivot_tol;
+                if ((int)cj_.size() < n) cj_.resize(n), cdd_.resize(n), ca_.resize(n), ct_.resize(n);
+                int* oj = cj_.data();
+                double* od = cdd_.data();
+                double* oa = ca_.data();
+                double* ar = arow.data();
+                char* iz = inz.data();
+                // the dot products: SIMD over the ELLPACK copy, the long
+                // columns apart
+                std::copy(rho_.begin(), rho_.begin() + m, rhop_.begin());
+                double* ad = adot_.data();
+                kern::ell3(ell_i_[0].data(), ell_i_[1].data(), ell_i_[2].data(), ell_v_[0].data(), ell_v_[1].data(),
+                           ell_v_[2].data(), rhop_.data(), ad, n, kern::has_avx2_fma());
+                for (int j : ell_long_) {
+                    double a = 0.0;
+                    for (int t = cs[j], f = cs[j + 1]; t < f; ++t) a += rh[ci[t]] * cv[t];
+                    ad[j] = a;
                 }
+                int K = 0, cnt = 0;
+                nzj.resize(n);
+                int* oz = nzj.data();
+                for (int j = 0; j < n; ++j) {
+                    const char sj = st[j];
+                    // fixed columns never enter nor flip: no pivot-row entry
+                    // (their d_j goes stale; the phase's end recomputes d)
+                    if (sj == BASIC || sj == DEAD || fx[j]) continue;
+                    const double a = ad[j];
+                    // branch-free appends: about half the rows' entries are 0
+                    const bool nz = a != 0.0;
+                    ar[j] = a, iz[j] = nz, oz[cnt] = j, cnt += nz;
+                    const double as = sg * a, fa = std::fabs(a);
+                    const bool lo = sj == AT_LB, ok = nz & (fa >= pv) & ((lo & (as < 0)) | ((sj == AT_UB) & (as > 0)));
+                    oj[K] = j, od[K] = lo ? dv[j] : -dv[j], oa[K] = fa;
+                    K += ok;
+                }
+                nzj.resize(cnt);
+                fusedK = K;
             }
             stats_.d_rho_nnz += (long long)rnz_.size(), stats_.d_row_nnz += (long long)nzj.size();
             FEDLP_LAP(t_dprice);
@@ -1567,8 +1718,8 @@ private:
             // into compact arrays: the row has ~20 k entries on Kramer's
             // arc-flow masters, where the scattered bound reads of a
             // per-entry test cost more than the rest of the ratio test
-            int K = 0;
-            {
+            int K = fusedK > 0 ? fusedK : 0;
+            if (fusedK < 0) {
                 const int nz0 = (int)nzj.size();
                 if ((int)cj_.size() < nz0) cj_.resize(nz0), cdd_.resize(nz0), ca_.resize(nz0), ct_.resize(nz0);
                 const char* st = st_.data();
@@ -1585,8 +1736,11 @@ private:
                     oj[K] = j, od[K] = lo ? dv[j] : -dv[j], oa[K] = fa;
                     K += ok;
                 }
+            }
+            {
                 // clamped: t_k = cdd_k / ca_k >= 0 (the raw value stays for
                 // Harris's bound, which uses it with the tolerance)
+                const double* od = cdd_.data();
                 double* ot = ct_.data();
                 for (int k = 0; k < K; ++k) ot[k] = od[k] > 0.0 ? od[k] : 0.0;
             }
@@ -1732,10 +1886,14 @@ private:
             const bool stable = std::fabs(arow[q] - arq) <= 1e-9 * (1.0 + std::fabs(arq));
             if (std::fabs(arq) < piv) {
                 for (int j : nzj) inz[j] = 0;
+                // a fresh factor, then the row again; the same tiny pivot
+                // over and over is no progress: hand the LP to the primal
+                if (++stall_refactors > 5) { stats_.dual_exit = 4; return Status::Numerical; }
                 if (!refactor(!ws)) { stats_.dual_exit = 2; return Status::Numerical; }
                 all_infeas();   // x_B recomputed
                 continue;
             }
+            stall_refactors = 0;
             if (dse) {
                 // tau = B^-1 rho_r, then the Forrest-Goldfarb update over
                 // the rows alpha touches

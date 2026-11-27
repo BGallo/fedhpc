@@ -43,11 +43,19 @@ CPUS = [0, 2, 4, 6, 12, 14]           # one hyperthread per physical P-core (as 
 KRAMER_GRID = {
     "kramer20": [(20, m, z, 1) for m in (2, 5, 10) for z in (0, 4, 9)],
     "kramer50": [(50, m, z, 1) for m in (2, 5, 10) for z in (0, 4, 9)],
+    "kramer100": [(100, m, z, 1) for m in (2, 5, 10) for z in (0, 4, 9)],
 }
 MIPLIB_SETS = {
     "miplib_sched": ["csched007", "csched008", "mcsched", "lectsched-5-obj", "nursesched-sprint02",
                      "physiciansched3-3", "gfd-schedulen180f7d50m30k18"],
     "miplib_pack": ["bppc4-08", "fhnw-binpack4-4", "fhnw-binpack4-48"],
+    # general MIPLIB 2017 benchmark instances of small to medium size, from
+    # families where presolve (aggregation, probing) is known to matter:
+    # lot sizing, fixed charge, network design, knapsack/assignment structure
+    "miplib_general": ["neos5", "gen-ip054", "timtab1", "mas76", "mas74", "gen-ip002", "glass4",
+                       "assign1-5-8", "mad", "tr12-30", "exp-1-500-5-5", "binkar10_1", "beasleyC3",
+                       "p200x1188c", "pg", "mc11", "pg5_34", "lotsize", "neos17", "mik-250-20-75-4",
+                       "sp150x300d", "neos-911970", "50v-10", "neos859080"],
 }
 SOLVERS = ("fedmip", "highs", "gurobi")
 
@@ -84,14 +92,27 @@ def build(args) -> None:
 # ----------------------------------------------------------------------- run
 def _solve(solver: str, path: str, tl: float, gap: float) -> dict:
     t0 = time.perf_counter()
-    if solver == "fedmip":
+    if solver.startswith("fedmip"):
+        # "fedmip" or "fedmip[k=v;k=v]" (MipOptions; presolve.<k>=v goes to presolve())
+        import ast
         from fedhpc.mip import read_mps, solve
+        kw, pre = {}, {}
+        if "[" in solver:
+            for kv in solver[solver.index("[") + 1:-1].split(";"):
+                k, v = kv.split("=")
+                val = ast.literal_eval(v)
+                if k.startswith("presolve."):
+                    pre[k[9:]] = val
+                else:
+                    kw[k] = val
         P = read_mps(path)
-        r = solve(P, time_limit=tl, gap_rel=gap, verbose=False, lp_options={"threads": 1})
+        r = solve(P, time_limit=tl, gap_rel=gap, verbose=False, lp_options={"threads": 1},
+                  presolve_options=pre, **kw)
         st = r.stats
         return dict(status=r.status, objective=r.objective, bound=r.bound, nodes=r.nodes,
                     seconds=time.perf_counter() - t0,
-                    extra={k: st.get(k) for k in ("root_bound_no_cuts", "root_bound", "cuts_added",
+                    extra={k: st.get(k) for k in ("root_bound_no_cuts", "root_bound", "cuts_added", "presolve",
+                                                  "rc_fixed", "restart",
                                                   "lp_iterations", "lp_seconds", "strong_iterations",
                                                   "heuristic_solutions", "root_lp_algorithm", "time",
                                                   "network_rows", "implied_integers")})
@@ -228,7 +249,8 @@ def report(args) -> None:
     by = {}
     for r in rows:
         by.setdefault(r["instance"], {})[r["solver"]] = r
-    solvers = [s for s in SOLVERS if any(s in v for v in by.values())]
+    seen = {s for v in by.values() for s in v}
+    solvers = sorted(seen, key=lambda s: (s not in SOLVERS, SOLVERS.index(s) if s in SOLVERS else 0, s))
     print(f"{'instance':34s} " + " ".join(f"{s:>30s}" for s in solvers))
     for inst in sorted(by):
         cells = []

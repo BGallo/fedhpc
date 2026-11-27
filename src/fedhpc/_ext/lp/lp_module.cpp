@@ -103,6 +103,32 @@ public:
         S_->bounds_changed(j);
     }
 
+    // many columns at once (numpy arrays): branch and bound installs a
+    // node's domain in one call instead of one Python call per column
+    void set_bounds_many(py::array_t<int, py::array::c_style | py::array::forcecast> ids,
+                         py::array_t<double, py::array::c_style | py::array::forcecast> lb,
+                         py::array_t<double, py::array::c_style | py::array::forcecast> ub) {
+        if (lb.size() != ids.size() || ub.size() != ids.size()) throw std::invalid_argument("sizes differ");
+        const int* id = ids.data();
+        const double* l = lb.data();
+        const double* u = ub.data();
+        for (ssize_t k = 0; k < ids.size(); ++k) set_bounds(id[k], l[k], u[k]);
+    }
+
+    // one crossing per LP solve from branch and bound: limits in, stats
+    // reset, solve, (status, pivots, seconds) out
+    py::tuple solve_counted(long long max_iter, double time_limit) {
+        opt_.max_iter = max_iter, opt_.time_limit = time_limit;
+        S_->reset_stats();
+        int st;
+        {
+            py::gil_scoped_release nogil;
+            st = solve();
+        }
+        const Stats& s = S_->stats();
+        return py::make_tuple(st, s.iterations, s.seconds);
+    }
+
     int solve() {
         S_->opt = opt_;
         return (int)S_->solve();
@@ -414,6 +440,7 @@ PYBIND11_MODULE(_fedlp, mod) {
         .def_readwrite("refactor_interval", &Options::refactor_interval)
         .def_readwrite("max_iter", &Options::max_iter)
         .def_readwrite("phase1_limit", &Options::phase1_limit)
+        .def_readwrite("dse_exact_max_rows", &Options::dse_exact_max_rows)
         .def_readwrite("time_limit", &Options::time_limit)
         .def_readwrite("sifting", &Options::sifting)
         .def_readwrite("partial_min_cols", &Options::partial_min_cols)
@@ -462,9 +489,11 @@ PYBIND11_MODULE(_fedlp, mod) {
              py::arg("start"), py::arg("idx"), py::arg("val"))
         .def("remove_columns", &Solver::remove_columns, py::arg("ids"))
         .def("set_bounds", &Solver::set_bounds, py::arg("id"), py::arg("lb"), py::arg("ub"))
+        .def("set_bounds_many", &Solver::set_bounds_many, py::arg("ids"), py::arg("lb"), py::arg("ub"))
         .def("set_costs", &Solver::set_costs, py::arg("ids"), py::arg("costs"))
         .def("set_crash_hint", &Solver::set_crash_hint, py::arg("ids"))
         .def("solve", &Solver::solve, py::call_guard<py::gil_scoped_release>())
+        .def("solve_counted", &Solver::solve_counted, py::arg("max_iter"), py::arg("time_limit"))
         .def_property_readonly("objective", &Solver::objective)
         .def("x", &Solver::x)
         .def("duals", &Solver::duals)

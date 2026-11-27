@@ -86,14 +86,10 @@ class MipProblem:
         """Largest (row, bound, integrality) violation of x, each relative to
         1 + |the bound|."""
         act = self.A @ x
-        with np.errstate(invalid="ignore"):   # inf - inf on free sides
-            rv = np.maximum((self.row_lo - act) / (1 + np.abs(self.row_lo)),
-                            (act - self.row_hi) / (1 + np.abs(self.row_hi)))
-            bv = np.maximum((self.lb - x) / (1 + np.abs(self.lb)), (x - self.ub) / (1 + np.abs(self.ub)))
+        rv = np.maximum(_side(self.row_lo, act), _side(act, self.row_hi, upper=True))
+        bv = np.maximum(_side(self.lb, x), _side(x, self.ub, upper=True))
         xi = x[self.integer]
         iv = np.abs(xi - np.round(xi))
-        rv = np.nan_to_num(rv, nan=0.0, neginf=0.0)
-        bv = np.nan_to_num(bv, nan=0.0, neginf=0.0)
         return (float(rv.max(initial=0.0)), float(bv.max(initial=0.0)), float(iv.max(initial=0.0)))
 
     def is_feasible(self, x: np.ndarray, tol: float = 1e-6, int_tol: float = 1e-6) -> bool:
@@ -115,3 +111,15 @@ class MipProblem:
         nb = int((self.integer & (self.lb == 0) & (self.ub == 1)).sum())
         return (f"{self.name or 'problem'}: {self.m} rows, {self.n} columns ({nb} binary, "
                 f"{ni - nb} general integer, {self.n - ni} continuous), {self.nnz} nonzeros")
+
+
+def _side(a: np.ndarray, b: np.ndarray, upper: bool = False) -> np.ndarray:
+    """(a - b) / (1 + |bound|) where the bound (b for an upper side, a for a
+    lower one) is finite, -inf where it is infinite. An infinite bound must
+    not turn into NaN: np.maximum propagates NaN, and nan_to_num then hid
+    the other side's violation (a violated <= row read as satisfied)."""
+    bound = b if upper else a
+    fin = np.isfinite(bound)
+    out = np.full(np.shape(bound), -np.inf)
+    out[fin] = (np.asarray(a)[fin] - np.asarray(b)[fin]) / (1 + np.abs(bound[fin]))
+    return out

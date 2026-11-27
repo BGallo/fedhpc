@@ -310,7 +310,7 @@ def test_cmir_cuts_valid_with_continuous_columns(seed):
     aggregation along continuous columns is exercised."""
     from scipy.optimize import linprog
 
-    from fedhpc.mip.cuts import CutParams, cmir_cuts
+    from fedhpc.mip.cuts import CutParams, cmir_cuts, variable_bounds
     from fedhpc.mip.lp import OPTIMAL, LpRelaxation
     rng = random.Random(7500 + seed)
     P, _ = random_ip(rng, rng.randint(2, 5), rng.randint(3, 7), box=2, mixed=True)
@@ -318,9 +318,16 @@ def test_cmir_cuts_valid_with_continuous_columns(seed):
     if lp.solve() != OPTIMAL:
         return
     x = lp.x()
-    cuts = cmir_cuts(P, x, P.lb, P.ub, CutParams(min_efficacy=1e-7))
+    cuts = cmir_cuts(P, x, P.lb, P.ub, CutParams(min_efficacy=1e-7), vb=variable_bounds(P))
     if not cuts:
         return
+    _check_mixed_cuts(P, cuts)
+
+
+def _check_mixed_cuts(P, cuts):
+    """Every cut holds on the feasible set: for each integer assignment,
+    its minimum over the continuous part (an LP) is >= its rhs."""
+    from scipy.optimize import linprog
     ii = np.nonzero(P.integer)[0]
     cc = np.nonzero(~P.integer)[0]
     A = P.A.toarray()
@@ -410,3 +417,64 @@ def test_fix_and_propagate_backjumping_finds_more_and_stays_feasible():
                 assert P.is_feasible(y)
                 wins[mb] += 1
     assert wins[200] > wins[0], wins
+
+
+def test_violations_see_one_sided_rows_and_bounds():
+    """A violated <= row (lower side -inf), a violated >= row and a
+    violated one-sided bound are reported: an infinite side used to become
+    NaN and hide the other side's violation."""
+    A = sp.csr_matrix(np.array([[1.0, 1.0], [1.0, -1.0]]))
+    P = MipProblem(A, np.array([-INF, 0.0]), np.array([-1.0, INF]), np.array([-INF, 0.0]),
+                   np.array([5.0, INF]), np.zeros(2), np.array([True, True]))
+    r, _b, _i = P.violations(np.array([0.0, 0.0]))
+    assert r == pytest.approx(0.5)                          # row 0: 0 <= -1, by 1 / (1 + 1)
+    assert not P.is_feasible(np.array([-2.0, 0.0]))         # row 1: -2 >= 0 fails
+    assert P.violations(np.array([-3.0, -1.0]))[1] == pytest.approx(1.0)   # x1 >= 0 fails
+    assert P.is_feasible(np.array([-1.0, 0.0])) is False    # row 1: -1 >= 0 fails
+    assert P.is_feasible(np.array([1.0, -2.0])) is False    # x1 = -2 below 0
+    assert P.is_feasible(np.array([-1.0, -1.0])) is False   # x1 < 0
+    assert P.is_feasible(np.array([-1.0, 0.0])) is False
+    assert P.violations(np.array([-1.0, -1.0]))[0] == 0.0   # rows hold: -2 <= -1, 0 >= 0
+
+
+
+def fixed_charge(rng, n_arcs=5):
+    """A single-node fixed-charge flow: sum_j x_j >= D, x_j <= u_j y_j,
+    cost f_j y_j + c_j x_j (the flow-cover setting)."""
+    u = [rng.randint(2, 8) for _ in range(n_arcs)]
+    D = rng.randint(max(u), sum(u) - 1)
+    n = 2 * n_arcs
+    rows, lo, hi = [], [], []
+    rows.append([1.0] * n_arcs + [0.0] * n_arcs), lo.append(float(D)), hi.append(INF)
+    for j in range(n_arcs):
+        r = [0.0] * n
+        r[j], r[n_arcs + j] = 1.0, -float(u[j])
+        rows.append(r), lo.append(-INF), hi.append(0.0)
+    c = [float(rng.randint(1, 4)) for _ in range(n_arcs)] + [float(rng.randint(5, 30)) for _ in range(n_arcs)]
+    lb = np.zeros(n)
+    ub = np.array([float(x) for x in u] + [1.0] * n_arcs)
+    integer = np.array([False] * n_arcs + [True] * n_arcs)
+    return MipProblem(sp.csr_matrix(np.array(rows)), np.array(lo), np.array(hi), lb, ub, np.array(c), integer)
+
+
+@needs_lp
+@pytest.mark.parametrize("seed", range(40))
+def test_cmir_with_variable_bounds_on_fixed_charge(seed):
+    """Fixed-charge rows: variable-bound substitution produces violated
+    cuts (flow covers) and none cuts off a feasible point."""
+    from fedhpc.mip.cuts import CutParams, cmir_cuts, variable_bounds
+    from fedhpc.mip.lp import OPTIMAL, LpRelaxation
+    rng = random.Random(7700 + seed)
+    P = fixed_charge(rng, rng.randint(3, 6))
+    vb = variable_bounds(P)
+    assert np.all(vb.vub_k[:P.n // 2] >= 0)
+    lp = LpRelaxation(P)
+    for _round in range(3):
+        if lp.solve() != OPTIMAL:
+            break
+        x = lp.x()
+        cuts = cmir_cuts(P, x, P.lb, P.ub, CutParams(min_efficacy=1e-7), vb=vb)
+        if not cuts:
+            break
+        _check_mixed_cuts(P, cuts)
+        lp.add_rows([(c.cols, c.coef, c.rhs, INF) for c in cuts])

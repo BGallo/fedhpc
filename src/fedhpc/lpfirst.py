@@ -406,6 +406,8 @@ class _TI:
         np.add.at(used, (kc, tc + pc), -1)
         self.row_needed = np.cumsum(used, axis=1)[:, :self.H] > 0
 
+    _PLACEMENT_CACHES = ("_classes", "class_rep", "class_offset", "_sorted_keys", "_key_order", "_mid_rank")
+
     def restrict(self, keep: np.ndarray) -> "_TI":
         """A copy holding only the placements ``keep`` marks (a boolean mask
         over this one's). Each job must keep at least one; capacities and
@@ -413,8 +415,9 @@ class _TI:
         the full one with the dropped columns fixed to 0."""
         keep = np.asarray(keep, dtype=bool)
         new = object.__new__(_TI)
-        new.__dict__.update({k: v for k, v in self.__dict__.items()
-                             if k not in ("_classes", "class_rep", "class_offset")})
+        # per-placement caches (classes, arcs_of's sorted keys) belong to this
+        # set's indexing: the copy rebuilds its own
+        new.__dict__.update({k: v for k, v in self.__dict__.items() if k not in _TI._PLACEMENT_CACHES})
         for name in ("J", "K", "T", "P", "MID", "Q", "C1", "C2"):
             setattr(new, name, getattr(self, name)[keep])
         new.n_arcs = int(keep.sum())
@@ -472,8 +475,9 @@ class _TI:
         is_rep[reps] = True
         keep[is_rep[self.J]] = True
         new = object.__new__(_TI)
-        new.__dict__.update({k: v for k, v in self.__dict__.items()
-                             if k not in ("_classes", "class_rep", "class_offset")})
+        # per-placement caches (classes, arcs_of's sorted keys) belong to this
+        # set's indexing: the copy rebuilds its own
+        new.__dict__.update({k: v for k, v in self.__dict__.items() if k not in _TI._PLACEMENT_CACHES})
         new.jobs = [self.jobs[r] for r in reps.tolist()]
         new.jpos = {jid: i for i, jid in enumerate(new.jobs)}
         for name in ("K", "T", "P", "MID", "Q", "C1", "C2"):

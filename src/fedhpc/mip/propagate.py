@@ -287,6 +287,10 @@ class Propagator:
     def undo(self, level: int) -> None:
         self.k.undo(level)
 
+    def changed_since(self, level: int):
+        """(cols, lb, ub): the columns tightened since level, their bounds now."""
+        return self.k.changed_since(level)
+
     def lb(self) -> np.ndarray:
         return self.k.lb()
 

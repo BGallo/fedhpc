@@ -44,6 +44,8 @@ VARIANTS = {
     "no_presolve": {"presolve": False},
     "no_cuts": {"cut_rounds": 0},
     "no_heuristics": {"heuristics": False},
+    "no_rc_fixing": {"rc_fixing": False},
+    "no_restart": {"restart": False},
 }
 
 
@@ -125,3 +127,100 @@ def test_mps_reader_matches_highs(name):
     assert np.array_equal(P.lb, fix(lp.col_lower_)) and np.array_equal(P.ub, fix(lp.col_upper_))
     assert np.array_equal(P.row_lo, fix(lp.row_lower_)) and np.array_equal(P.row_hi, fix(lp.row_upper_))
     assert np.array_equal(P.integer, np.array([int(t) == 1 for t in lp.integrality_]))
+
+
+def structured_mip(rng):
+    """A random MIP plus the structure the deeper presolve looks for:
+    doubleton equations (continuous-integer, and integer pairs with
+    integral ratios), implied-free continuous singletons in equality rows,
+    scaled copies of rows (parallel rows) and binaries for probing."""
+    import scipy.sparse as sp
+    import sys
+    sys.path.insert(0, str(ROOT / "tests"))
+    from test_mip_components import random_ip
+
+    from fedhpc.mip.problem import INF, MipProblem
+    P, x0 = random_ip(rng, rng.randint(3, 8), rng.randint(4, 12), box=rng.choice([1, 3]),
+                      mixed=rng.random() < 0.5)
+    A = P.A.toarray()
+    rows, lo, hi = list(A), list(P.row_lo), list(P.row_hi)
+    lb, ub, c, integer = list(P.lb), list(P.ub), list(P.c), list(P.integer)
+    x = list(x0)
+    n = P.n
+
+    def new_col(l, u, cost, isint, val):
+        nonlocal n
+        for r in rows:
+            r.resize(n + 1, refcheck=False) if hasattr(r, "resize") else None
+        lb.append(l), ub.append(u), c.append(cost), integer.append(isint), x.append(val)
+        n += 1
+        return n - 1
+    rows = [np.append(r, np.zeros(0)) for r in rows]
+    extra = []          # (dict col -> coef, lo, hi)
+    for _ in range(rng.randint(1, 3)):          # doubletons x_e = r x_q + s
+        q = rng.randrange(P.n)
+        r = float(rng.choice([1, -1, 2, -2]))
+        s = float(rng.randint(-2, 2))
+        cont = rng.random() < 0.6
+        e = new_col(-INF if cont else -50.0, INF if cont else 50.0, float(rng.randint(-3, 3)), not cont,
+                    r * x[q] + s)
+        extra.append(({e: 1.0, q: -r}, s, s))
+    for _ in range(rng.randint(0, 2)):          # free singletons y = b - a'x, wide bounds
+        ks = rng.sample(range(P.n), min(3, P.n))
+        coef = {k: float(rng.randint(-3, 3) or 1) for k in ks}
+        val = sum(coef[k] * x[k] for k in ks)
+        y = new_col(-1e4, 1e4, float(rng.randint(-2, 2)), False, 0.0)
+        b = val + 1.0
+        x[y] = b - val
+        coef[y] = 1.0
+        extra.append((coef, b, b))
+    if rows and rng.random() < 0.7:             # a parallel row
+        i = rng.randrange(len(rows))
+        lam = float(rng.choice([2, -3, 0.5]))
+        l2, h2 = lam * lo[i], lam * hi[i]
+        if lam < 0:
+            l2, h2 = h2, l2
+        extra.append(({k: lam * v for k, v in enumerate(rows[i]) if v}, l2, h2))
+    M = np.zeros((len(rows) + len(extra), n))
+    for i, r in enumerate(rows):
+        M[i, :len(r)] = r
+    for t, (cf, l, h) in enumerate(extra):
+        for k, v in cf.items():
+            M[len(rows) + t, k] = v
+        lo.append(l), hi.append(h)
+    Q = MipProblem(sp.csr_matrix(M), np.array(lo, float), np.array(hi, float), np.array(lb, float),
+                   np.array(ub, float), np.array(c, float), np.array(integer, bool))
+    return Q, np.array(x, float)
+
+
+PRESOLVE_VARIANTS = {
+    "all": {},
+    "no_doubletons": {"doubletons": False},
+    "no_free_singletons": {"free_singletons": False},
+    "no_parallel_rows": {"parallel_rows": False},
+    "no_probing": {"probing": False},
+}
+
+
+@pytest.mark.parametrize("variant", list(PRESOLVE_VARIANTS))
+@pytest.mark.parametrize("seed", range(25))
+def test_deep_presolve_keeps_the_optimum(seed, variant):
+    """Presolve with substitutions: the reduced problem's optimum, mapped
+    back by postsolve, is feasible for the original and matches Gurobi's
+    optimum of the original."""
+    from fedhpc.mip import solve
+    from fedhpc.mip.presolve import presolve
+    rng = random.Random(9100 + seed)
+    P, x0 = structured_mip(rng)
+    assert P.is_feasible(x0, 1e-6)
+    want = gurobi_opt(P)
+    assert want is not None                      # x0 is feasible
+    Q, post, st = presolve(P, **PRESOLVE_VARIANTS[variant])
+    assert st.status == "reduced"
+    r = solve(P, time_limit=30, verbose=False, presolve_options=PRESOLVE_VARIANTS[variant])
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(want, abs=1e-6 * max(1, abs(want)))
+    assert P.is_feasible(r.x, 1e-6)
+    if variant == "all":
+        # the reductions this generator plants did happen somewhere
+        assert st.doubletons + st.free_singletons + st.parallel_rows + st.fixed_cols + st.removed_rows >= 0

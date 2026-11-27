@@ -1,0 +1,98 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 20K of event 'cpu_core/cycles/P'
+# Event count (approx.): 222206066478
+#
+# Overhead  Shared Object                                      Symbol                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            
+# ........  .................................................  ..................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................
+#
+    39.02%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] fedlp::PrimalSimplex::dual_phase_core()
+    16.75%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] fedlp::Model::dot(double const*, int) const
+     6.67%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] void std::__adjust_heap<__gnu_cxx::__normal_iterator<int*, std::vector<int, std::allocator<int> > >, long, int, std::less<void> >(__gnu_cxx::__normal_iterator<int*, std::vector<int, std::allocator<int> > >, long, long, int, std::less<void>) [clone .isra.0]
+     3.99%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] fedlp::LuFT::solve_U_sparse(double*, double*, std::vector<int, std::allocator<int> > const&, std::vector<int, std::allocator<int> >&)
+     2.35%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] fedlp::LuFT::btran_inplace(double*)
+     2.19%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] fedlp::LuFT::apply_Lt_sparse(double*)
+     2.08%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] fedlp::LuFT::ftran_pattern(double*)
+     2.00%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] fedlp::PrimalSimplex::build_nb_rows()
+     1.51%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] fedlp::PrimalSimplex::dual_phase()
+     1.50%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] void std::__introsort_loop<__gnu_cxx::__normal_iterator<std::pair<double, int>*, std::vector<std::pair<double, int>, std::allocator<std::pair<double, int> > > >, long, std::less<void> >(__gnu_cxx::__normal_iterator<std::pair<double, int>*, std::vector<std::pair<double, int>, std::allocator<std::pair<double, int> > > >, __gnu_cxx::__normal_iterator<std::pair<double, int>*, std::vector<std::pair<double, int>, std::allocator<std::pair<double, int> > > >, long, std::less<void>) [clone .isra.0]
+     1.40%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] fedlp::Model::dot(double const*, int) const@plt
+     0.81%  libc.so.6                                          [.] 0x00000000001b1dc7
+     0.78%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] fedlp::PrimalSimplex::phase1()
+     0.71%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] std::pair<int, double>& std::vector<std::pair<int, double>, std::allocator<std::pair<int, double> > >::emplace_back<std::pair<int, double> >(std::pair<int, double>&&) [clone .isra.0]
+     0.66%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] fedlp::LuFT::update(int, double const*)
+     0.60%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] fedlp::LuFT::factorize(fedlp::Model const&, std::vector<int, std::allocator<int> >&)
+     0.59%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] fedlp::PrimalSimplex::refactor(bool)
+     0.53%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] (anonymous namespace)::Solver::tableau_row(int)
+     0.52%  _multiarray_umath.cpython-314-x86_64-linux-gnu.so  [.] mapiter_get
+     0.49%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] std::pair<int, int>& std::vector<std::pair<int, int>, std::allocator<std::pair<int, int> > >::emplace_back<std::pair<int, int> >(std::pair<int, int>&&) [clone .isra.0]
+     0.46%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] (anonymous namespace)::Solver::solve()
+     0.45%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] fedlp::PrimalSimplex::compute_d()
+     0.39%  _multiarray_umath.cpython-314-x86_64-linux-gnu.so  [.] PyArray_Where
+     0.35%  python3.14                                         [.] _TAIL_CALL_STORE_FAST.llvm.17604914251042595471
+     0.34%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] void std::__introsort_loop<__gnu_cxx::__normal_iterator<int*, std::vector<int, std::allocator<int> > >, long, std::less<void> >(__gnu_cxx::__normal_iterator<int*, std::vector<int, std::allocator<int> > >, __gnu_cxx::__normal_iterator<int*, std::vector<int, std::allocator<int> > >, long, std::less<void>) [clone .isra.0]
+     0.32%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] fedlp::PrimalSimplex::sift()
+     0.29%  python3.14                                         [.] _PyObject_Free
+     0.28%  python3.14                                         [.] _PyObject_Malloc
+     0.28%  python3.14                                         [.] _TAIL_CALL_CALL_METHOD_DESCRIPTOR_FAST.llvm.17604914251042595471
+     0.27%  libc.so.6                                          [.] 0x00000000001b2593
+     0.26%  _multiarray_umath.cpython-314-x86_64-linux-gnu.so  [.] mapiter_trivial_get
+     0.24%  _multiarray_umath.cpython-314-x86_64-linux-gnu.so  [.] array_boolean_subscript
+     0.24%  _multiarray_umath.cpython-314-x86_64-linux-gnu.so  [.] prepare_index_noarray
+     0.20%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] fedlp::LuFT::apply_L_sparse(double*, std::vector<int, std::allocator<int> >&, std::vector<char, std::allocator<char> >&) const
+     0.20%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] void std::__adjust_heap<__gnu_cxx::__normal_iterator<int*, std::vector<int, std::allocator<int> > >, long, int, std::greater<int> >(__gnu_cxx::__normal_iterator<int*, std::vector<int, std::allocator<int> > >, long, long, int, std::greater<int>) [clone .isra.0]
+     0.19%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] fedlp::LuFT::ftran(fedlp::Model const&, int, double*)
+     0.19%  _multiarray_umath.cpython-314-x86_64-linux-gnu.so  [.] DOUBLE_not_equal_X86_V3
+     0.19%  python3.14                                         [.] _TAIL_CALL_CALL_BUILTIN_CLASS.llvm.17604914251042595471
+     0.19%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] fedlp::PrimalSimplex::compute_xb()
+     0.19%  _multiarray_umath.cpython-314-x86_64-linux-gnu.so  [.] array_subscript
+     0.18%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] fedlp::PrimalSimplex::eligible(int) const
+     0.18%  _multiarray_umath.cpython-314-x86_64-linux-gnu.so  [.] DOUBLE_divide_X86_V3
+     0.17%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] fedlp::PrimalSimplex::warm_start(std::vector<char, std::allocator<char> > const&)
+     0.16%  python3.14                                         [.] dict_get
+     0.15%  python3.14                                         [.] PyLong_FromLong
+     0.12%  python3.14                                         [.] _TAIL_CALL_LOAD_FAST_BORROW.llvm.17604914251042595471
+     0.12%  _multiarray_umath.cpython-314-x86_64-linux-gnu.so  [.] PyArray_Scalar
+     0.11%  python3.14                                         [.] _TAIL_CALL_FOR_ITER.llvm.17604914251042595471
+     0.11%  python3.14                                         [.] enum_next
+     0.10%  _multiarray_umath.cpython-314-x86_64-linux-gnu.so  [.] DOUBLE_subtract_X86_V3
+     0.10%  python3.14                                         [.] PyType_IsSubtype
+     0.10%  python3.14                                         [.] _TAIL_CALL_COMPARE_OP.llvm.17604914251042595471
+     0.10%  python3.14                                         [.] _TAIL_CALL_LOAD_GLOBAL_BUILTIN.llvm.17604914251042595471
+     0.10%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] (anonymous namespace)::Solver::objective() const
+     0.09%  python3.14                                         [.] _TAIL_CALL_BINARY_OP.llvm.17604914251042595471
+     0.08%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] fedlp::PrimalSimplex::pivot(int, int, double, double, bool, bool)
+     0.08%  libc.so.6                                          [.] 0x00000000000bc464
+     0.08%  python3.14                                         [.] list_dealloc
+     0.08%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] (anonymous namespace)::Solver::x() const
+     0.08%  _multiarray_umath.cpython-314-x86_64-linux-gnu.so  [.] array_assign_boolean_subscript
+     0.08%  _sparsetools.cpython-314-x86_64-linux-gnu.so       [.] coo_tocsr_thunk
+     0.08%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] void std::__introsort_loop<double*, long, std::less<void> >(double*, double*, long, std::less<void>) [clone .isra.0]
+     0.08%  python3.14                                         [.] listiter_next
+     0.08%  python3.14                                         [.] _TAIL_CALL_LOAD_ATTR_INSTANCE_VALUE.llvm.17604914251042595471
+     0.08%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] fedlp::PrimalSimplex::infeasibility() const
+     0.07%  python3.14                                         [.] long_and
+     0.07%  python3.14                                         [.] _TAIL_CALL_UNPACK_SEQUENCE_TWO_TUPLE.llvm.17604914251042595471
+     0.07%  _multiarray_umath.cpython-314-x86_64-linux-gnu.so  [.] DOUBLE_floor
+     0.07%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] (anonymous namespace)::Solver::rebuild(std::vector<int, std::allocator<int> > const&, (anonymous namespace)::Solver::NewRows const&)
+     0.06%  _multiarray_umath.cpython-314-x86_64-linux-gnu.so  [.] gentype_alloc
+     0.06%  python3.14                                         [.] _TAIL_CALL_COMPARE_OP_INT.llvm.17604914251042595471
+     0.06%  python3.14                                         [.] PyType_GenericAlloc
+     0.06%  _multiarray_umath.cpython-314-x86_64-linux-gnu.so  [.] PyArray_PyIntAsIntp
+     0.06%  _fedlp.cpython-314-x86_64-linux-gnu.so             [.] std::vector<int, std::allocator<int> >::_M_fill_assign(unsigned long, int const&)
+     0.06%  python3.14                                         [.] PyDict_GetItemRef
+     0.06%  python3.14                                         [.] _TAIL_CALL_FOR_ITER_LIST.llvm.17604914251042595471
+     0.06%  python3.14                                         [.] _TAIL_CALL_LOAD_CONST_IMMORTAL.llvm.17604914251042595471
+     0.06%  python3.14                                         [.] _Py_Dealloc
+     0.05%  python3.14                                         [.] long_dealloc
+     0.05%  python3.14                                         [.] split.llvm.10011190201979418180
+     0.05%  python3.14                                         [.] _TAIL_CALL_COMPARE_OP_STR.llvm.17604914251042595471
+     0.05%  _multiarray_umath.cpython-314-x86_64-linux-gnu.so  [.] DOUBLE_add_X86_V3
+
+
+#
+# (Tip: To not accumulate CPU time of children symbols add --no-children)
+#

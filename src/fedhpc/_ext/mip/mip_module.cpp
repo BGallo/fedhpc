@@ -89,6 +89,16 @@ PYBIND11_MODULE(_fedmip, mod) {
                  return p.change(cols.data(), nl.data(), nu.data(), (int)cols.size(), max_rounds);
              },
              py::arg("cols"), py::arg("lb"), py::arg("ub"), py::arg("max_rounds") = 20)
+        .def("changed_since",
+             [](Propagator& p, size_t level) {
+                 std::vector<int> js = p.changed_since(level);
+                 py::array_t<int> j(js.size());
+                 py::array_t<double> l(js.size()), u(js.size());
+                 for (size_t t = 0; t < js.size(); ++t)
+                     j.mutable_data()[t] = js[t], l.mutable_data()[t] = p.lb()[js[t]], u.mutable_data()[t] = p.ub()[js[t]];
+                 return py::make_tuple(j, l, u);
+             },
+             py::arg("level"))
         .def("lb", [](const Propagator& p) { return out(p.lb()); })
         .def("ub", [](const Propagator& p) { return out(p.ub()); })
         .def("bound", [](const Propagator& p, int j) { return py::make_tuple(p.lb()[j], p.ub()[j]); })

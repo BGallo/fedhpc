@@ -273,6 +273,39 @@ duals, reduced costs and weights carry over.
   pivot priced all 163 k columns of AF_N50_M2_R9 (0.85 ms a pivot).
 - **`phase1_limit`**: the MIP root tries the primal first on wide LPs and
   falls back to the dual past it.
+- **The dual pivot, profiled** (`scripts/profile.py`; AF_N50_M2_R4's node
+  LPs: rho 44 % dense, pivot rows of 85 k entries over 100 k columns):
+  - *Fused column-wise PRICE.* The candidates of the ratio test are
+    classified in the PRICE loop, which streams `st_`, `d_` in column
+    order (the separate pass gathered them at the row's scattered
+    entries); fixed columns are skipped (they never enter or flip; d is
+    recomputed when the phase ends). Ratio test on AF_N50_M2_R0 11.0 ->
+    2.9 s.
+  - *AVX2 ELLPACK dot products.* perf stat showed 3.7 instructions a cycle:
+    PRICE was instruction-bound, not memory-bound (a sign-packed +-1 copy
+    that halved the bytes was slower and was reverted). A padded 3-wide
+    ELLPACK copy (arcs, network-form columns, slacks and logicals have <= 3
+    entries) computes four dot products a step with gathers and FMAs,
+    dispatched at run time: PRICE -15 %.
+  - *Density-predicted L' in BTRAN.* The scatter-form L' with its heap was
+    6.7 % of the solve once rho ran dense; an exponential average of
+    BTRAN's result density now switches to the plain pass above 10 %
+    (HiGHS's approach).
+  - Cold dual LPs: AF_N50_M2_R0 37.6 -> 29.1 s, AF_N50_M5_R0 4.60 ->
+    3.82 s, TI_N50_M2_R0 20.3 -> 17.9 s; node pivots on AF_N50_M2_R4 ~600
+    -> ~490 us. pos_congestion's replay unchanged (2.81 s); the 964-job
+    replay 8.9 k -> 9.4 k pivots (FMA rounding changes the path).
+  - `Solver.set_bounds_many`: a node's domain in one call;
+    `solve_counted`: limits in, stats reset, (status, pivots, seconds) out,
+    one crossing per solve.
+- **Big LPs and the time limit.** Exact DSE initialisation is O(m^2) with
+  this factor (each BTRAN clears and copies O(m) vectors): a basis of
+  logicals now gets weight 1 directly, above `dse_exact_max_rows` (20 k)
+  the dual starts from unit weights, and the exact pass checks the clock
+  (gfd's 250 k-row root ran for hours). `out_of_budget()` reads the clock
+  every 64 calls rather than every 64 pivots, and a dual that refactors 5
+  times in a row without a pivot hands over to the primal
+  (physiciansched3-3 ran 400 s past a 120 s limit).
 
 ## Tried and rejected
 

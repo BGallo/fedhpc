@@ -43,18 +43,24 @@ def locks(P: MipProblem) -> tuple[np.ndarray, np.ndarray]:
 
 
 def simple_rounding(P: MipProblem, x: np.ndarray, down_locks, up_locks, tol: float = 1e-6):
-    y = x.copy()
-    ii = np.nonzero(P.integer)[0]
-    f = y[ii] - np.floor(y[ii])
+    """Round each fractional integer in a direction no row locks; None when
+    some fractional column is locked both ways (vectorised: it runs at every
+    node)."""
+    ii = P.int_idx if hasattr(P, "int_idx") else np.nonzero(P.integer)[0]
+    xi = x[ii]
+    f = xi - np.floor(xi)
     frac = (f > tol) & (f < 1 - tol)
-    for j in ii[frac]:
-        if down_locks[j] == 0:
-            y[j] = np.floor(y[j])
-        elif up_locks[j] == 0:
-            y[j] = np.ceil(y[j])
-        else:
-            return None
-    y[ii] = np.round(y[ii])
+    if not np.any(frac):
+        y = x.copy()
+        y[ii] = np.round(xi)
+        return y if P.is_feasible(y, tol) else None
+    fj = ii[frac]
+    dn, upk = down_locks[fj] == 0, up_locks[fj] == 0
+    if not np.all(dn | upk):
+        return None
+    y = x.copy()
+    y[ii] = np.round(xi)
+    y[fj] = np.where(dn, np.floor(x[fj]), np.ceil(x[fj]))
     return y if P.is_feasible(y, tol) else None
 
 

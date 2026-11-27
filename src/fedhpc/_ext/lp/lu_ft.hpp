@@ -239,13 +239,15 @@ public:
                 for (auto [c2, x] : urow_[p]) y[c2] -= x * zc;
             }
             apply_Rt_pattern(z.data(), nzb_, seenf_);
-            if ((int)nzb_.size() * 10 < m_) {
+            if ((int)nzb_.size() * 10 < m_ && lt_dense_ < 0.1) {
                 apply_Lt_sparse(z.data());   // appends the pivot rows it reaches
                 for (int i : nzb_) seenf_[i] = 0;
                 row_valid_ = true;
+                note_lt_density((double)nzb_.size() / m_);
             } else {
                 for (int i : nzb_) seenf_[i] = 0;
                 apply_Lt(z.data());
+                note_lt_density(z.data());
             }
             std::copy(z.begin(), z.end(), y);
             return;
@@ -265,15 +267,31 @@ public:
         }
         for (int i = 0; i < m_; ++i)
             if (z[i] != 0.0) nzb_.push_back(i);
-        if ((int)nzb_.size() * 10 < m_) {
+        if ((int)nzb_.size() * 10 < m_ && lt_dense_ < 0.1) {
             for (int i : nzb_) seenf_[i] = 1;
             apply_Lt_sparse(z.data());
             for (int i : nzb_) seenf_[i] = 0;
             row_valid_ = true;
+            note_lt_density((double)nzb_.size() / m_);
         } else {
             apply_Lt(z.data());
+            note_lt_density(z.data());
         }
         std::copy(z.begin(), z.end(), y);
+    }
+
+    // Predicted density of BTRAN's result (HiGHS's density-driven switch):
+    // the scatter-form L' with its heap pays per entry reached, so once the
+    // results run dense (AF_N50_M2_R4: rho 44 % of the rows, the heap 6.7 %
+    // of the solve) the plain pass over the etas is cheaper. An exponential
+    // average of the observed densities; the dense pass measures its result
+    // too, so the prediction follows the LP back to sparsity.
+    double lt_dense_ = 0.0;
+    void note_lt_density(double d) { lt_dense_ = 0.8 * lt_dense_ + 0.2 * d; }
+    void note_lt_density(const double* z) {
+        int c = 0;
+        for (int i = 0; i < m_; ++i) c += z[i] != 0.0;
+        note_lt_density((double)c / m_);
     }
 
     // L' in scatter form over the etas reached: popped in decreasing eta

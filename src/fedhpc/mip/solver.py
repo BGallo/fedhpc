@@ -32,12 +32,13 @@ import itertools
 import math
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
 from .branching import Pseudocosts, select_branch
-from .cuts import CutParams, CutPool, cmir_cuts, cover_cuts, gomory_cuts, implied_integers, zerohalf_cuts
+from .cuts import (CutParams, CutPool, cmir_cuts, cover_cuts, gomory_cuts, implied_integers, variable_bounds,
+                   zerohalf_cuts)
 from .heuristics import (feasibility_pump, fix_and_propagate, guided_dive, locks,
                          rens_problem, rins_problem, simple_rounding)
 from .lp import INFEASIBLE, ITERATION_LIMIT, OPTIMAL, UNBOUNDED, LpRelaxation
@@ -56,6 +57,7 @@ class MipOptions:
     int_tol: float = 1e-6
     feas_tol: float = 1e-6
     presolve: bool = True
+    presolve_options: dict = field(default_factory=dict)   # presolve()'s switches (doubletons=False, ...)
     cut_rounds: int = 15
     cuts_per_round: int = 200
     gomory: bool = True
@@ -122,6 +124,20 @@ class MipOptions:
     verbose: bool = True
     log_interval: float = 5.0
     sub_mip: bool = False                 # a heuristic's sub-MIP: no recursion, quiet
+    # reduced-cost fixing from the root LP at every new incumbent (_rc_fix)
+    rc_fixing: bool = True
+    # Root restart: when reduced-cost fixing (with the root's propagation)
+    # has fixed at least restart_min_fixed of the integer columns, the
+    # problem restricted to the root domain is presolved again (the fixed
+    # columns leave) and solved with the incumbent's value as cutoff - the
+    # MIP over lpfirst's eligible placements. No better solution there proves
+    # the incumbent optimal.
+    restart: bool = True
+    restart_min_fixed: float = 0.3
+    # an objective value (this problem's minimisation form) only strictly
+    # better solutions count against: the restart's sub-solve gets the
+    # parent's incumbent value
+    cutoff: float = INF
 
 
 @dataclass
@@ -226,15 +242,77 @@ class MipSolver:
             hs = self.stats["heuristic_solutions"]
             hs[source] = hs.get(source, 0) + 1
             self.log(f"incumbent {P.reported(v):.6g} from {source}", force=True)
+            self._rc_fix()
             return True
         return False
+
+    # ------------------------------------------------- reduced-cost fixing
+    def _save_root_duals(self) -> None:
+        """The root LP's reduced costs, the bounds they were taken at and
+        its value: what reduced-cost fixing reads for the rest of the solve."""
+        if not self.opt.rc_fixing:
+            return
+        lp = self.lp
+        _rs, cs = lp.get_basis()
+        n = self.P.n
+        self._rc = dict(d=lp.reduced_costs().copy(), z=float(lp.objective), lb=lp.lb.copy(), ub=lp.ub.copy(),
+                        st=np.asarray(cs[:n]).copy())
+        self._fixed_before_rc = int(np.sum(self.P.integer & (self.root_lb == self.root_ub)))
+        self._rc_fix()
+
+    def _rc_fix(self) -> None:
+        """Reduced-cost fixing on the global domain (the LP-first proof
+        carried into the tree). With the root LP's value z, reduced costs d
+        and the cutoff U (the incumbent, less one objective step when the
+        objective is integral), every solution better than the incumbent
+        satisfies, for a column nonbasic at its lower bound l with d_j > 0,
+
+            x_j <= l + (U - z) / d_j
+
+        (and symmetrically at an upper bound): its LP objective moves by at
+        least d_j per unit. lpfirst's step 3 is this with the eligible
+        placements as the columns left free. The root domain shrinks, is
+        propagated, and every node rebuilds its domain from it. Applied once
+        the root LP is done and at every new incumbent."""
+        rc = getattr(self, "_rc", None)
+        if rc is None or not np.isfinite(self.inc_obj):
+            return
+        P = self.P
+        gap = self._cutoff() - rc["z"]
+        if gap < 0:
+            return                      # the bound is at the incumbent: the tree closes it
+        d, st, l0, u0 = rc["d"], rc["st"], rc["lb"], rc["ub"]
+        tol = 1e-9
+        lb, ub = self.root_lb.copy(), self.root_ub.copy()
+        free = self.lp.free
+        at_lo = (st == 1) & (d > tol) & ~free & np.isfinite(l0)
+        at_up = (st == 2) & (d < -tol) & ~free & np.isfinite(u0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            nu = l0 + gap / np.where(at_lo, d, 1.0)
+            nl = u0 - gap / np.where(at_up, -d, 1.0)
+        nu = np.where(P.integer, np.floor(nu + 1e-9), nu)
+        nl = np.where(P.integer, np.ceil(nl - 1e-9), nl)
+        tu = at_lo & (nu < ub - 1e-9)
+        tl = at_up & (nl > lb + 1e-9)
+        if not (np.any(tu) or np.any(tl)):
+            return
+        ub[tu] = np.maximum(nu[tu], lb[tu])
+        lb[tl] = np.minimum(nl[tl], ub[tl])
+        res = self.prop.propagate(lb, ub, max_rounds=20)
+        self.stats["rc_fixed"] = self.stats.get("rc_fixed", 0) + int(tu.sum() + tl.sum())
+        if not res.feasible:
+            # nothing beats the incumbent anywhere: the solve is over
+            self._rc_closed = True
+            return
+        self.root_lb, self.root_ub = res.lb, res.ub
+        self.stats["rc_fixed_cols"] = int(np.sum(self.root_lb == self.root_ub))
 
     # --------------------------------------------------------------- solve
     def solve(self) -> MipResult:
         opt = self.opt
         P0 = self.original
         if opt.presolve:
-            P, self.post, pst = presolve(P0)
+            P, self.post, pst = presolve(P0, **opt.presolve_options)
             self.stats["presolve"] = {k: v for k, v in vars(pst).items()}
             if pst.status != "reduced":
                 return self._result(pst.status, None, INF if pst.status == "infeasible" else -INF)
@@ -243,6 +321,8 @@ class MipSolver:
             P = P0
             self.post = Postsolve(P0.n, np.arange(P0.n), np.zeros(P0.n), np.arange(P0.m))
         self.P = P
+        if np.isfinite(opt.cutoff):
+            self.inc_obj = float(opt.cutoff)
         self.log(f"presolved: {P.summary()}", force=True)
         if P.n == 0:
             self.incumbent, self.inc_obj = np.zeros(0), P.offset
@@ -284,10 +364,54 @@ class MipSolver:
                  f"{self.lp.stats.seconds:.2f}s)", force=True)
         with self._timed("root_cuts"):
             root_obj = self._root_cuts(root_obj)
+        self._save_root_duals()
         self.stats["root_bound"] = P.reported(root_obj)
         if opt.heuristics:
             self._root_heuristics()
+        if not self._gap_closed(root_obj) and self._restart_due():
+            return self._restart()
         return self._branch_and_bound(root_obj)
+
+    def _restart_due(self) -> bool:
+        opt, P = self.opt, self.P
+        if not (opt.restart and opt.rc_fixing) or not np.isfinite(self.inc_obj):
+            return False
+        ii = P.integer
+        n_int = int(ii.sum())
+        if n_int == 0 or self.elapsed() > 0.8 * opt.time_limit:
+            return False
+        fixed = int(np.sum(ii & (self.root_lb == self.root_ub)))
+        return fixed - self._fixed_before_rc >= opt.restart_min_fixed * n_int
+
+    def _restart(self) -> MipResult:
+        """Solve the problem restricted to the root domain again, from
+        presolve, with the incumbent's value as cutoff."""
+        opt, P = self.opt, self.P
+        Q = P.copy()
+        Q.lb, Q.ub = self.root_lb.copy(), self.root_ub.copy()
+        Q._csc = P._csc
+        left = self.deadline() - time.perf_counter()
+        self.log(f"restart: {int(np.sum(Q.lb == Q.ub))} of {P.n} columns fixed", force=True)
+        sub = MipSolver(Q, replace(opt, time_limit=max(1.0, left), restart=False, cutoff=self.inc_obj,
+                                   lp_options=dict(opt.lp_options)))
+        sub.t0 = time.perf_counter()
+        r = sub.solve()
+        self.stats["restart"] = {k: r.stats.get(k) for k in ("nodes", "root_bound", "lp_iterations",
+                                                             "presolve", "time", "heuristic_solutions")}
+        self.stats["restart"]["columns"] = int(sub.P.n) if hasattr(sub, "P") else None
+        self.stats["nodes"] = self.stats.get("nodes", 0) + r.nodes
+        for key in ("time", "pivots"):          # the sub-solve's phases count as ours
+            mine = self.stats.setdefault(key, {})
+            for k, v in (r.stats.get(key) or {}).items():
+                mine[k] = mine.get(k, 0) + v
+        if r.x is not None:
+            self._try(r.x, "restart")
+        if r.status in ("optimal", "infeasible"):
+            # nothing beats the incumbent outside what the sub-solve covered
+            return self._result("optimal", self.incumbent, self.inc_obj)
+        bound = Q.reported(r.bound) if np.isfinite(r.bound) else -INF
+        status = r.status if r.status != "error" else "error"
+        return self._result(status, self.incumbent, min(bound, self.inc_obj))
 
     def _root_lp(self) -> int:
         """The cold root LP, by ``root_lp`` (see MipOptions)."""
@@ -331,6 +455,7 @@ class MipSolver:
         stall, best = 0, root_obj
         t_cuts = time.perf_counter()
         impint = implied_integers(P)
+        vb = variable_bounds(P) if opt.cmir else None
         self.stats["implied_integers"] = int(impint.sum() - P.integer.sum())
         for rnd in range(opt.cut_rounds):
             if self.elapsed() > 0.5 * opt.time_limit or time.perf_counter() - t_cuts > opt.cut_time_share * opt.time_limit:
@@ -352,7 +477,7 @@ class MipSolver:
             if opt.cmir:
                 with self._timed("cmir"):
                     cuts += cmir_cuts(P, x, self.root_lb, self.root_ub, par,
-                                      deadline=time.perf_counter() + 0.02 * opt.time_limit)
+                                      deadline=time.perf_counter() + 0.02 * opt.time_limit, vb=vb)
             sel = pool.select(cuts, x, opt.cuts_per_round)
             if not sel:
                 break
@@ -483,6 +608,9 @@ class MipSolver:
         last_solved_seq = None
         status = "optimal"
         while heap or nxt is not None:
+            if getattr(self, "_rc_closed", False):
+                heap, nxt = [], None
+                break
             best_bound = min([n.bound for n in heap] + ([nxt.bound] if nxt else []))
             if self._gap_closed(best_bound):
                 break
@@ -629,6 +757,7 @@ class MipSolver:
         if lp_stats is not None:
             self.stats["lp_iterations"] = lp_stats.stats.iterations
             self.stats["lp_seconds"] = lp_stats.stats.seconds
+            self.stats["fedlp"] = dict(lp_stats.stats.fedlp)
         x = obj = None
         if x_red is not None and np.isfinite(self.inc_obj):
             x = self.post.expand(x_red)

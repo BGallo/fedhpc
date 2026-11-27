@@ -73,6 +73,8 @@ highs = [
 [package.dev-dependencies]
 dev = [
     { name = "highspy" },
+    { name = "py-spy" },
+    { name = "pybind11" },
     { name = "pytest" },
 ]
 
@@ -90,6 +92,8 @@ provides-extras = ["highs"]
 [package.metadata.requires-dev]
 dev = [
     { name = "highspy", specifier = ">=1.16" },
+    { name = "py-spy", specifier = ">=0.4.4" },
+    { name = "pybind11", specifier = ">=3.1.0" },
     { name = "pytest", specifier = ">=9.0.2" },
 ]
 
@@ -350,6 +354,31 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f9/e2/3e91f31a7d2b083fe6ef3fa267035b518369d9511ffab804f839851d2779/pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3", size = 69412, upload-time = "2025-05-15T12:30:07.975Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746", size = 20538, upload-time = "2025-05-15T12:30:06.134Z" },
+]
+
+[[package]]
+name = "py-spy"
+version = "0.4.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/59/6e/55358d97f53c187301e25e3c5f95fca6c161b3677209f3653ce6c08df05e/py_spy-0.4.4.tar.gz", hash = "sha256:f8999a122ca2e17875e76114216b3821429f22e0a5d76c10a0a3ff966dca5f3b", size = 423645, upload-time = "2026-11-19T19:09:26.831Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b9/80/e9036768469c3e139346593ad4d2593062c0a0816fd3d684ed227f50bd40/py_spy-0.4.4-py2.py3-none-macosx_10_12_universal2.macosx_10_12_x86_64.macosx_11_0_arm64.whl", hash = "sha256:d3d3acf5a0cfe7fa8f5b7101dc7d964832e6dc11b0e81877270a071b8ffd6ba0", size = 3758621, upload-time = "2026-11-19T19:09:14.413Z" },
+    { url = "https://files.pythonhosted.org/packages/a9/08/34c9581c548310bc0e5a61e50a1fea0d7a73b0558e11c1a5f6f6514d038e/py_spy-0.4.4-py2.py3-none-macosx_11_0_arm64.whl", hash = "sha256:8a5adbb5b3ef11bf5132edbd9f841052053abab572f18d3beec166c3f3c14790", size = 1866119, upload-time = "2026-11-19T19:09:15.976Z" },
+    { url = "https://files.pythonhosted.org/packages/c8/0d/7d93c04e7773b817394c03d35dd8aa5e1c8a5e2b08089fa1c48f81731e93/py_spy-0.4.4-py2.py3-none-manylinux1_i686.manylinux_2_5_i686.whl", hash = "sha256:1991e9d7dc55bd0a9239d91717aa9fba31068ff5269e1a66ac5041e98d0e2691", size = 2379220, upload-time = "2026-11-19T19:09:17.438Z" },
+    { url = "https://files.pythonhosted.org/packages/67/48/7e1e82c5e8f8d8c26c1c0be4e4ea47e546ea473ac56c7b69cf61b0495bd8/py_spy-0.4.4-py2.py3-none-manylinux1_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:286a9ab113d255ffc10bf7e7fe2ae78c82d0dedb95259888e72935cdbd8f41d2", size = 2985738, upload-time = "2026-11-19T19:09:18.927Z" },
+    { url = "https://files.pythonhosted.org/packages/79/d0/0099384c2fa7155eefa0713a4edc48115229e905c569577977e120edaa58/py_spy-0.4.4-py2.py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:a91503bfd625a8ebb304f02ebfe34dd8a5e9873043e6e39138d310840cec18cb", size = 2869099, upload-time = "2026-11-19T19:09:20.632Z" },
+    { url = "https://files.pythonhosted.org/packages/eb/29/0e400908ca1c377f5647d1fe87cc41a778e294d4abb74ceaf63ec0f942ce/py_spy-0.4.4-py2.py3-none-manylinux2014_armv7l.manylinux_2_17_armv7l.whl", hash = "sha256:b6a19affdc08b2080f1cd6a05b70865700b92b146c3423f57335e0c06866e3a0", size = 2898298, upload-time = "2026-11-19T19:09:22.095Z" },
+    { url = "https://files.pythonhosted.org/packages/b8/0b/2c2fde1c4532bccdc2fbe8856d6009698271360ef5083569d8d7e6e4e352/py_spy-0.4.4-py2.py3-none-win_amd64.whl", hash = "sha256:aaf9a921788fa48fcbc13068f8171af422eb2024888e70406a790fee3613555e", size = 1950123, upload-time = "2026-11-19T19:09:23.809Z" },
+    { url = "https://files.pythonhosted.org/packages/d9/6d/924760d0bf26c8b8eebb74c6753a6fc550b87a2dcaaed7da71cc5c5990fe/py_spy-0.4.4-py2.py3-none-win_arm64.whl", hash = "sha256:358c97827dfe53fb30e2068862367f3ee4bfacaec7a1ba37a184779a2a899dc3", size = 1826007, upload-time = "2026-11-19T19:09:25.491Z" },
+]
+
+[[package]]
+name = "pybind11"
+version = "3.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/76/f3/95b0f40b31df41dbfe6bb0857419c9442c15839cbac4796f1c26ae0b6081/pybind11-3.1.0.tar.gz", hash = "sha256:a1cc06b524ab3edca51f8ad3895f9c4fa20b8b19283173dff4ae781449dc9639", size = 603746, upload-time = "2026-08-06T23:33:00.675Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/33/fd/8762f7ee3e4e4be6d1d846cffb4916dd9bb02b2f800d3603718a0efe494c/pybind11-3.1.0-py3-none-any.whl", hash = "sha256:b8488090f8acffbcb6b5d6a85571a6827a0a2981ffb75e5a0b27b87c4a6b7dd0", size = 319402, upload-time = "2026-08-06T23:32:59.047Z" },
 ]
 
 [[package]]

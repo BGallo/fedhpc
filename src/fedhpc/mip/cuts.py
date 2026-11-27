@@ -275,7 +275,8 @@ def _mir(a: np.ndarray, b: float, isint: np.ndarray, xs: np.ndarray, delta: floa
 
 
 def cmir_cuts(P: MipProblem, x: np.ndarray, lb: np.ndarray, ub: np.ndarray, par: CutParams,
-              max_rows: int = 300, max_aggr: int = 5, deadline: float = np.inf) -> list[Cut]:
+              max_rows: int = 300, max_aggr: int = 5, deadline: float = np.inf,
+              vb: VarBounds | None = None) -> list[Cut]:
     """Complemented mixed-integer rounding cuts (Marchand & Wolsey 2001),
     the separator SCIP's and Gurobi's flow-cover and MIR cuts share.
 
@@ -300,15 +301,43 @@ def cmir_cuts(P: MipProblem, x: np.ndarray, lb: np.ndarray, ub: np.ndarray, par:
     fracint = P.integer & (np.abs(x - np.round(x)) > 1e-6)
     if not np.any(fracint):
         return []
-    rows = np.unique(C[:, np.nonzero(fracint)[0]].indices)
+    # base rows: tight rows holding a fractional integer, or a continuous
+    # column whose variable bound is on one (fixed-charge flow rows hold
+    # only flows; their binaries enter through the substitution)
+    seed = fracint.copy()
+    if vb is not None:
+        for kk in (vb.vlb_k, vb.vub_k):
+            has = kk >= 0
+            seed |= has & fracint[np.maximum(kk, 0)]
+    rows = np.unique(C[:, np.nonzero(seed)[0]].indices)
     rows = rows[tight_hi[rows] | tight_lo[rows]]
     if len(rows) == 0:
         return []
-    # fewest entries first: short rows give sparse cuts
+    # variable-bound rows (two entries, a continuous and an integer) are
+    # substitutions, not bases; then fewest entries first: short rows give
+    # sparse cuts
+    if vb is not None:
+        rn2 = np.diff(A.indptr)[rows] == 2
+        if np.any(rn2):
+            s0 = A.indptr[rows[rn2]]
+            c0, c1 = A.indices[s0], A.indices[s0 + 1]
+            vbrow = P.integer[c0] != P.integer[c1]
+            drop = np.zeros(len(rows), bool)
+            drop[np.nonzero(rn2)[0][vbrow]] = True
+            rows = rows[~drop]
     rows = rows[np.argsort(np.diff(A.indptr)[rows], kind="stable")][:max_rows]
     rn = np.diff(A.indptr)
-    inside = ~P.integer & (x > lb + 1e-6) & (x < ub - 1e-6)
-    dist = np.where(inside, np.minimum(x - lb, ub - x), 0.0)
+    # a continuous column is aggregated away when it sits strictly inside
+    # every bound it could be substituted by: simple and variable ones
+    with np.errstate(invalid="ignore"):
+        dist = np.minimum(np.where(np.isfinite(lb), x - lb, np.inf), np.where(np.isfinite(ub), ub - x, np.inf))
+        if vb is not None:
+            kl, ku = vb.vlb_k, vb.vub_k
+            dl = np.where(kl >= 0, x - (vb.vlb_d * x[np.maximum(kl, 0)] + vb.vlb_e), np.inf)
+            du = np.where(ku >= 0, vb.vub_d * x[np.maximum(ku, 0)] + vb.vub_e - x, np.inf)
+            dist = np.minimum(dist, np.minimum(dl, du))
+    inside = ~P.integer & (dist > 1e-6) & np.isfinite(dist)
+    dist = np.where(inside, dist, 0.0)
     dense = np.zeros(n)
     out = []
 
@@ -335,7 +364,7 @@ def cmir_cuts(P: MipProblem, x: np.ndarray, lb: np.ndarray, ub: np.ndarray, par:
                 coef = dense[cols]
                 nzm = np.abs(coef) > 1e-12
                 cols, coef = cols[nzm], coef[nzm]
-                cut = _cmir_from_row(cols, coef, rhs, P, x, lb, ub, par)
+                cut = _cmir_from_row(cols, coef, rhs, P, x, lb, ub, par, vb)
                 if cut is not None and (best is None or cut[0] > best[0]):
                     best = cut
                 # aggregate along the continuous column farthest inside
@@ -375,59 +404,175 @@ def cmir_cuts(P: MipProblem, x: np.ndarray, lb: np.ndarray, ub: np.ndarray, par:
     return out
 
 
-def _cmir_from_row(cols, coef, rhs, P, x, lb, ub, par):
-    """(efficacy, Cut) of the best c-MIR of  coef'x <= rhs, or None."""
+@dataclass
+class VarBounds:
+    """Variable bounds x_j >= d y_k + e (vlb) and x_j <= d y_k + e (vub) of
+    continuous columns, read off two-entry rows over a continuous and an
+    integer column (fixed-charge links x <= u y). k = -1: none."""
+    vlb_k: np.ndarray
+    vlb_d: np.ndarray
+    vlb_e: np.ndarray
+    vub_k: np.ndarray
+    vub_d: np.ndarray
+    vub_e: np.ndarray
+
+
+def variable_bounds(P: MipProblem) -> VarBounds:
+    n = P.n
+    vb = VarBounds(np.full(n, -1), np.zeros(n), np.zeros(n), np.full(n, -1), np.zeros(n), np.zeros(n))
+    A = P.A
+    rn = np.diff(A.indptr)
+    for i in np.nonzero(rn == 2)[0].tolist():
+        s0 = A.indptr[i]
+        (c0, c1), (a0, a1) = A.indices[s0:s0 + 2], A.data[s0:s0 + 2]
+        i0, i1 = P.integer[c0], P.integer[c1]
+        if i0 == i1:
+            continue
+        (j, aj, k, ak) = (c1, a1, c0, a0) if i0 else (c0, a0, c1, a1)
+        for side, bound in ((1, P.row_hi[i]), (-1, P.row_lo[i])):
+            if not np.isfinite(bound):
+                continue
+            d, e = -ak / aj, bound / aj
+            upper = (aj > 0) == (side > 0)            # aj x + ak y <= hi with aj > 0: x <= ...
+            if upper and vb.vub_k[j] < 0:
+                vb.vub_k[j], vb.vub_d[j], vb.vub_e[j] = k, d, e
+            elif not upper and vb.vlb_k[j] < 0:
+                vb.vlb_k[j], vb.vlb_d[j], vb.vlb_e[j] = k, d, e
+    return vb
+
+
+def _cmir_from_row(cols, coef, rhs, P, x, lb, ub, par, vb: VarBounds | None = None):
+    """(efficacy, Cut) of the best c-MIR of  coef'x <= rhs, or None.
+
+    Bound substitution: each continuous column goes to the closest of its
+    bounds - simple, or variable (x_j = d y_k + e -+ w with y_k integer,
+    whose coefficient then joins the integer part: the flow-cover
+    mechanism of fixed-charge models) - leaving a slack w >= 0; integers
+    are complemented to their nearer bound (z >= 0). MIR on
+    sum a_z z + sum a_w w <= b: the integer coefficients round with the
+    MIR function, only slacks with a_w < 0 stay (Marchand & Wolsey 2001)."""
     if len(cols) == 0:
         return None
-    l, u, xv = lb[cols], ub[cols], x[cols]
-    isint = P.integer[cols]
-    # bound substitution: v = x - l (lower) or u - x (upper, complemented)
-    use_up = np.where(np.isfinite(u) & (~np.isfinite(l) | (u - xv < xv - l)), True, False)
+    intc: dict[int, float] = {}
+    wterms = []                         # (a_w, const, [(col, coef)]): w = const + sum coef x_col
+    b = float(rhs)
+    for j, a in zip(cols.tolist(), coef.tolist()):
+        if P.integer[j]:
+            intc[j] = intc.get(j, 0.0) + a
+            continue
+        xj, l, u = x[j], lb[j], ub[j]
+        opts = []
+        if np.isfinite(l):
+            opts.append((xj - l, 1, "lb"))
+        if np.isfinite(u):
+            opts.append((u - xj, 1, "ub"))
+        if vb is not None and vb.vlb_k[j] >= 0:
+            k, d, e = int(vb.vlb_k[j]), vb.vlb_d[j], vb.vlb_e[j]
+            opts.append((xj - (d * x[k] + e), 0, "vlb"))
+        if vb is not None and vb.vub_k[j] >= 0:
+            k, d, e = int(vb.vub_k[j]), vb.vub_d[j], vb.vub_e[j]
+            opts.append((d * x[k] + e - xj, 0, "vub"))
+        if not opts:
+            return None
+        _dist, _p, kind = min(opts, key=lambda t: (t[0] - 1e-9 * (t[1] == 0), t[1]))
+        if kind == "lb":
+            b -= a * l
+            wterms.append((a, -l, [(j, 1.0)]))
+        elif kind == "ub":
+            b -= a * u
+            wterms.append((-a, u, [(j, -1.0)]))
+        elif kind == "vlb":
+            k, d, e = int(vb.vlb_k[j]), vb.vlb_d[j], vb.vlb_e[j]
+            intc[k] = intc.get(k, 0.0) + a * d
+            b -= a * e
+            wterms.append((a, -e, [(j, 1.0), (k, -d)]))
+        else:
+            k, d, e = int(vb.vub_k[j]), vb.vub_d[j], vb.vub_e[j]
+            intc[k] = intc.get(k, 0.0) + a * d
+            b -= a * e
+            wterms.append((-a, e, [(j, -1.0), (k, d)]))
+    if not intc:
+        return None
+    ic = np.fromiter(intc.keys(), dtype=np.int64)
+    ia = np.fromiter(intc.values(), dtype=float)
+    keep_i = np.abs(ia) > 1e-12
+    ic, ia = ic[keep_i], ia[keep_i]
+    if len(ic) == 0:
+        return None
+    l, u, xv = lb[ic], ub[ic], x[ic]
+    use_up = np.isfinite(u) & (~np.isfinite(l) | (u - xv < xv - l))
     if np.any(~use_up & ~np.isfinite(l)):
         return None
     bnd = np.where(use_up, u, l)
-    a = np.where(use_up, -coef, coef)
-    b = rhs - float(coef @ bnd)
-    vs = np.where(use_up, u - xv, xv - l)          # the point in v
+    az = np.where(use_up, -ia, ia)
+    b -= float(ia @ bnd)
+    zs = np.where(use_up, u - xv, xv - l)
     if not np.isfinite(b):
         return None
-    inner = isint & (vs > 1e-6) & (np.where(use_up, u - l, u - l) - vs > 1e-6)
+    inner = (zs > 1e-6) & ((u - l) - zs > 1e-6)
     if not np.any(inner):
         return None
-    cand = np.unique(np.abs(a[inner]))
+    aw = np.array([t[0] for t in wterms], float)
+    a_all = np.concatenate([az, aw])
+    isint_all = np.concatenate([np.ones(len(az), bool), np.zeros(len(aw), bool)])
+    cand = np.unique(np.abs(az[inner]))
     cand = cand[cand > 1e-6][-8:]
     deltas = list(cand) + [1.0]
-    best = None
+    n = P.n
 
     def evaluate(delta):
-        r = _mir(a, b, isint, vs, delta, par.gomory_min_frac)
+        r = _mir(a_all, b, isint_all, None, delta, par.gomory_min_frac)
         if r is None:
             return None
         g, beta = r
-        # back to x: v = x - l -> g x, beta + g l; v = u - x -> -g x, beta - g u
-        pi = np.where(use_up, -g, g)
-        bt = beta + float(np.sum(np.where(use_up, -g * u, g * l)))
-        viol = float(pi @ xv) - bt
+        gz, gw = g[:len(az)], g[len(az):]
+        dense: dict[int, float] = {}
+        bt = beta
+        # z = x - l -> g x (rhs + g l); z = u - x -> -g x (rhs - g u)
+        for k, gk, up, lk, uk in zip(ic.tolist(), gz.tolist(), use_up.tolist(), l.tolist(), u.tolist()):
+            if gk == 0.0:
+                continue
+            if up:
+                dense[k] = dense.get(k, 0.0) - gk
+                bt -= gk * uk
+            else:
+                dense[k] = dense.get(k, 0.0) + gk
+                bt += gk * lk
+        # w = const + sum coef x
+        for (aw_t, const, terms), gt in zip(wterms, gw.tolist()):
+            if gt == 0.0:
+                continue
+            bt -= gt * const
+            for cc, cf in terms:
+                dense[cc] = dense.get(cc, 0.0) + gt * cf
+        cc = np.fromiter(dense.keys(), dtype=np.int64)
+        pi = np.fromiter(dense.values(), dtype=float)
+        nz = np.abs(pi) > 1e-12
+        cc, pi = cc[nz], pi[nz]
+        if len(cc) == 0:
+            return None
+        viol = float(pi @ x[cc]) - bt
         nrm = float(np.linalg.norm(pi))
         if nrm <= 0 or viol <= 0:
             return None
-        return viol / nrm, pi, bt
+        return viol / nrm, cc, pi, bt
 
+    best = None
     for d in deltas:
         e = evaluate(d)
         if e is not None and (best is None or e[0] > best[0]):
-            best = (e[0], d, e[1], e[2])
+            best = (e[0], d) + e[1:]
     if best is None:
         return None
     d0 = best[1]
     for k in (2.0, 4.0, 8.0):
         e = evaluate(d0 / k)
         if e is not None and e[0] > best[0]:
-            best = (e[0], d0 / k, e[1], e[2])
-    _eff, _d, pi, bt = best
-    keep = pi != 0
+            best = (e[0], d0 / k) + e[1:]
+    _eff, _d, cc, pi, bt = best
+    del n
     # pi'x <= bt  as  -pi'x >= -bt
-    cut = _finish(lb, ub, cols[keep], -pi[keep], -bt, par, "cmir")
+    cut = _finish(lb, ub, cc, -pi, -bt, par, "cmir")
     if cut is None:
         return None
     return cut.efficacy(x), cut
@@ -449,8 +594,9 @@ def implied_integers(P: MipProblem, rounds: int = 5) -> np.ndarray:
     intcoef_e = np.abs(A.data - np.round(A.data)) < 1e-9
     rr = np.repeat(np.arange(P.m), np.diff(A.indptr))
     unit = np.abs(np.abs(A.data) - 1.0) < 1e-12
-    int_bounds = ((~np.isfinite(P.lb)) | (np.abs(P.lb - np.round(P.lb)) < 1e-9)) & \
-        ((~np.isfinite(P.ub)) | (np.abs(P.ub - np.round(P.ub)) < 1e-9))
+    with np.errstate(invalid="ignore"):
+        int_bounds = ((~np.isfinite(P.lb)) | (np.abs(P.lb - np.round(P.lb)) < 1e-9)) & \
+            ((~np.isfinite(P.ub)) | (np.abs(P.ub - np.round(P.ub)) < 1e-9))
     for _ in range(rounds):
         # per row: number of entries not (integral coefficient on an implied-integer column)
         bad_e = ~(intcoef_e & imp[A.indices])

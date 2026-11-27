@@ -95,6 +95,10 @@ public:
     const int* col_idx(int j) const { return idx_.data() + start_[j]; }
     const double* col_val(int j) const { return val_.data() + start_[j]; }
     const std::vector<RowEntry>& row(int r) const { return rows_[r]; }
+    // the column store's raw arrays (CSC over every column, logicals first)
+    const int* col_starts() const { return start_.data(); }
+    const int* idx_data() const { return idx_.data(); }
+    const double* val_data() const { return val_.data(); }
 
     // y' a_j
     double dot(const double* y, int j) const {
