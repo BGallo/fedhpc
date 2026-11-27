@@ -66,7 +66,8 @@ class CutParams:
     max_parallelism: float = 0.99
     gomory_rows: int = 100
     gomory_min_frac: float = 0.01
-    gomory_max_support: float = 0.5       # fraction of columns
+    gomory_max_support: float = 0.5       # fraction of columns ...
+    gomory_min_support_cap: int = 1000    # ... but never below this many (small problems take dense GMI)
 
 
 def _finish(lb: np.ndarray, ub: np.ndarray, cols: np.ndarray, coef: np.ndarray, rhs: float,
@@ -167,7 +168,8 @@ def _gmi_from_row(lp: LpRelaxation, P: MipProblem, row, dense: np.ndarray, par: 
     nz = g > 1e-12
     cmask, lmask = nz & is_col, nz & ~is_col
     jc, gc, uc = row.index[cmask], g[cmask], row.at_upper[cmask]
-    if len(jc) > par.gomory_max_support * P.n + 10:
+    cap = max(par.gomory_max_support * P.n + 10, par.gomory_min_support_cap)
+    if len(jc) > cap:
         return None                           # too dense before the logicals add more
     # sum g_k v'_k >= 1  ->  pi'x >= 1 - const
     if np.any(uc & ~np.isfinite(ub[jc])) or np.any(~uc & ~np.isfinite(lb[jc])):
@@ -193,7 +195,7 @@ def _gmi_from_row(lp: LpRelaxation, P: MipProblem, row, dense: np.ndarray, par: 
     cols = np.flatnonzero(dense)
     coef = dense[cols].copy()
     dense[cols] = 0.0
-    if len(cols) == 0 or len(cols) > par.gomory_max_support * P.n + 10:
+    if len(cols) == 0 or len(cols) > cap:
         return None
     return _finish(lb, ub, cols, coef, 1.0 - const, par, "gomory")
 

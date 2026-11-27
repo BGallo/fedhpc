@@ -478,3 +478,66 @@ def test_cmir_with_variable_bounds_on_fixed_charge(seed):
             break
         _check_mixed_cuts(P, cuts)
         lp.add_rows([(c.cols, c.coef, c.rhs, INF) for c in cuts])
+
+
+# ------------------------------------------------------------------ cliques
+def packing_ip(rng, n=7, m=5):
+    """Binaries with knapsack and set-packing rows (cliques to find)."""
+    A = np.zeros((m, n))
+    lo, hi = np.full(m, -INF), np.zeros(m)
+    for i in range(m):
+        cols = rng.sample(range(n), rng.randint(2, n))
+        if rng.random() < 0.4:
+            A[i, cols] = 1.0
+            hi[i] = 1.0
+        else:
+            for j in cols:
+                A[i, j] = rng.choice([-1, 1]) * rng.randint(1, 6)
+            hi[i] = rng.randint(1, 8)
+    c = np.array([-rng.randint(1, 9) for _ in range(n)], float)
+    return MipProblem(sp.csr_matrix(A), lo, hi, np.zeros(n), np.ones(n), c, np.ones(n, bool))
+
+
+@pytest.mark.parametrize("seed", range(60))
+def test_cliques_hold_for_every_feasible_point(seed):
+    from fedhpc.mip.cliques import CliqueTable, probe_cliques, row_cliques
+    from fedhpc.mip.propagate import Propagator
+    rng = random.Random(9500 + seed)
+    P = packing_ip(rng, rng.randint(4, 8), rng.randint(2, 6))
+    pts = list(integer_points(P))
+    t = CliqueTable(P.n)
+    row_cliques(P, P.lb, P.ub, t)
+    probe_cliques(P, Propagator(P), P.lb, P.ub, t)
+    for c in t.cliques:
+        j, neg = c // 2, c % 2
+        for x in pts:
+            vals = np.where(neg == 1, 1 - x[j], x[j])
+            assert vals.sum() <= 1 + 1e-9, (c, x)
+
+
+@needs_lp
+@pytest.mark.parametrize("seed", range(60))
+def test_clique_cuts_valid_and_violated(seed):
+    from fedhpc.mip.cliques import CliqueTable, clique_cuts, probe_cliques, row_cliques
+    from fedhpc.mip.cuts import CutParams
+    from fedhpc.mip.lp import OPTIMAL, LpRelaxation
+    from fedhpc.mip.propagate import Propagator
+    rng = random.Random(9700 + seed)
+    P = packing_ip(rng, rng.randint(5, 9), rng.randint(3, 7))
+    pts = list(integer_points(P))
+    t = CliqueTable(P.n)
+    row_cliques(P, P.lb, P.ub, t)
+    probe_cliques(P, Propagator(P), P.lb, P.ub, t)
+    lp = LpRelaxation(P)
+    for _round in range(3):
+        if lp.solve() != OPTIMAL:
+            break
+        x = lp.x()
+        cuts = clique_cuts(t, x, P.lb, P.ub, CutParams(min_efficacy=1e-7))
+        for cut in cuts:
+            assert cut.violation(x) > 0
+            for pt in pts:
+                assert cut.coef @ pt[cut.cols] >= cut.rhs - 1e-7, cut
+        if not cuts:
+            break
+        lp.add_rows([(c.cols, c.coef, c.rhs, INF) for c in cuts])

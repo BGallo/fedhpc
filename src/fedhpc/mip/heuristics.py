@@ -15,6 +15,9 @@
   bounded to their LP value's floor and ceiling (Berthold 2014).
 - ``rins``: a sub-MIP with the integers fixed where the LP point and the
   incumbent agree (Danna, Rothberg & Le Pape 2005).
+- ``feasibility_jump``: LP-free weighted local search (Luteberget & Sartor
+  2023), in C++ (``_ext/mip/fj.hpp``); from 0 before the root LP, from the
+  rounded LP point after it.
 
 All work on the problem the solver holds (presolved), never on its LP's
 state permanently: the dive restores bounds and basis.
@@ -423,3 +426,23 @@ def _continuous_completion_costs(P, lp, y, lb, ub, set_obj, c0):
         return z if P.is_feasible(z) else None
     finally:
         lp.set_bounds(lb, ub)
+
+
+def feasibility_jump(P: MipProblem, lb: np.ndarray, ub: np.ndarray, x0: np.ndarray | None = None,
+                     work: int = 20_000_000, seed: int = 0, obj_weight: float = 0.0):
+    """Feasibility Jump (see ``_ext/mip/fj.hpp``) over the domain [lb, ub];
+    a point feasible for P, or None."""
+    try:
+        from .. import _fedmip
+    except ImportError:  # pragma: no cover
+        return None
+    A = P.A.tocsr()
+    found, x, _obj, _steps, _work = _fedmip.feasibility_jump(
+        P.m, P.n, A.indptr.astype(np.int32), A.indices.astype(np.int32), A.data.astype(float),
+        P.row_lo.astype(float), P.row_hi.astype(float), np.asarray(lb, float), np.asarray(ub, float),
+        P.integer.astype(np.int8), P.c.astype(float), None if x0 is None else np.asarray(x0, float),
+        int(work), int(seed), float(obj_weight))
+    if not found:
+        return None
+    x = np.asarray(x)
+    return x if P.is_feasible(x) else None

@@ -35,16 +35,18 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 
 import numpy as np
+import scipy.sparse as sp
 
 from .branching import Pseudocosts, select_branch
 from .cuts import (CutParams, CutPool, cmir_cuts, cover_cuts, gomory_cuts, implied_integers, variable_bounds,
                    zerohalf_cuts)
-from .heuristics import (feasibility_pump, fix_and_propagate, guided_dive, locks,
+from .heuristics import (feasibility_jump, feasibility_pump, fix_and_propagate, guided_dive, locks,
                          rens_problem, rins_problem, simple_rounding)
 from .lp import INFEASIBLE, ITERATION_LIMIT, OPTIMAL, UNBOUNDED, LpRelaxation
 from .presolve import presolve
 from .problem import INF, MipProblem
 from .propagate import Propagator
+from .cliques import CliqueTable, clique_cuts, clique_rows, probe_cliques, row_cliques
 from .scheduling import best_schedule, detect as detect_schedule, orders as schedule_orders
 
 
@@ -58,13 +60,38 @@ class MipOptions:
     feas_tol: float = 1e-6
     presolve: bool = True
     presolve_options: dict = field(default_factory=dict)   # presolve()'s switches (doubletons=False, ...)
-    cut_rounds: int = 15
+    cut_rounds: int = 50
     cuts_per_round: int = 200
     gomory: bool = True
     covers: bool = True
     cmir: bool = True
     zerohalf: bool = True
+    # clique table (cliques.py): cliques from rows and from probing
+    # implications (within clique_probe_budget propagator entry visits),
+    # clique cuts in the root loop, and the cliques that are not rows handed
+    # to the propagator
+    # Feasibility Jump (heuristics.feasibility_jump): before the root LP
+    # from the domain's zero point, after it from the LP point; work in
+    # entry visits per call (deterministic)
+    fj: bool = True
+    fj_work: int = 20_000_000
+    # conflict analysis on nodes that propagation proves infeasible
+    conflicts: bool = True
+    conflict_max_depth: int = 40         # binary decisions on the path analysed at most
+    conflict_max_size: int = 12          # longer nogoods are dropped
+    conflict_batch: int = 25             # nogoods per propagator rebuild
+    cliques: bool = True
+    clique_probe_budget: int = 2_000_000
+    clique_propagation: bool = True
+    # rounds without bound progress before the loop stops: on degenerate
+    # LPs violated cuts move the vertex for several rounds before the bound
+    # moves (neos-911970: 23.3 -> 48.2 with 12, flat with 3), so LPs that
+    # solve in under cut_cheap_lp_seconds get cut_stall_rounds_cheap
     cut_stall_rounds: int = 3
+    cut_stall_rounds_cheap: int = 12
+    cut_cheap_lp_seconds: float = 0.5
+    cut_rounds_expensive: int = 15       # the round cap when the root LP is not cheap
+    cut_cheap_max_nnz: int = 50000       # "cheap" also needs a small matrix (Kramer's TI: 16 s of rounds for nothing)
     cut_min_improvement: float = 1e-4     # relative bound gain counting as progress
     cut_time_share: float = 0.1           # the root cut loop stops past this share of the limit
     heuristics: bool = True
@@ -348,8 +375,15 @@ class MipSolver:
                 with self._timed("list_schedule"):
                     xs, _v = best_schedule(P, self.sched, schedule_orders(self.sched), 0.0, improve=False)
                 self._try(xs, "list_schedule")
+        if opt.heuristics and opt.fj and not opt.sub_mip and self.sched is None:
+            # (scheduling structure: list scheduling after the LP does better)
+            with self._timed("feasibility_jump"):
+                self._try(feasibility_jump(P, self.root_lb, self.root_ub, None, self._fj_work()), "feasibility_jump")
         with self._timed("root_lp"):
             st = self._root_lp()
+        if opt.cliques:
+            with self._timed("cliques"):
+                self._build_cliques()
         if st != OPTIMAL and self.lp.past_deadline():
             return self._result("time_limit", None, -INF)
         if st == INFEASIBLE:
@@ -413,6 +447,32 @@ class MipSolver:
         status = r.status if r.status != "error" else "error"
         return self._result(status, self.incumbent, min(bound, self.inc_obj))
 
+    def _fj_work(self) -> int:
+        """Feasibility Jump's budget: fj_work, at most 100 passes over A."""
+        return int(min(self.opt.fj_work, 100 * max(1, self.P.A.nnz)))
+
+    def _build_cliques(self) -> None:
+        """The clique table from rows and probing; cliques that are not rows
+        go to a propagator over P plus those rows."""
+        opt, P = self.opt, self.P
+        t = CliqueTable(P.n)
+        nr = row_cliques(P, self.root_lb, self.root_ub, t)
+        npb = probe_cliques(P, self.prop, self.root_lb, self.root_ub, t, budget=opt.clique_probe_budget,
+                            deadline=time.perf_counter() + 0.05 * opt.time_limit) if opt.clique_probe_budget else 0
+        self.cliques = t
+        self.stats["cliques"] = {"rows": nr, "probing": npb, "total": t.size}
+        if opt.clique_propagation:
+            extra = clique_rows(t, P.n)
+            if extra is not None:
+                A2, lo2, hi2 = extra
+                Q = MipProblem(sp.vstack([P.A, A2], format="csr"), np.r_[P.row_lo, lo2], np.r_[P.row_hi, hi2],
+                               P.lb, P.ub, P.c, P.integer)
+                self.prop = Propagator(Q, feas_tol=opt.feas_tol)
+                self.stats["cliques"]["propagator_rows"] = int(A2.shape[0])
+                res = self.prop.propagate(self.root_lb, self.root_ub)
+                if res.feasible:
+                    self.root_lb, self.root_ub = res.lb, res.ub
+
     def _root_lp(self) -> int:
         """The cold root LP, by ``root_lp`` (see MipOptions)."""
         opt, P, lp = self.opt, self.P, self.lp
@@ -431,7 +491,11 @@ class MipSolver:
             if lp.net is not None:
                 cold()
             return lp.solve()
-        if self.incumbent is None or not lp.basis_from_point(self.incumbent):
+        # a crash from a point only when a schedule heuristic produced it
+        # (schedule_crash): Feasibility Jump's points are merely feasible, and
+        # the primal from them took 65 s on TI_N50_M2_R9 against 0.6 s cold
+        crash_pt = self.incumbent if (opt.schedule_crash and self.stats["heuristic_solutions"].get("list_schedule")) else None
+        if crash_pt is None or not lp.basis_from_point(crash_pt):
             cold()
         o = lp.lp.options
         saved = (o.dual, o.partial_min_cols, o.phase1_limit)
@@ -453,11 +517,17 @@ class MipSolver:
         par = CutParams()
         pool = CutPool(par)
         stall, best = 0, root_obj
+        # (scheduling structures keep the short loop: the list-scheduling
+        # path does not need the long one, which cost AF_N20 1.3 s for nothing)
+        cheap = (self.stats.get("time", {}).get("root_lp", INF) < opt.cut_cheap_lp_seconds
+                 and P.A.nnz < opt.cut_cheap_max_nnz and getattr(self, "sched", None) is None)
+        patience = opt.cut_stall_rounds_cheap if cheap else opt.cut_stall_rounds
+        max_rounds = opt.cut_rounds if cheap else min(opt.cut_rounds, opt.cut_rounds_expensive)
         t_cuts = time.perf_counter()
         impint = implied_integers(P)
         vb = variable_bounds(P) if opt.cmir else None
         self.stats["implied_integers"] = int(impint.sum() - P.integer.sum())
-        for rnd in range(opt.cut_rounds):
+        for rnd in range(max_rounds):
             if self.elapsed() > 0.5 * opt.time_limit or time.perf_counter() - t_cuts > opt.cut_time_share * opt.time_limit:
                 break
             x = lp.x()
@@ -470,6 +540,9 @@ class MipSolver:
                 cuts += gomory_cuts(lp, P, x, par, impint)
             if opt.covers:
                 cuts += cover_cuts(P, x, self.root_lb, self.root_ub, par)
+            if opt.cliques and self.cliques.size:
+                with self._timed("clique_cuts"):
+                    cuts += clique_cuts(self.cliques, x, self.root_lb, self.root_ub, par)
             if opt.zerohalf:
                 with self._timed("zerohalf"):
                     cuts += zerohalf_cuts(P, x, self.root_lb, self.root_ub, par, impint,
@@ -496,7 +569,7 @@ class MipSolver:
             self.log(f"cut round {rnd + 1}: {len(sel)} cuts, bound {P.reported(obj):.6g}", force=True)
             if obj - best <= opt.cut_min_improvement * max(1.0, abs(best)):
                 stall += 1
-                if stall >= opt.cut_stall_rounds:
+                if stall >= patience:
                     best = max(best, obj)
                     break
             else:
@@ -524,6 +597,10 @@ class MipSolver:
         x = lp.x()
         end = min(self.deadline(), time.perf_counter() + 0.3 * opt.time_limit)
         self._try(simple_rounding(P, x, self.down_locks, self.up_locks), "rounding")
+        if opt.fj and not opt.sub_mip and self.sched is None:
+            with self._timed("feasibility_jump"):
+                self._try(feasibility_jump(P, self.root_lb, self.root_ub, x, self._fj_work(), seed=1,
+                                           obj_weight=1.0 if self.incumbent is not None else 0.0), "feasibility_jump")
         if self.sched is not None:
             budget = min(5.0, opt.schedule_root_share * opt.time_limit)
             with self._timed("list_schedule"):
@@ -596,6 +673,76 @@ class MipSolver:
             return None
         return prop.lb(), prop.ub()
 
+    # ----------------------------------------------------- conflict analysis
+    def _infeasible(self, decisions) -> bool:
+        prop = self.prop
+        prop.reset(self.root_lb, self.root_ub, propagate=False)
+        if not decisions:
+            return False
+        js = np.fromiter((j for j, _u, _v in decisions), dtype=np.int64, count=len(decisions))
+        lo = np.array([v if up else -INF for _j, up, v in decisions])
+        hi = np.array([INF if up else v for _j, up, v in decisions])
+        return not prop.change(js, lo, hi, max_rounds=10)
+
+    def _learn_conflict(self, node: _Node) -> None:
+        """Conflict analysis by propagation (the deletion filter of
+        conflict-set minimisation; Achterberg 2007, ch. 11, without the
+        implication graph): the node's binary branching decisions are
+        reduced, one at a time, to a set D that still propagates to an empty
+        domain, giving the nogood
+
+            sum_{x_j = 1 in D} (1 - x_j) + sum_{x_j = 0 in D} x_j >= 1,
+
+        valid for the whole problem. Nogoods are batched into the
+        propagator's rows (never the LP's), so later nodes fail earlier."""
+        opt, P = self.opt, self.P
+        binary = P.integer & (self.root_lb == 0) & (self.root_ub == 1)
+        dec = [d for d in node.path if binary[d[0]]]
+        if len(dec) != len(node.path) or not dec or len(dec) > opt.conflict_max_depth:
+            return                                  # general-integer bounds: no clause
+        if not self._infeasible(dec):
+            return
+        D = list(dec)
+        k = 0
+        while k < len(D):
+            trial = D[:k] + D[k + 1:]
+            if trial and self._infeasible(trial):
+                D = trial
+            else:
+                k += 1
+        if len(D) > opt.conflict_max_size:
+            return
+        key = tuple(sorted((j, up) for j, up, _v in D))
+        pool = self.__dict__.setdefault("_conflicts", {})
+        if key in pool:
+            return
+        pool[key] = D
+        self.stats["conflicts"] = len(pool)
+        pending = self.__dict__.setdefault("_conflicts_pending", [])
+        pending.append(D)
+        if len(pending) >= opt.conflict_batch:
+            self._install_conflicts()
+
+    def _install_conflicts(self) -> None:
+        pending = self.__dict__.get("_conflicts_pending") or []
+        if not pending:
+            return
+        P = self.P
+        ri, ci, vi, lo = [], [], [], []
+        for r, D in enumerate(pending):
+            # up (x = 1) contributes 1 - x, down (x = 0) contributes x
+            n1 = sum(1 for _j, up, _v in D if up)
+            for j, up, _v in D:
+                ri.append(r), ci.append(j), vi.append(-1.0 if up else 1.0)
+            lo.append(1.0 - n1)
+        C = sp.csr_matrix((vi, (ri, ci)), shape=(len(pending), P.n))
+        base = self.prop.P
+        Q = MipProblem(sp.vstack([base.A, C], format="csr"), np.r_[base.row_lo, lo],
+                       np.r_[base.row_hi, np.full(len(pending), INF)], P.lb, P.ub, P.c, P.integer)
+        self.prop = Propagator(Q, feas_tol=self.opt.feas_tol)
+        self._conflicts_pending = []
+        self.stats["conflict_rows"] = self.stats.get("conflict_rows", 0) + len(pending)
+
     def _branch_and_bound(self, root_obj: float) -> MipResult:
         opt, P, lp = self.opt, self.P, self.lp
         pc = Pseudocosts(P.n, opt.reliability)
@@ -634,6 +781,8 @@ class MipSolver:
             dom = self._domain(node)
             if dom is None:
                 self.stats["infeasible_nodes"] += 1
+                if opt.conflicts:
+                    self._learn_conflict(node)
                 continue
             lb, ub = dom
             lp.set_bounds(lb, ub)
@@ -656,14 +805,21 @@ class MipSolver:
                 self.stats["infeasible_nodes"] += 1
                 continue
             if st != OPTIMAL:
-                # cannot bound this node: keep it unpruned by branching on
-                # the most fractional of the last LP point would be unsafe
-                # without a bound, so it stays with its parent's bound
-                self.stats.setdefault("lp_failures", 0)
-                self.stats["lp_failures"] += 1
-                status = "error"
-                heapq.heappush(heap, node)
-                break
+                # the LP failed (numerics): the node keeps its parent's bound,
+                # which is valid, and is split on its widest open integer
+                # column; with none open its bound is kept for the result
+                self.stats["lp_failures"] = self.stats.get("lp_failures", 0) + 1
+                open_int = np.nonzero(P.integer & (ub > lb))[0]
+                if len(open_int) == 0:
+                    self._lost_bound = min(getattr(self, "_lost_bound", INF), node.bound)
+                    continue
+                j = int(open_int[np.argmax(ub[open_int] - lb[open_int])])
+                v = 0.5 * (lb[j] + ub[j]) if np.isfinite(ub[j] - lb[j]) else (lb[j] + 1 if np.isfinite(lb[j]) else ub[j] - 1)
+                fv = math.floor(v)
+                for side in ((j, False, fv), (j, True, fv + 1)):
+                    heapq.heappush(heap, _Node(node.bound, -(node.depth + 1), next(seq), node.depth + 1,
+                                               node.path + (side,), None, None, node.parent_obj))
+                continue
             obj = self._round_bound(lp.objective)
             if node.branch is not None and np.isfinite(node.parent_obj):
                 j, up, chg = node.branch
@@ -746,6 +902,11 @@ class MipSolver:
             status = "time_limit"
         if status == "optimal" and not np.isfinite(self.inc_obj):
             status = "infeasible"
+        lost = getattr(self, "_lost_bound", INF)
+        if lost < INF:
+            bound = min(bound, lost)
+            if status == "optimal" and not self._gap_closed(bound):
+                status = "time_limit"        # a node that could not be solved stays open
         if np.isfinite(self.inc_obj):
             bound = min(bound, self.inc_obj)
         return self._result(status, self.incumbent, bound)

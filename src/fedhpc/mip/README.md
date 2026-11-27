@@ -181,6 +181,16 @@ heuristic schedule's basis (``LpRelaxation.basis_from_point``: inside
 columns basic, matched to rows of their own support, unmatched rows'
 logicals basic) starts the primal in phase 2.
 
+**Clique table** (`cliques.py`): cliques from rows (the conflicting prefix
+of a sorted knapsack side; Atamtürk, Nemhauser & Savelsbergh 2000) and from
+probing implications, separated greedily as clique cuts and handed to the
+propagator as extra rows. **Conflict analysis** on propagation-infeasible
+nodes: the deletion filter shrinks the path's binary decisions to a nogood,
+batched into the propagator. **Feasibility Jump** (Luteberget & Sartor
+2023, C++ `_ext/mip/fj.hpp`): LP-free weighted local search before and
+after the root LP. A node LP that fails numerically is split on its widest
+integer column with its parent's bound, instead of ending the solve.
+
 **Heuristics added:**
 - fix-and-propagate as a depth-first search with conflict-directed
   backjumping (Prosser 1993): on a dead end, back to the latest decision
@@ -263,6 +273,25 @@ crossings, the feasibility-check fix):
 - MIPLIB general: the engine's weakest family - fixed charge and network
   design need flow-path and network cuts, the knapsack families stronger
   MIR; presolve depth changes little there yet (A/B in `general_v1`).
+
+**v9** (`k20_v9`, `k50_mip_v9`, `k100_v4`, `general_v5`: clique table,
+Feasibility Jump, propagation conflicts, the Gomory support fix, the
+adaptive cut loop, node-LP failure recovery):
+
+| Set | Limit | fedhpc.mip v9 | v6 | HiGHS | Gurobi |
+|---|---|---|---|---|---|
+| Kramer N = 20 (18) | 60 s | 18/18, 0.71 s | 0.65 s | 18/18, 1.40 s | 18/18, 0.48 s |
+| Kramer N = 50 + MIPLIB sched/pack (28) | 120 s | 14/28, 24.0 s | 23.8 s | 15/28, 30.3 s | 22/28, 12.0 s |
+| Kramer N = 100 (18) | 120 s | 10/18, 53.5 s | 47.8 s | 6/18, 65.8 s | 11/18, 26.1 s |
+| MIPLIB general (24) | 60 s | 2/24, mean gap 0.28 | 1/24, 0.29 | 12/24, 0.11 | 14/24, 0.09 |
+
+On the general set the incumbents moved most: mas74 11,891 (HiGHS
+12,015), mas76 at the optimum, gen-ip054 6,854 (HiGHS 6,856), neos-911970
+57.2 (was 74 at the root), exp-1-500-5-5 and pg solved. The scheduling sets
+keep v6's level: Feasibility Jump and the long cut loop are off when a
+scheduling structure is detected (they cost AF_N20 1.3 s for nothing), and
+the primal root no longer crashes from a Feasibility Jump point (65 s
+against 0.6 s on TI_N50_M2_R9).
 
 **A correctness fix.** `MipProblem.violations` computed a one-sided row's
 infinite side as -inf / inf = NaN, and np.maximum then hid the other side's
@@ -428,6 +457,81 @@ general MILP, with what it would take here.
    for cold roots instead).
 6. *Heuristic portfolio scheduled by success* (item 6), *branching scores
    with conflicts and inference* (item 7).
+
+## Architecture against HiGHS, SCIP and Gurobi, and the plan
+
+**Measured at the root** (`miplib_general`, one node each; % of the gap
+between the LP bound and the optimum closed; HiGHS 1.16 `mip_max_nodes=1`,
+Gurobi 13 `NodeLimit=1`, which includes its root heuristics and restarts):
+
+| Instance | fedhpc.mip before | after this round | HiGHS | Gurobi |
+|---|---|---|---|---|
+| mas76 / mas74 | 0 / 0 | 8.3 / 7.2 | 15.2 / 10.1 | 15.5 / 9.0 |
+| assign1-5-8 | 0 | 9.4 | 37.1 | 30.2 |
+| neos5 | 4.2 | **21.5** | 15.9 | 17.3 |
+| neos-911970 | 0 | 79 (23.3 -> 48.2) | 94.9 | 0 |
+| beasleyC3 | 45 | 57 | 95.2 | 98.1 |
+| p200x1188c / sp150x300d | 18 / 56 | 18 / 60 | 100 / 100 | 100 / 100 |
+| exp-1-500-5-5 / tr12-30 | 96.8 / 92.5 | 96.8 / 92.5 | 100 / 99.7 | 80.2 / 99.1 |
+
+The two biggest root fixes were mechanical: Gomory cuts were rejected on
+every small problem by a support cap meant for the 40 k-column arc-flow
+LPs (now: half the columns, but never below 1,000), and the cut loop
+stopped after 3 rounds without bound progress, where on degenerate LPs
+violated cuts move the vertex for several rounds before the bound moves
+(now 12 rounds when the root LP is cheap; neos-911970's root went from
+23.3 to 48.2).
+
+**Components, side by side** (HiGHS from its MIP solver sources and
+Bernhard et al.'s design; SCIP from Achterberg 2007 and the SCIP
+Optimization Suite reports; Gurobi from its documentation and logs):
+
+| | fedhpc.mip | HiGHS | SCIP | Gurobi |
+|---|---|---|---|---|
+| Language / structure | Python orchestration, C++ LP and propagation | C++ | C, plug-ins | C, closed |
+| Presolve | removals, FBBT, dual fixing, coefficient tightening, doubletons, free singletons, parallel rows, probing | + dominated columns, sparsification, clique merging, implied integers | + symmetry, many more | the most extensive |
+| Clique table | rows + probing, cuts, propagation | yes (central: propagation, cuts, conflicts) | yes | yes |
+| Cuts | GMI, cover, zero-half, c-MIR (VUB, aggregation), clique; root only | tableau (GMI), path MIR, mod-k, clique, implied bound; root + cut pool in tree | ~20 separators, in tree | ~20, network/flow path, in tree |
+| Conflicts | propagation nogoods (deletion filter) | conflict pool from propagation and LP | graph + dual-proof conflicts | yes |
+| Heuristics | rounding, FJ, fix-and-propagate (backjumping), dives, pump, RENS, RINS, list scheduling | FJ, randomized/central/ZI rounding, shifting, pump, RENS, RINS | ~50, ALNS | many, parallel |
+| Branching / search | reliability pseudocosts, best bound with plunging, RC fixing, restart | reliability + inference, hybrid estimate, restarts | hybrid scores, best estimate | proprietary |
+| Symmetry | none | orbitopes, orbital fixing | full | yes |
+| LP | own dual/primal simplex, warm DSE, no scaling | own dual simplex, IPX for cold LPs | SoPlex | primal/dual/barrier/concurrent |
+
+**Biggest levers for general MIP (to match HiGHS), in order:**
+1. *Flow and path cuts on fixed-charge/network models* (p200x1188c,
+   sp150x300d, mc11, beasleyC3: HiGHS's path separator and Gurobi's flow
+   cover/flow path/network cuts close 95-100 % at the root, we 18-60 %).
+   Our c-MIR substitutes variable bounds but the links' big-M (x <= 3950 y
+   in p200x1188c) is uniform; path aggregation across several nodes with
+   the bound substitution chosen per path is what is missing.
+2. *Search speed on small LPs*: HiGHS processes nodes in tens of
+   microseconds of overhead, we in ~0.5 ms of Python bookkeeping plus the
+   LP (the Python/C++ section above); the C++ node engine is the fix.
+3. *LP-infeasibility conflicts* (dual proofs from fedlp's Farkas row),
+   which is where csched-like trees fail; propagation nogoods alone found
+   none on csched008.
+4. *Cuts in the tree* with a pool and ageing.
+5. *Symmetry* for the bin-packing instances.
+6. *Huge LPs* (gfd, physiciansched): scaling, crash, IPX for cold roots.
+
+**Arc-flow and time-indexed scheduling against Gurobi.** Where we stand:
+level or ahead on TI with many machines or late release dates, ahead on
+TI_N100_M2_R0, behind on M = 2 with early releases (Gurobi proves
+AF_N50_M2_R0 at its root node in 52 s; we end at 0.13-0.14 %). What is
+missing there:
+- *Node LP speed*: AF child LPs need 100-11 k dual pivots at ~0.45 ms (3x
+  Gurobi's per pivot); restarts after reduced-cost fixing shrink them by
+  72-95 %, which closed most of the N = 50 M = 5 gap.
+- *Root bound*: Gurobi's root adds +16 on AF_N50_M5_R4 against our +4
+  (zero-half, Gomory, MIR, clique); the gap left is mostly the zero-half
+  separator's reach (it caps rows and columns) and cuts in the tree.
+- *Branching on time*: SOS/GUB branching on a job's start time (split its
+  placements at the LP's mean start: Sousa & Wolsey 1992; van den Akker,
+  Hurkens & Savelsbergh 2000) balances TI/AF trees far better than
+  variable branching; not implemented.
+- *Column generation for N >= 100*: lpfirst's pricing avoids building all
+  placements; the MIP builds them all (TI_N100_M2: 32 MB of MPS).
 
 ## Analysis: what the engine has, what it lacks
 

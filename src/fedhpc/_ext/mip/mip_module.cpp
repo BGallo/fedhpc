@@ -4,6 +4,7 @@
 #include <pybind11/stl.h>
 
 #include "propagate.hpp"
+#include "fj.hpp"
 
 namespace py = pybind11;
 using fedmip::Propagator;
@@ -31,6 +32,31 @@ void check(const Propagator& p, const arr<double>& lb, const arr<double>& ub) {
 }  // namespace
 
 PYBIND11_MODULE(_fedmip, mod) {
+    mod.def(
+        "feasibility_jump",
+        [](int m, int n, arr<int> indptr, arr<int> indices, arr<double> data, arr<double> row_lo, arr<double> row_hi,
+           arr<double> lb, arr<double> ub, arr<int8_t> integer, arr<double> c, py::object x0, long long max_work,
+           unsigned long long seed, double obj_weight) {
+            if (indptr.size() != m + 1 || row_lo.size() != m || lb.size() != n || c.size() != n)
+                throw std::invalid_argument("inconsistent sizes");
+            std::vector<char> it(integer.data(), integer.data() + n);
+            fedmip::FeasibilityJump fj(m, n, indptr.data(), indices.data(), data.data(), row_lo.data(),
+                                       row_hi.data(), lb.data(), ub.data(), it.data(), c.data());
+            std::vector<double> start;
+            if (!x0.is_none()) {
+                arr<double> a = x0.cast<arr<double>>();
+                start.assign(a.data(), a.data() + a.size());
+            }
+            fedmip::FJResult r;
+            {
+                py::gil_scoped_release nogil;
+                r = fj.run(start.empty() ? nullptr : start.data(), max_work, seed, obj_weight);
+            }
+            return py::make_tuple(r.found, r.found ? out(r.x) : py::array_t<double>(0), r.objective, r.steps, r.work);
+        },
+        py::arg("m"), py::arg("n"), py::arg("indptr"), py::arg("indices"), py::arg("data"), py::arg("row_lo"),
+        py::arg("row_hi"), py::arg("lb"), py::arg("ub"), py::arg("integer"), py::arg("c"), py::arg("x0"),
+        py::arg("max_work"), py::arg("seed") = 0, py::arg("obj_weight") = 0.0);
     mod.doc() = "fedhpc.mip kernels: event-driven domain propagation with a bound trail";
     py::class_<Propagator>(mod, "Propagator")
         .def(py::init([](int m, int n, arr<int> indptr, arr<int> indices, arr<double> data, arr<double> row_lo,

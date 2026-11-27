@@ -46,6 +46,9 @@ VARIANTS = {
     "no_heuristics": {"heuristics": False},
     "no_rc_fixing": {"rc_fixing": False},
     "no_restart": {"restart": False},
+    "no_cliques": {"cliques": False},
+    "no_conflicts": {"conflicts": False},
+    "no_fj": {"fj": False},
 }
 
 
