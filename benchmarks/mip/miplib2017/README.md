@@ -3,7 +3,9 @@
 Source: <https://miplib.zib.de/download>. Downloaded 2026-11-26.
 
 - `benchmark-v2.zip` and extracted `benchmark-v2/`: official 240-instance
-  benchmark, not the full MIPLIB collection.
+  benchmark, not the full MIPLIB collection. These files are kept locally,
+  not in Git. Download `https://miplib.zib.de/downloads/benchmark.zip` as
+  `benchmark-v2.zip` and extract it into `benchmark-v2/` to run the suite.
 - `benchmark-v2.test`: official 240-name roster.
 - `easy-v19.test`, `hard-v31.test`, `open-v30.test`: official status lists
   dated 2026-09-24. They refer to the **whole collection**, not just the

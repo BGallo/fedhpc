@@ -50,3 +50,8 @@ BaPTree.dot
 # Local installer and benchmark archive
 /cos_installer_preview-22.2.0.0.R1-M113VML-linux-x86-64.bin
 /benchmarks/mip/miplib2017/benchmark-v2.zip
+
+# Downloaded benchmark data and generated solver recordings
+/benchmarks/mip/miplib2017/benchmark-v2/
+/results/mip_bench/mps/
+/results/lp_replay/
